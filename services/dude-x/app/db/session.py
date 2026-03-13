@@ -1,4 +1,5 @@
 """Async database engine and session."""
+import os
 import re
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
@@ -13,6 +14,8 @@ _ASYNCPG_STRIP_PARAMS = {"sslmode", "channel_binding", "sslrootcert"}
 def _async_database_url() -> str:
     url = settings.database_url or ""
     if not url:
+        if os.getenv("VERCEL") == "1" or settings.app_env in ("production", "preview"):
+            raise RuntimeError("DATABASE_URL is required in production; set it in the environment")
         return "sqlite+aiosqlite:///./dude_x.db"
     if url.startswith("postgresql://") or url.startswith("postgres://"):
         url = re.sub(r"^postgres(ql)?://", "postgresql+asyncpg://", url)

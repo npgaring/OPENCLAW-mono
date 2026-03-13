@@ -19,10 +19,10 @@ class Settings(BaseSettings):
         extra="ignore",
     )
 
-    database_url: str | None = Field(None, description="PostgreSQL URL (postgres:// or postgresql://); optional on serverless until configured")
-    openclaw_base_url: str | None = Field(None, description="Executor base URL")
-    openclaw_api_key: str | None = Field(None, description="Bearer token for executor")
-    integration_api_key: str | None = Field(None, description="Authenticates callers; used to sign execution tokens")
+    database_url: str | None = Field(default=None, description="PostgreSQL URL (postgres:// or postgresql://); optional on serverless until configured")
+    openclaw_base_url: str | None = Field(default=None, description="Executor base URL")
+    openclaw_api_key: str | None = Field(default=None, description="Bearer token for executor")
+    integration_api_key: str | None = Field(default=None, description="Authenticates callers; used to sign execution tokens")
     app_env: str = Field(default="development", description="development | preview | production")
     log_level: str = Field(default="info", description="Log level")
 
