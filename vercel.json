@@ -15,6 +15,7 @@
     { "src": "/dude-x/(.*)", "dest": "services/dude-x/app/main.py" },
     { "src": "/openclaw-integration/?", "dest": "services/openclaw-integration/app/main.py" },
     { "src": "/openclaw-integration/(.*)", "dest": "services/openclaw-integration/app/main.py" },
-    { "src": "/", "dest": "/index.html" }
+    { "src": "/", "dest": "/index.html" },
+    { "src": "/(.*)", "dest": "/index.html" }
   ]
 }
