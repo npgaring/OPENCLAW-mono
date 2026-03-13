@@ -37,4 +37,5 @@ jobs:
             fi
           done
           echo "Deploy failed after 3 attempts."
+          echo "→ Check the 'Inspect:' URL in the log above (Vercel dashboard) for the real build error under Build / Logs."
           exit 1
