@@ -15,7 +15,10 @@ async def root():
         heading="DUDE-X",
         description="Compile-only deterministic planner for spec validation and plan expansion.",
         actions=[
+            {"label": "Back to Main", "href": "/", "kind": "ghost"},
             {"label": "Swagger UI", "href": "/docs", "kind": "primary"},
+            {"label": "ReDoc", "href": "/redoc", "kind": "secondary"},
+            {"label": "Health", "href": "/health", "kind": "secondary"},
             {"label": "OpenAPI JSON", "href": "/openapi.json", "kind": "secondary"},
             {"label": "Privacy", "href": "/privacy", "kind": "ghost"},
         ],

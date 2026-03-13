@@ -23,6 +23,7 @@ async def root():
         heading="OpenClaw Integration",
         description="Governance-gated layer between callers and the runtime executor.",
         actions=[
+            {"label": "Back to Main", "href": "/", "kind": "ghost"},
             {"label": "Swagger UI", "href": "/docs", "kind": "primary"},
             {"label": "ReDoc", "href": "/redoc", "kind": "secondary"},
             {"label": "Health", "href": "/health", "kind": "secondary"},

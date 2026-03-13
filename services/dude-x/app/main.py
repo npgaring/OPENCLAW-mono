@@ -52,7 +52,7 @@ app = FastAPI(
     title="DUDE-X",
     description="Compile-only deterministic planner",
     version="1.0.0",
-    redoc_url=None,
+    redoc_url="/redoc",
     docs_url="/docs",
     root_path=DUDEX_ROOT_PATH or "",
     lifespan=lifespan,
@@ -108,6 +108,7 @@ async def validation_error_handler(request: Request, exc: RequestValidationError
 app.include_router(compile_api.router, dependencies=[Depends(verify_api_key)])
 app.include_router(plans.router, dependencies=[Depends(verify_api_key)])
 app.include_router(gate.router, dependencies=[Depends(verify_api_key)])
-app.include_router(health.router, dependencies=[Depends(verify_api_key)])
+# Public
+app.include_router(health.router)
 app.include_router(root.router)
 app.include_router(privacy.router)
