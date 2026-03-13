@@ -11,7 +11,7 @@ _ENV_PATH = _PROJECT_ROOT / ".env"
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
         env_prefix="",
-        case_sensitive=True,
+        case_sensitive=False,  # allow DATABASE_URL in uppercase on Vercel
         env_file=_ENV_PATH if _ENV_PATH.exists() else None,
         env_file_encoding="utf-8",
         extra="forbid",
