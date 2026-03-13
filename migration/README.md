@@ -1,6 +1,8 @@
 # Database migrations (shared Neon PostgreSQL)
 
-Run these against your blank Neon database in order. Use the same `DATABASE_URL` for dude-x, openclaw-integration, and openclaw-execution.
+**Migrations run automatically on every deploy:** both `openclaw-integration` and `dude-x` run the relevant SQL files at app startup when `DATABASE_URL` points to PostgreSQL. No manual step needed for Vercel or other hosts.
+
+You can still run these manually against your Neon database (same `DATABASE_URL` for dude-x, openclaw-integration, and openclaw-execution):
 
 1. **001_dude_x_tables.sql** — Creates `specs`, `plans`, and `compile_events` (dude-x schema).
 2. **002_add_identity_columns.sql** — Idempotent: adds `identity` to `specs`/`plans` if missing.
