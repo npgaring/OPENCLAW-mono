@@ -37,7 +37,7 @@ test(runtime): add parallel K8s job execution test
 
 - Every PR must **reference a ticket number** in the title (e.g. `[OC-123] Add canonical hash assertion`).
 - Every PR must **include or update tests** — no test-free merges for non-docs changes.
-- **Security-sensitive changes** (token-service, gate-service, runtime-worker) require explicit security reviewer sign-off.
+- **Security-sensitive changes** (openclaw-integration, runtime-worker) require explicit security reviewer sign-off.
 - **No force-push** to `develop` or `main` after CI has started.
 - PR description must include: **what changed**, **why**, **how to test**, **rollback plan**.
 
