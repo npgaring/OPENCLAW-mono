@@ -46,5 +46,7 @@ def get_sessionmaker():
 
 
 async def get_session():
+    from app.db.init_db import ensure_db_ready
+    await ensure_db_ready()
     async with get_sessionmaker()() as session:
         yield session

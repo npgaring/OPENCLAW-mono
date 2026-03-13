@@ -1,4 +1,5 @@
 """FastAPI app: startup, routes, OpenAPI override."""
+import logging
 import os
 from contextlib import asynccontextmanager
 
@@ -10,6 +11,8 @@ from app.core.auth import require_integration_auth
 from app.db.init_db import init_db
 from app.logging.logger import configure_logging
 
+logger = logging.getLogger(__name__)
+
 OPENCLAW_ROOT_PATH = os.getenv("OPENCLAW_INTEGRATION_ROOT_PATH")
 if not OPENCLAW_ROOT_PATH and os.getenv("VERCEL") == "1":
     OPENCLAW_ROOT_PATH = "/openclaw-integration"
@@ -17,9 +20,12 @@ if not OPENCLAW_ROOT_PATH and os.getenv("VERCEL") == "1":
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Run on every cold start (Vercel serverless)."""
+    """Run on every cold start (Vercel serverless). Migrations also run on first request if this fails."""
     configure_logging()
-    await init_db()
+    try:
+        await init_db()
+    except Exception as e:
+        logger.warning("Startup init_db failed (migrations will run on first request): %s", e)
     yield
 
 

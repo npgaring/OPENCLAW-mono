@@ -1,10 +1,18 @@
-"""GET /, GET /privacy — HTML."""
+"""GET /, GET /privacy, GET /migrate — HTML and migration trigger."""
 from fastapi import APIRouter
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, JSONResponse
 
 from app.ui.html import render_page
 
 router = APIRouter()
+
+
+@router.get("/migrate")
+async def run_migrate():
+    """Run DB migrations (idempotent). Call after deploy to ensure tables exist. No auth required."""
+    from app.db.init_db import ensure_db_ready
+    await ensure_db_ready()
+    return JSONResponse(content={"status": "ok", "message": "Migrations run"})
 
 
 @router.get("/", response_class=HTMLResponse)
