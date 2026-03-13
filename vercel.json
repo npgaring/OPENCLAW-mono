@@ -1,7 +1,20 @@
 {
+  "version": 2,
   "git": {
     "deploymentEnabled": {
       "main": false
     }
-  }
+  },
+  "builds": [
+    { "src": "services/dude-x/app/main.py", "use": "@vercel/python" },
+    { "src": "services/openclaw-integration/app/main.py", "use": "@vercel/python" }
+  ],
+  "routes": [
+    { "handle": "filesystem" },
+    { "src": "/dude-x/?", "dest": "services/dude-x/app/main.py" },
+    { "src": "/dude-x/(.*)", "dest": "services/dude-x/app/main.py" },
+    { "src": "/openclaw-integration/?", "dest": "services/openclaw-integration/app/main.py" },
+    { "src": "/openclaw-integration/(.*)", "dest": "services/openclaw-integration/app/main.py" },
+    { "src": "/", "dest": "/index.html" }
+  ]
 }

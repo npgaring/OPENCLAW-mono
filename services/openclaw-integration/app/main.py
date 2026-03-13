@@ -1,4 +1,6 @@
 """FastAPI app: startup, routes, OpenAPI override."""
+import os
+
 from fastapi import Depends, FastAPI
 from fastapi.openapi.utils import get_openapi
 
@@ -7,12 +9,33 @@ from app.core.auth import require_integration_auth
 from app.db.init_db import init_db
 from app.logging.logger import configure_logging
 
+OPENCLAW_ROOT_PATH = os.getenv("OPENCLAW_INTEGRATION_ROOT_PATH")
+if not OPENCLAW_ROOT_PATH and os.getenv("VERCEL") == "1":
+    OPENCLAW_ROOT_PATH = "/openclaw-integration"
+
+
+class PrefixMiddleware:
+    def __init__(self, app, prefix: str):
+        self.app = app
+        self.prefix = prefix.rstrip("/") if prefix != "/" else ""
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] in ("http", "websocket") and self.prefix:
+            path = scope.get("path", "")
+            if path.startswith(self.prefix):
+                scope = dict(scope)
+                scope["root_path"] = self.prefix
+                scope["path"] = path[len(self.prefix):] or "/"
+        await self.app(scope, receive, send)
+
+
 app = FastAPI(
     title="OpenClaw Integration",
     description="Governance-gated layer between callers and runtime executor",
     version="1.0.0",
     docs_url="/docs",
     redoc_url="/redoc",
+    root_path=OPENCLAW_ROOT_PATH or "",
 )
 
 
@@ -31,7 +54,11 @@ def custom_openapi():
         description=app.description,
         routes=app.routes,
     )
-    schema["servers"] = [{"url": "https://openclaw-integration.example.com", "description": "Production"}]
+    public_base = os.getenv("OPENCLAW_PUBLIC_BASE_URL")
+    if public_base:
+        schema["servers"] = [{"url": f"{public_base}{OPENCLAW_ROOT_PATH or ''}", "description": "Production"}]
+    elif os.getenv("VERCEL") == "1" and OPENCLAW_ROOT_PATH:
+        schema["servers"] = [{"url": f"https://openclaw-mono.vercel.app{OPENCLAW_ROOT_PATH}", "description": "Production"}]
     schema.setdefault("components", {}).setdefault("securitySchemes", {})["bearerAuth"] = {
         "type": "http",
         "scheme": "bearer",
@@ -49,6 +76,8 @@ def custom_openapi():
 
 
 app.openapi = custom_openapi
+if OPENCLAW_ROOT_PATH:
+    app.add_middleware(PrefixMiddleware, prefix=OPENCLAW_ROOT_PATH)
 
 # Protected routes (Bearer)
 app.include_router(task.router, tags=["task"], dependencies=[Depends(require_integration_auth)])
