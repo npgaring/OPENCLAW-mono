@@ -1,4 +1,12 @@
 """FastAPI app: routers, exception handlers, startup."""
+import sys
+from pathlib import Path
+
+# Vercel runs from repo root; entrypoint is services/dude-x/app/main.py
+_svc_root = Path(__file__).resolve().parent.parent
+if str(_svc_root) not in sys.path:
+    sys.path.insert(0, str(_svc_root))
+
 import os
 from contextlib import asynccontextmanager
 

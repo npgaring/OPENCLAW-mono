@@ -1,4 +1,12 @@
 """FastAPI app: startup, routes, OpenAPI override."""
+import sys
+from pathlib import Path
+
+# Vercel runs from repo root; entrypoint is services/openclaw-integration/app/main.py
+_svc_root = Path(__file__).resolve().parent.parent
+if str(_svc_root) not in sys.path:
+    sys.path.insert(0, str(_svc_root))
+
 import logging
 import os
 from contextlib import asynccontextmanager
@@ -97,7 +105,3 @@ app.include_router(status.router, tags=["status"], dependencies=[Depends(require
 # Public
 app.include_router(health.router, tags=["health"])
 app.include_router(public.router, tags=["public"])
-</think>
-Fixing main: we included routers twice. Applying a single include with dependencies:
-<｜tool▁calls▁begin｜><｜tool▁call▁begin｜>
-StrReplace

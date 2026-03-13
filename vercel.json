@@ -6,6 +6,7 @@
     }
   },
   "builds": [
+    { "src": "public/**", "use": "@vercel/static" },
     { "src": "services/dude-x/app/main.py", "use": "@vercel/python" },
     { "src": "services/openclaw-integration/app/main.py", "use": "@vercel/python" }
   ],
