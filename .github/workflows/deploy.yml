@@ -27,7 +27,7 @@ jobs:
           root="${{ vars.VERCEL_ROOT_DIR || '.' }}"
           for attempt in 1 2 3; do
             echo "Deploy attempt $attempt/3..."
-            if (cd "$root" && npx vercel@25.1.0 --prod --token "$VERCEL_TOKEN" --yes); then
+            if (cd "$root" && npx vercel@25.1.0 --prod --token "$VERCEL_TOKEN"); then
               echo "Deploy succeeded."
               exit 0
             fi
