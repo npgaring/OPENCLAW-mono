@@ -1,80 +1,28 @@
+# Deploy to Vercel on push to main. To enable:
+# 1. In repo Settings → Secrets and variables → Actions, add:
+#    - VERCEL_TOKEN (from Vercel: Account Settings → Tokens)
+# 2. Optional: VERCEL_ORG_ID, VERCEL_PROJECT_ID (from project .vercel/project.json or Vercel dashboard)
+# 3. Create variable ENABLE_DEPLOY = true
+# Until then, this workflow is skipped so pushes to main don't fail.
 name: Deploy
 
 on:
   push:
     branches: [main]
 
-env:
-  ECR_REPO_NAME: ${{ vars.ECR_REPO_NAME || 'openclaw' }}
-  SERVICES: spec-service compiler-service gate-service token-service ledger-service runtime-worker
-
 jobs:
-  build-and-push:
-    runs-on: ubuntu-latest
-    outputs:
-      registry: ${{ steps.ecr.outputs.registry }}
-    steps:
-      - uses: actions/checkout@v4
-      - name: Configure AWS for ECR
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region: ${{ vars.AWS_REGION || 'us-east-1' }}
-      - name: Login to ECR
-        id: ecr
-        uses: aws-actions/amazon-ecr-login@v2
-      - name: Build and push service images
-        run: |
-          for svc in ${{ env.SERVICES }}; do
-            if [ -d "services/$svc" ]; then
-              docker build -t ${{ steps.ecr.outputs.registry }}/${{ env.ECR_REPO_NAME }}/$svc:$GITHUB_SHA services/$svc/
-              docker push ${{ steps.ecr.outputs.registry }}/${{ env.ECR_REPO_NAME }}/$svc:$GITHUB_SHA
-            fi
-          done
-
-  deploy-staging:
-    needs: [build-and-push]
-    runs-on: ubuntu-latest
-    outputs:
-      registry: ${{ needs.build-and-push.outputs.registry }}
-    env:
-      REGISTRY: ${{ needs.build-and-push.outputs.registry }}
-    steps:
-      - uses: actions/checkout@v4
-      - name: Set up kubectl
-        uses: azure/setup-kubectl@v3
-      - name: Deploy to staging
-        env:
-          KUBECONFIG: ${{ secrets.KUBE_CONFIG_STAGING }}
-        run: |
-          for svc in ${{ env.SERVICES }}; do
-            kubectl set image deployment/$svc $svc=${{ env.REGISTRY }}/${{ vars.ECR_REPO_NAME || 'openclaw' }}/$svc:$GITHUB_SHA -n staging --record 2>/dev/null || true
-          done
-          kubectl rollout status deployment -n staging --timeout=5m
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-      - name: E2E against staging
-        run: |
-          pip install pytest
-          pytest tests/e2e/ -v --env staging
-
   deploy-prod:
-    needs: [deploy-staging]
-    environment: production
+    if: vars.ENABLE_DEPLOY == 'true'
+    environment: Production
     runs-on: ubuntu-latest
-    env:
-      REGISTRY: ${{ needs.deploy-staging.outputs.registry }}
     steps:
       - uses: actions/checkout@v4
-      - name: Set up kubectl
-        uses: azure/setup-kubectl@v3
-      - name: Deploy to prod
-        env:
-          KUBECONFIG: ${{ secrets.KUBE_CONFIG_PROD }}
-        run: |
-          for svc in ${{ env.SERVICES }}; do
-            kubectl set image deployment/$svc $svc=${{ env.REGISTRY }}/${{ vars.ECR_REPO_NAME || 'openclaw' }}/$svc:$GITHUB_SHA -n prod --record 2>/dev/null || true
-          done
-          kubectl rollout status deployment -n prod --timeout=5m
+      - name: Deploy to Vercel (production)
+        uses: amondnet/vercel-action@v25
+        with:
+          vercel-token: ${{ secrets.VERCEL_TOKEN }}
+          vercel-org-id: ${{ secrets.VERCEL_ORG_ID }}
+          vercel-project-id: ${{ secrets.VERCEL_PROJECT_ID }}
+          vercel-args: --prod
+          working-directory: ${{ vars.VERCEL_ROOT_DIR || '.' }}
+          scope: ${{ vars.VERCEL_ORG_ID || '' }}

@@ -51,13 +51,13 @@ test(runtime): add parallel K8s job execution test
 4. CI runs: **lint → unit tests → integration tests → security scan → determinism assertion**.
 5. Reviewer(s) approve; PR merges to **develop**.
 6. **develop → main** via release PR (weekly cadence or on-demand for fixes).
-7. **main** merge triggers deploy pipeline to staging, then prod (with manual gate for prod).
+7. **main** merge triggers deploy pipeline to **Vercel** (with optional manual approval for production).
 
 ---
 
 ## CI/CD Overview
 
 - **CI** (on PR to `develop`/`main` and push to `develop`): lint, unit tests, integration tests, security scan, determinism assertion.
-- **Deploy** (on push to `main`): build and push images to ECR → deploy to staging → manual approval → deploy to production.
+- **Deploy** (on push to `main`): deploy to **Vercel** production. Enable by setting `ENABLE_DEPLOY=true` and adding `VERCEL_TOKEN` in repo secrets.
 
 See `.github/workflows/ci.yml` and `.github/workflows/deploy.yml` for pipeline definitions.
