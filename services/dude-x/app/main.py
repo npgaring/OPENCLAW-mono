@@ -1,5 +1,6 @@
 """FastAPI app: routers, exception handlers, startup."""
 import os
+from contextlib import asynccontextmanager
 
 from fastapi import Depends, FastAPI, Request
 from fastapi.exceptions import RequestValidationError
@@ -14,6 +15,14 @@ from app.logging.logger import configure_logging
 DUDEX_ROOT_PATH = os.getenv("DUDEX_ROOT_PATH")
 if not DUDEX_ROOT_PATH and os.getenv("VERCEL") == "1":
     DUDEX_ROOT_PATH = "/dude-x"
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Run on every cold start (Vercel serverless)."""
+    configure_logging()
+    await init_db()
+    yield
 
 
 class PrefixMiddleware:
@@ -38,13 +47,8 @@ app = FastAPI(
     redoc_url=None,
     docs_url="/docs",
     root_path=DUDEX_ROOT_PATH or "",
+    lifespan=lifespan,
 )
-
-
-@app.on_event("startup")
-async def startup():
-    configure_logging()
-    await init_db()
 
 
 def custom_openapi():

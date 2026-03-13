@@ -1,5 +1,6 @@
 """FastAPI app: startup, routes, OpenAPI override."""
 import os
+from contextlib import asynccontextmanager
 
 from fastapi import Depends, FastAPI
 from fastapi.openapi.utils import get_openapi
@@ -12,6 +13,14 @@ from app.logging.logger import configure_logging
 OPENCLAW_ROOT_PATH = os.getenv("OPENCLAW_INTEGRATION_ROOT_PATH")
 if not OPENCLAW_ROOT_PATH and os.getenv("VERCEL") == "1":
     OPENCLAW_ROOT_PATH = "/openclaw-integration"
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Run on every cold start (Vercel serverless)."""
+    configure_logging()
+    await init_db()
+    yield
 
 
 class PrefixMiddleware:
@@ -36,13 +45,8 @@ app = FastAPI(
     docs_url="/docs",
     redoc_url="/redoc",
     root_path=OPENCLAW_ROOT_PATH or "",
+    lifespan=lifespan,
 )
-
-
-@app.on_event("startup")
-async def startup():
-    configure_logging()
-    await init_db()
 
 
 def custom_openapi():

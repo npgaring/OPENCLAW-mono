@@ -7,12 +7,13 @@ from sqlalchemy.ext.asyncio import AsyncConnection
 
 logger = logging.getLogger(__name__)
 
-# Service-local (bundled on Vercel) then repo root (local dev)
+# Bundled with app (app/db/migrations/) so Vercel includes it; fallbacks for local dev
 def _migration_dir() -> Path | None:
     candidates = [
-        Path(__file__).resolve().parents[2] / "migration",  # services/<service>/migration
+        Path(__file__).resolve().parent / "migrations",  # app/db/migrations/
+        Path(__file__).resolve().parents[2] / "migration",
         Path.cwd() / "migration",
-        Path(__file__).resolve().parents[4] / "migration",   # repo root
+        Path(__file__).resolve().parents[4] / "migration",
     ]
     for d in candidates:
         if d.is_dir():
@@ -58,13 +59,14 @@ async def run_migration_files(
     """Execute SQL migration files in order. No-op if dir or file missing."""
     base = migration_dir or _migration_dir()
     if not base:
-        logger.debug("No migration directory found; skipping SQL migrations")
+        logger.warning("No migration directory found; skipping SQL migrations")
         return
     for name in filenames:
         path = base / name
         if not path.is_file():
-            logger.debug("Migration file not found: %s", path)
+            logger.warning("Migration file not found: %s", path)
             continue
+        logger.info("Running migration: %s", name)
         sql = path.read_text(encoding="utf-8")
         for stmt in _split_sql(sql):
             stmt = stmt.strip()
