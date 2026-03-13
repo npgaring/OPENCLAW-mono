@@ -21,8 +21,19 @@ def _migration_dir() -> Path | None:
     return None
 
 
+def _strip_line_comments(content: str) -> str:
+    """Remove -- line comments. Simple and sufficient for our migration files."""
+    cleaned: list[str] = []
+    for line in content.splitlines():
+        if "--" in line:
+            line = line.split("--", 1)[0]
+        cleaned.append(line)
+    return "\n".join(cleaned)
+
+
 def _split_sql(content: str) -> list[str]:
     """Split SQL by ';' but not inside $$...$$ blocks."""
+    content = _strip_line_comments(content)
     statements = []
     current: list[str] = []
     i = 0
