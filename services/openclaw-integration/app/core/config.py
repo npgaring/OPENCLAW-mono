@@ -1,0 +1,52 @@
+"""Settings from environment. Copy example.env to .env."""
+import re
+from pathlib import Path
+from urllib.parse import parse_qs, urlparse, urlunparse
+
+from pydantic import Field
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
+_ENV_PATH = _PROJECT_ROOT / ".env"
+
+
+class Settings(BaseSettings):
+    model_config = SettingsConfigDict(
+        env_prefix="",
+        case_sensitive=True,
+        env_file=_ENV_PATH if _ENV_PATH.exists() else None,
+        env_file_encoding="utf-8",
+        extra="ignore",
+    )
+
+    database_url: str = Field(..., description="PostgreSQL URL (postgres:// or postgresql://)")
+    openclaw_base_url: str = Field(..., description="Executor base URL")
+    openclaw_api_key: str = Field(..., description="Bearer token for executor")
+    integration_api_key: str = Field(..., description="Authenticates callers; used to sign execution tokens")
+    app_env: str = Field(default="development", description="development | preview | production")
+    log_level: str = Field(default="info", description="Log level")
+
+    def get_database_url_normalized(self) -> str:
+        """Convert to postgresql+asyncpg and strip sslmode into attribute."""
+        url = self.database_url or ""
+        if url.startswith("postgres://") or url.startswith("postgresql://"):
+            url = re.sub(r"^postgres(ql)?://", "postgresql+asyncpg://", url)
+            parsed = urlparse(url)
+            qs = parse_qs(parsed.query)
+            self._db_sslmode = (qs.get("sslmode") or [None])[0]
+            for p in ("sslmode", "channel_binding"):
+                qs.pop(p, None)
+            new_query = "&".join(f"{k}={v[0]}" for k, v in sorted(qs.items()) if v)
+            url = urlunparse(parsed._replace(query=new_query))
+        return url
+
+    @property
+    def db_sslmode(self) -> str | None:
+        if not hasattr(self, "_db_sslmode"):
+            parsed = urlparse(self.database_url or "")
+            qs = parse_qs(parsed.query)
+            self._db_sslmode = (qs.get("sslmode") or [None])[0]
+        return getattr(self, "_db_sslmode", None)
+
+
+settings = Settings()
