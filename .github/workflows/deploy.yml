@@ -17,12 +17,24 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      # Retry up to 3 times; Vercel sometimes returns "Unexpected error. Please try again later" during build
       - name: Deploy to Vercel (production)
-        uses: amondnet/vercel-action@v25
-        with:
-          vercel-token: ${{ secrets.VERCEL_TOKEN }}
-          vercel-org-id: ${{ secrets.VERCEL_ORG_ID }}
-          vercel-project-id: ${{ secrets.VERCEL_PROJECT_ID }}
-          vercel-args: --prod
-          working-directory: ${{ vars.VERCEL_ROOT_DIR || '.' }}
-          scope: ${{ vars.VERCEL_ORG_ID || '' }}
+        env:
+          VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
+          VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
+          VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+        run: |
+          root="${{ vars.VERCEL_ROOT_DIR || '.' }}"
+          for attempt in 1 2 3; do
+            echo "Deploy attempt $attempt/3..."
+            if (cd "$root" && npx vercel@25.1.0 --prod --token "$VERCEL_TOKEN" --yes); then
+              echo "Deploy succeeded."
+              exit 0
+            fi
+            if [ "$attempt" -lt 3 ]; then
+              echo "Deploy failed, retrying in 90s..."
+              sleep 90
+            fi
+          done
+          echo "Deploy failed after 3 attempts."
+          exit 1
