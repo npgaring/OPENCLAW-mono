@@ -10,6 +10,8 @@ _session_factory = None
 
 def get_engine():
     global _engine
+    if not settings.database_url:
+        raise RuntimeError("database_url not configured; set DATABASE_URL in environment")
     if _engine is None:
         url = settings.get_database_url_normalized()
         is_pg = "postgresql" in url and "asyncpg" in url

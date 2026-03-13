@@ -24,6 +24,8 @@ _init_done = False
 
 async def init_db() -> None:
     """Run migration SQL on PostgreSQL (every deploy); then ensure tables exist via SQLModel."""
+    if not settings.database_url:
+        return
     engine = get_engine()
     url = (settings.get_database_url_normalized() or "").lower()
     is_pg = "postgresql" in url and "asyncpg" in url

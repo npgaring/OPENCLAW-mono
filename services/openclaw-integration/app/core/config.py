@@ -13,16 +13,16 @@ _ENV_PATH = _PROJECT_ROOT / ".env"
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
         env_prefix="",
-        case_sensitive=True,
+        case_sensitive=False,  # Vercel and most envs use UPPERCASE (DATABASE_URL, etc.)
         env_file=_ENV_PATH if _ENV_PATH.exists() else None,
         env_file_encoding="utf-8",
         extra="ignore",
     )
 
-    database_url: str = Field(..., description="PostgreSQL URL (postgres:// or postgresql://)")
-    openclaw_base_url: str = Field(..., description="Executor base URL")
-    openclaw_api_key: str = Field(..., description="Bearer token for executor")
-    integration_api_key: str = Field(..., description="Authenticates callers; used to sign execution tokens")
+    database_url: str | None = Field(None, description="PostgreSQL URL (postgres:// or postgresql://); optional on serverless until configured")
+    openclaw_base_url: str | None = Field(None, description="Executor base URL")
+    openclaw_api_key: str | None = Field(None, description="Bearer token for executor")
+    integration_api_key: str | None = Field(None, description="Authenticates callers; used to sign execution tokens")
     app_env: str = Field(default="development", description="development | preview | production")
     log_level: str = Field(default="info", description="Log level")
 
