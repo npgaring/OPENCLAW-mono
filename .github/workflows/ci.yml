@@ -1,0 +1,121 @@
+name: CI
+
+on:
+  pull_request:
+    branches: [develop, main]
+  push:
+    branches: [develop]
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install lint tools
+        run: pip install ruff mypy
+      - name: Ruff check
+        run: |
+          for d in services libs; do [ -d "$d" ] && ruff check "$d/"; done
+      - name: Mypy
+        run: |
+          if find services libs -name '*.py' 2>/dev/null | grep -q .; then
+            mypy services/ libs/
+          else
+            echo "No Python in services/libs yet; skipping mypy."
+          fi
+
+  unit-tests:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: test
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+      redis:
+        image: redis:7
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install test deps
+        run: pip install pytest pytest-cov
+      - name: Run unit tests
+        run: pytest services/ libs/ tests/ --cov=. --cov-report=xml
+      - name: Enforce 80% coverage (when services/ or libs/ have code)
+        run: |
+          python -c "
+          import xml.etree.ElementTree as ET
+          from pathlib import Path
+          root = Path('.')
+          has_app_code = any((root / d).rglob('*.py') for d in ('services', 'libs') if (root / d).exists())
+          if not has_app_code:
+              print('No app code in services/ or libs/ yet; skipping coverage threshold.')
+              exit(0)
+          t = ET.parse('coverage.xml')
+          r = t.getroot()
+          rate = float(r.attrib.get('line-rate', 0))
+          assert rate >= 0.8, f'Coverage {int(rate*100)}% < 80%'
+          print(f'Coverage {int(rate*100)}% OK')
+          "
+
+  determinism-assertion:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Assert compiler determinism (1000 runs)
+        run: python scripts/assert_determinism.py --runs 1000
+
+  security-scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Trivy filesystem scan
+        uses: aquasecurity/trivy-action@master
+        with:
+          scan-type: "fs"
+          severity: "HIGH,CRITICAL"
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Bandit security scan
+        run: |
+          pip install bandit
+          if find services libs -name '*.py' 2>/dev/null | grep -q .; then
+            bandit -r services/ libs/
+          else
+            echo "No Python in services/libs yet; skipping bandit."
+          fi
+
+  integration-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Start services
+        run: docker-compose up -d
+      - name: Install pytest
+        run: pip install pytest
+      - name: Run E2E tests
+        run: pytest tests/e2e/ -v
+      - name: Stop services
+        if: always()
+        run: docker-compose down

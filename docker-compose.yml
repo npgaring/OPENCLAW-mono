@@ -1,0 +1,4 @@
+# Add service definitions as you implement them (spec-service, compiler-service, etc.).
+# CI runs: docker-compose up -d && pytest tests/e2e/
+version: "3.9"
+services: {}
