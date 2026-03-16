@@ -19,5 +19,5 @@ class CompileEvent(SQLModel, table=True):
     event_type: str = Field(max_length=32)  # COMPILE_OK | COMPILE_FAILED
     spec_hash: str = Field(max_length=255)
     plan_hash: str | None = Field(default=None, max_length=255)
-    timestamp: datetime = Field(default_factory=_utc_now)
+    timestamp: datetime = Field(default_factory=_utc_now, sa_column=Column(DateTime(timezone=True), nullable=False))
     metadata_: dict[str, Any] = Field(default_factory=dict, sa_column=Column("metadata", JSON, nullable=False))
