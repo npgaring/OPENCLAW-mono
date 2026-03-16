@@ -7,7 +7,7 @@ from app.ui.html import render_page
 router = APIRouter()
 
 
-@router.get("/migrate")
+@router.get("/migrate", include_in_schema=False)
 async def run_migrate():
     """Run DB migrations (idempotent). Call after deploy to ensure tables exist. No auth required."""
     from app.db.init_db import ensure_db_ready
@@ -15,7 +15,7 @@ async def run_migrate():
     return JSONResponse(content={"status": "ok", "message": "Migrations run"})
 
 
-@router.get("/", response_class=HTMLResponse)
+@router.get("/", response_class=HTMLResponse, include_in_schema=False)
 async def root():
     html = render_page(
         title="OpenClaw Integration",
@@ -35,7 +35,7 @@ async def root():
     return HTMLResponse(html)
 
 
-@router.get("/privacy", response_class=HTMLResponse)
+@router.get("/privacy", response_class=HTMLResponse, include_in_schema=False)
 async def privacy_policy():
     html = render_page(
         title="Privacy - OpenClaw Integration",
