@@ -1,7 +1,7 @@
 """POST /compile: parse body, validate, build plan, persist, return plan."""
 import logging
 
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Body, Depends
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.compiler.invariants import validate_invariants
@@ -30,9 +30,50 @@ def parse_compile_body(body: dict) -> SpecIn:
 
 
 @router.post("/compile", response_model=PlanPayload)
-async def compile_spec(request: Request, session: AsyncSession = Depends(get_session)):
+async def compile_spec(
+    body: dict = Body(
+        ...,
+        examples={
+            "compile_request": {
+                "summary": "Compile spec",
+                "value": {
+                    "spec_version": "1.0",
+                    "identity": "W-OCGG",
+                    "intent": "web-build",
+                    "target": {"resource_id": "site:marketing", "environment": "production"},
+                    "decisions": {
+                        "domain": "web",
+                        "operations": [
+                            {
+                                "op_id": "op-001",
+                                "type": "write_config",
+                                "target": "web/app",
+                                "inputs": {
+                                    "path": "app/config.json",
+                                    "content": "{\"featureFlags\":{\"newHomepage\":true}}",
+                                },
+                            },
+                            {
+                                "op_id": "op-002",
+                                "type": "build",
+                                "target": "web/app",
+                                "inputs": {"command": "npm run build"},
+                            },
+                        ],
+                    },
+                    "constraints": {"no_external_network": True, "max_runtime_seconds": 900},
+                    "signature": {
+                        "type": "human_signed",
+                        "signed_at": "2026-03-17T10:12:00Z",
+                        "hash": "sig_9f3d2b5a1c",
+                    },
+                },
+            }
+        },
+    ),
+    session: AsyncSession = Depends(get_session),
+):
     """Compile spec to plan; persist spec, plan, and compile event."""
-    body = await request.json()
     if not isinstance(body, dict):
         raise DUDEXError(ErrorCode.INVALID_SPEC, "Body must be a JSON object", details={})
     spec = parse_compile_body(body)
