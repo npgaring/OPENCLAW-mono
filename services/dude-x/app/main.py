@@ -138,6 +138,22 @@ async def validation_error_handler(request: Request, exc: RequestValidationError
     )
 
 
+@app.exception_handler(Exception)
+async def unhandled_error_handler(request: Request, exc: Exception):
+    from fastapi.responses import JSONResponse
+    import logging
+
+    logging.getLogger(__name__).exception("Unhandled error")
+    return JSONResponse(
+        status_code=500,
+        content=ErrorResponse(
+            code=ErrorCode.INTERNAL_ERROR,
+            message="Internal server error",
+            details={"error": str(exc)},
+        ).model_dump(),
+    )
+
+
 # Routers with API key (order as in overview)
 app.include_router(compile_api.router, dependencies=[Depends(verify_api_key)])
 app.include_router(plans.router, dependencies=[Depends(verify_api_key)])
