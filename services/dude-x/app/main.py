@@ -59,7 +59,13 @@ app = FastAPI(
     root_path=DUDEX_ROOT_PATH or "",
     lifespan=lifespan,
 )
-allow_origins = settings.cors_origins
+raw_cors = (settings.cors_origins or "").strip()
+if not raw_cors:
+    allow_origins = ["*"]
+elif raw_cors == "*":
+    allow_origins = ["*"]
+else:
+    allow_origins = [item.strip() for item in raw_cors.split(",") if item.strip()]
 allow_credentials = True
 if "*" in allow_origins:
     allow_credentials = False
