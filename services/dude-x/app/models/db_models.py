@@ -2,7 +2,7 @@
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import DateTime, JSON
+from sqlalchemy import Column, DateTime, JSON
 from sqlmodel import Field, SQLModel
 
 
@@ -17,7 +17,10 @@ class SpecRecord(SQLModel, table=True):
     spec_hash: str = Field(primary_key=True, max_length=255)
     identity: str | None = Field(default=None, index=True, max_length=64)
     payload: dict[str, Any] = Field(sa_type=JSON)
-    received_at: datetime = Field(default_factory=_utc_now)
+    received_at: datetime = Field(
+        default_factory=_utc_now,
+        sa_column=Column(DateTime(timezone=True), nullable=False),
+    )
 
 
 class PlanRecord(SQLModel, table=True):
@@ -27,4 +30,7 @@ class PlanRecord(SQLModel, table=True):
     identity: str | None = Field(default=None, index=True, max_length=64)
     payload: dict[str, Any] = Field(sa_type=JSON)
     domain: str = Field(max_length=64)
-    created_at: datetime = Field(default_factory=_utc_now)
+    created_at: datetime = Field(
+        default_factory=_utc_now,
+        sa_column=Column(DateTime(timezone=True), nullable=False),
+    )
