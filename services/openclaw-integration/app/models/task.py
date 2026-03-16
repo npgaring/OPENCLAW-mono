@@ -2,7 +2,7 @@
 from datetime import datetime
 from enum import Enum
 from typing import Any
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import Column, Enum as SaEnum, JSON, Text
@@ -22,7 +22,7 @@ class TaskStatus(str, Enum):
 class Task(SQLModel, table=True):
     __tablename__ = "tasks"
 
-    task_id: str = SqlField(primary_key=True, default_factory=lambda: str(uuid4()))
+    task_id: UUID = SqlField(primary_key=True, default_factory=uuid4)
     ocgg_identity: str = SqlField(index=True)
     domain: str = SqlField()
     plan_hash: str = SqlField()
@@ -61,7 +61,7 @@ class TaskSubmitRequest(BaseModel):
 class TaskSubmitResponse(BaseModel):
     model_config = ConfigDict(extra="allow")
 
-    task_id: str
+    task_id: UUID
     execution_id: str | None = None
     status: str
     execution_response: dict[str, Any] | None = None
@@ -78,7 +78,7 @@ class TaskSubmitResponse(BaseModel):
 class TaskStatusResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    task_id: str
+    task_id: UUID
     status: str
     execution_id: str | None = None
     audit_history: list[Any] = Field(default_factory=list)

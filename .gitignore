@@ -71,3 +71,6 @@ dmypy.json
 *.pem
 *.key
 secrets/
+
+# Node
+node_modules/

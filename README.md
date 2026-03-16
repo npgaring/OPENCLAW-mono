@@ -11,7 +11,7 @@ Development workflow, CI/CD, and branch/commit standards are defined in **[docs/
 
 ## Repo layout
 
-- `services/` — dude-x (spec + compiler), openclaw-integration (gate + token + ledger), runtime-worker.
+- `services/` — dude-x (spec + compiler), openclaw-integration (gate + token + ledger; execution via OpenClaw Gateway `POST /v1/responses` at `OPENCLAW_BASE_URL`), runtime-worker.
 - `libs/` — shared libraries.
 - `tests/`, `tests/e2e/` — unit and end-to-end tests.
 - `scripts/` — e.g. `assert_determinism.py` for CI.

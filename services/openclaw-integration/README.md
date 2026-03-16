@@ -27,6 +27,10 @@ Governance-gated layer between callers (e.g. Builder System) and the runtime exe
 
 `pip install -r requirements-test.txt && PYTHONPATH=. python -m pytest tests/ -v -m "not live"`
 
-## Executor contract
+## Executor (OpenClaw Gateway)
 
-Executor must implement `POST {OPENCLAW_BASE_URL}/execute` with headers `Authorization: Bearer OPENCLAW_API_KEY` and `X-Execution-Token: <token>`. Body: plan JSON `{domain, plan_hash, operations}`. Response: `execution_id`, `status` ("success" or other).
+Execution is sent to the **OpenClaw Gateway** OpenResponses API. Set `OPENCLAW_BASE_URL` to your Gateway URL (e.g. `https://api.cdopenclaw.com`).
+
+- **Endpoint**: `POST {OPENCLAW_BASE_URL}/v1/responses`
+- **Auth**: `Authorization: Bearer OPENCLAW_API_KEY` (execution token is validated by Integration before calling the Gateway)
+- The integration maps each plan `{domain, plan_hash, operations}` to an OpenResponses request (`model: "openclaw:main"`, `user`, `instructions`, `input`) and maps the Gateway response to `execution_id`, `status` ("success" or "failed"). Ensure the Gateway has `gateway.http.endpoints.responses.enabled: true`. See [OpenResponses HTTP API](https://docs.openclaw.ai/gateway/openresponses-http-api).

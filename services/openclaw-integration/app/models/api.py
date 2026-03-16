@@ -1,5 +1,6 @@
 """API request/response Pydantic models."""
 from typing import Any
+from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -7,7 +8,7 @@ from pydantic import BaseModel, ConfigDict, Field
 class AuditRequest(BaseModel):
     model_config = ConfigDict(extra="allow")
 
-    task_id: str | None = None
+    task_id: UUID | None = None
     status: str | None = None
     event_type: str | None = None
 

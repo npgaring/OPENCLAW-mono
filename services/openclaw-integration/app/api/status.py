@@ -1,4 +1,6 @@
 """GET /status/{task_id}."""
+from uuid import UUID
+
 from app.core.errors import task_not_found
 from app.models import Task, TaskStatusResponse
 from fastapi import APIRouter, Depends, HTTPException
@@ -11,7 +13,7 @@ router = APIRouter()
 
 @router.get("/status/{task_id}", response_model=TaskStatusResponse)
 async def get_task_status(
-    task_id: str,
+    task_id: UUID,
     session: AsyncSession = Depends(get_session),
 ):
     task = await session.get(Task, task_id)
