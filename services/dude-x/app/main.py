@@ -12,10 +12,12 @@ from contextlib import asynccontextmanager
 
 from fastapi import Depends, FastAPI, Request
 from fastapi.exceptions import RequestValidationError
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.openapi.utils import get_openapi
 
 from app.api import compile as compile_api, gate, health, plans, privacy, root
 from app.core.auth import verify_api_key
+from app.core.config import settings
 from app.core.errors import DUDEXError, ErrorCode, ErrorResponse
 from app.db.init_db import init_db
 from app.logging.logger import configure_logging
@@ -56,6 +58,17 @@ app = FastAPI(
     docs_url="/docs",
     root_path=DUDEX_ROOT_PATH or "",
     lifespan=lifespan,
+)
+allow_origins = settings.cors_origins
+allow_credentials = True
+if "*" in allow_origins:
+    allow_credentials = False
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=allow_origins,
+    allow_credentials=allow_credentials,
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
 
