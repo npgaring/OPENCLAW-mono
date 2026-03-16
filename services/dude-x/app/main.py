@@ -69,12 +69,14 @@ else:
 allow_credentials = True
 if "*" in allow_origins:
     allow_credentials = False
+origin_regex = (settings.cors_origin_regex or "").strip() or None
 app.add_middleware(
     CORSMiddleware,
     allow_origins=allow_origins,
     allow_credentials=allow_credentials,
     allow_methods=["*"],
     allow_headers=["*"],
+    allow_origin_regex=origin_regex,
 )
 
 

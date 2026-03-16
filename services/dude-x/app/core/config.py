@@ -31,6 +31,10 @@ class Settings(BaseSettings):
         default="*",
         description="Allowed CORS origins (comma-separated). Use '*' to allow all.",
     )
+    cors_origin_regex: str = Field(
+        default="",
+        description="Allowed CORS origin regex (optional).",
+    )
 
 
 settings = Settings()
