@@ -70,9 +70,24 @@ def custom_openapi():
     )
     public_base = os.getenv("DUDEX_PUBLIC_BASE_URL")
     if public_base:
-        schema["servers"] = [{"url": f"{public_base}{DUDEX_ROOT_PATH or ''}", "description": "Production server"}]
+        production_url = f"{public_base}{DUDEX_ROOT_PATH or ''}"
     elif os.getenv("VERCEL") == "1" and DUDEX_ROOT_PATH:
-        schema["servers"] = [{"url": f"https://openclaw-mono.vercel.app{DUDEX_ROOT_PATH}", "description": "Production server"}]
+        production_url = f"https://openclaw-mono.vercel.app{DUDEX_ROOT_PATH}"
+    else:
+        production_url = f"https://openclaw-mono.vercel.app{DUDEX_ROOT_PATH or ''}"
+    schema["servers"] = [{"url": production_url, "description": "Production server"}]
+    schema.setdefault("components", {}).setdefault("securitySchemes", {})["apiKeyAuth"] = {
+        "type": "apiKey",
+        "in": "header",
+        "name": "X-API-Key",
+    }
+    for path in schema.get("paths", {}):
+        if path in ("/", "/health", "/privacy", "/openapi.json", "/docs", "/redoc"):
+            continue
+        schema["paths"][path] = dict(schema["paths"][path])
+        for method in schema["paths"][path]:
+            if method in ("get", "post", "put", "delete", "patch"):
+                schema["paths"][path][method]["security"] = [{"apiKeyAuth": []}]
     app.openapi_schema = schema
     return schema
 

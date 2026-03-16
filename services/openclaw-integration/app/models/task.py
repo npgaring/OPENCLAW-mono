@@ -51,7 +51,40 @@ class TaskOperation(BaseModel):
 
 
 class TaskSubmitRequest(BaseModel):
-    model_config = ConfigDict(extra="allow")
+    model_config = ConfigDict(
+        extra="allow",
+        json_schema_extra={
+            "examples": [
+                {
+                    "ocgg_identity": "W-OCGG",
+                    "plan_hash": "plan_8e7c8b20b2",
+                    "operations": [
+                        {
+                            "op_id": "op-001",
+                            "type": "write_config",
+                            "target": "web/app",
+                            "inputs": {
+                                "path": "app/config.json",
+                                "content": "{\"featureFlags\":{\"newHomepage\":true}}",
+                            },
+                        },
+                        {
+                            "op_id": "op-002",
+                            "type": "build",
+                            "target": "web/app",
+                            "inputs": {"command": "npm run build"},
+                        },
+                        {
+                            "op_id": "op-003",
+                            "type": "deploy",
+                            "target": "web/app",
+                            "inputs": {"provider": "vercel", "project": "marketing-site"},
+                        },
+                    ],
+                }
+            ]
+        },
+    )
 
     ocgg_identity: str  # W-OCGG | R-OCGG
     plan_hash: str

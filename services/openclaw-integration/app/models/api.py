@@ -23,7 +23,34 @@ class AuditAck(BaseModel):
 
 
 class GateEvaluateRequest(BaseModel):
-    model_config = ConfigDict(extra="allow")
+    model_config = ConfigDict(
+        extra="allow",
+        json_schema_extra={
+            "examples": [
+                {
+                    "ocgg_identity": "W-OCGG",
+                    "plan_hash": "plan_8e7c8b20b2",
+                    "operations": [
+                        {
+                            "op_id": "op-001",
+                            "type": "write_config",
+                            "target": "web/app",
+                            "inputs": {
+                                "path": "app/config.json",
+                                "content": "{\"featureFlags\":{\"newHomepage\":true}}",
+                            },
+                        },
+                        {
+                            "op_id": "op-002",
+                            "type": "deploy",
+                            "target": "web/app",
+                            "inputs": {"provider": "vercel", "project": "marketing-site"},
+                        },
+                    ],
+                }
+            ]
+        },
+    )
 
     ocgg_identity: str | None = None
     plan_hash: str | None = None
@@ -34,7 +61,17 @@ class GateEvaluateRequest(BaseModel):
 
 
 class VerifyTokenRequest(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(
+        extra="forbid",
+        json_schema_extra={
+            "examples": [
+                {
+                    "execution_token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.token_payload.signature",
+                    "tenant_context": "W-OCGG",
+                }
+            ]
+        },
+    )
 
     execution_token: str
     tenant_context: str

@@ -32,5 +32,5 @@ Governance-gated layer between callers (e.g. Builder System) and the runtime exe
 Execution is sent to the **OpenClaw Gateway** OpenResponses API. Set `OPENCLAW_BASE_URL` to your Gateway URL (e.g. `https://api.cdopenclaw.com`).
 
 - **Endpoint**: `POST {OPENCLAW_BASE_URL}/v1/responses`
-- **Auth**: `Authorization: Bearer OPENCLAW_API_KEY` (execution token is validated by Integration before calling the Gateway)
+- **Auth**: Use **OPENCLAW_API_KEY** as Bearer when calling the Gateway (OpenClaw requires it). **INTEGRATION_API_KEY** is only for authorizing callers to our API (/task, /audit, etc.), not for the Gateway.
 - The integration maps each plan `{domain, plan_hash, operations}` to an OpenResponses request (`model: "openclaw:main"`, `user`, `instructions`, `input`) and maps the Gateway response to `execution_id`, `status` ("success" or "failed"). Ensure the Gateway has `gateway.http.endpoints.responses.enabled: true`. See [OpenResponses HTTP API](https://docs.openclaw.ai/gateway/openresponses-http-api).

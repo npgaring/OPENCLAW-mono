@@ -20,7 +20,7 @@ def _to_openresponses_body(payload: dict[str, Any]) -> dict[str, Any]:
 
 
 async def submit_execute(payload: dict[str, Any]) -> dict[str, Any]:
-    """POST to OPENCLAW_BASE_URL/v1/responses (Gateway OpenResponses API) with Bearer only."""
+    """POST to OPENCLAW_BASE_URL/v1/responses. Uses Bearer OPENCLAW_API_KEY (OpenClaw requires it)."""
     base = settings.openclaw_base_url.rstrip("/")
     body = _to_openresponses_body(payload)
     async with httpx.AsyncClient(timeout=60.0) as client:

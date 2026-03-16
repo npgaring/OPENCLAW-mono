@@ -7,7 +7,7 @@ from app.ui.html import render_page
 router = APIRouter()
 
 
-@router.get("/", response_class=HTMLResponse)
+@router.get("/", response_class=HTMLResponse, include_in_schema=False)
 async def root():
     html = render_page(
         title="DUDE-X",

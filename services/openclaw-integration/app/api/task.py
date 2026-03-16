@@ -1,7 +1,9 @@
 """POST /task — submit task, gate, token, executor call."""
 import logging
+from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException
+import httpx
+from fastapi import APIRouter, Body, Depends, HTTPException
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm.attributes import flag_modified
@@ -132,3 +134,34 @@ async def submit_task(
         gate_outcome="PASS",
         reason_codes=[],
     )
+
+
+@router.post("/test/execute")
+async def test_execute(
+    payload: dict[str, Any] = Body(
+        ...,
+        examples={
+            "openresponses_plan": {
+                "summary": "OpenResponses plan execution",
+                "value": {
+                    "model": "openclaw:main",
+                    "user": "project:web",
+                    "instructions": "Execute the plan in the user message.",
+                    "input": "{\n  \"domain\": \"web\",\n  \"plan_hash\": \"plan_8e7c8b20b2\",\n  \"operations\": [\n    {\"op_id\": \"op-001\", \"type\": \"write_config\", \"target\": \"web/app\", \"inputs\": {\"path\": \"app/config.json\", \"content\": \"{\\\"featureFlags\\\":{\\\"newHomepage\\\":true}}\"}},\n    {\"op_id\": \"op-002\", \"type\": \"deploy\", \"target\": \"web/app\", \"inputs\": {\"provider\": \"vercel\", \"project\": \"marketing-site\"}}\n  ]\n}",
+                },
+            }
+        },
+    ),
+):
+    """Proxy a raw OpenResponses payload to OPENCLAW_BASE_URL/v1/responses for testing."""
+    from app.client.openclaw_client import submit_execute
+
+    try:
+        return await submit_execute(payload)
+    except httpx.HTTPStatusError as e:
+        raise HTTPException(
+            status_code=e.response.status_code,
+            detail={"error": "Gateway request failed", "response": e.response.text},
+        ) from e
+    except Exception as e:
+        raise HTTPException(status_code=502, detail={"error": str(e)}) from e

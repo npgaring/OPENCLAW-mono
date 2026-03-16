@@ -27,7 +27,15 @@ class OpenClawError(Exception):
 
 
 def _plan_to_openresponses_body(plan: dict[str, Any]) -> dict[str, Any]:
-    """Build OpenResponses request body from plan { domain, plan_hash, operations }."""
+    """Build OpenResponses request body from plan { domain, plan_hash, operations }.
+
+    Mapping from /task flow:
+    - plan comes from gate engine: { domain, plan_hash, operations } (canonical plan only).
+    - model: OpenClaw agent id.
+    - user: session routing (project:{domain}).
+    - instructions: system directive + response format (JSON status/message).
+    - input: full plan as JSON string (OpenResponses accepts string or array of items).
+    """
     domain = plan.get("domain") or "default"
     instructions = (
         "Execute the plan in the user message. "
@@ -41,18 +49,41 @@ def _plan_to_openresponses_body(plan: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _extract_text_from_output(output: list[Any]) -> str:
+    """Extract concatenated text from OpenResponses output items. Content can be string or array of parts."""
+    parts: list[str] = []
+    for item in output if isinstance(output, list) else []:
+        if not isinstance(item, dict):
+            continue
+        content = item.get("content")
+        if isinstance(content, str):
+            parts.append(content)
+        elif isinstance(content, list):
+            for part in content:
+                if isinstance(part, dict) and "text" in part:
+                    parts.append(str(part["text"]))
+    return " ".join(parts).lower()
+
+
 def _parse_gateway_response(resp_body: dict[str, Any]) -> dict[str, Any]:
     """Map OpenResponses response to integration shape: execution_id, status, execution_response."""
     execution_id = resp_body.get("id") or resp_body.get("response_id") or ""
     output = resp_body.get("output") or []
     status = "success"
+    text = _extract_text_from_output(output)
+    if text and (
+        "failed" in text
+        or '"status": "failed"' in text
+        or "'status': 'failed'" in text
+        or '"status":"failed"' in text
+    ):
+        status = "failed"
+    # OpenResponses items can have status: completed | incomplete | in_progress
     if isinstance(output, list):
         for item in output:
-            if isinstance(item, dict) and item.get("type") == "message" and isinstance(item.get("content"), str):
-                content = item["content"].strip().lower()
-                if "failed" in content or '"status": "failed"' in content or "'status': 'failed'" in content:
-                    status = "failed"
-                    break
+            if isinstance(item, dict) and item.get("status") == "incomplete":
+                status = "failed"
+                break
     return {
         "execution_id": execution_id,
         "status": status,
@@ -63,12 +94,16 @@ def _parse_gateway_response(resp_body: dict[str, Any]) -> dict[str, Any]:
 
 
 def _parse_gateway_error(resp_body: dict[str, Any], status_code: int, fallback_text: str) -> tuple[str, str]:
-    """Extract error type and message from Gateway error shape: { error: { message, type } }."""
+    """Extract error type and message from Gateway/OpenResponses error shape.
+    Handles: { error: { message, type } } and { detail: { message } } (e.g. from FastAPI).
+    """
     err = resp_body.get("error") if isinstance(resp_body.get("error"), dict) else None
+    detail = resp_body.get("detail")
     message = (
         (err.get("message") if err else None)
         or resp_body.get("message")
-        or resp_body.get("detail")
+        or (detail.get("message") if isinstance(detail, dict) else None)
+        or (detail if isinstance(detail, str) else None)
         or fallback_text
     )
     if isinstance(message, dict):
@@ -87,6 +122,7 @@ class OpenClawClient:
         if not execution_token:
             raise OpenClawError("auth_error", "Execution token required")
         url = f"{self.base_url}/v1/responses"
+        # OpenClaw Gateway requires Bearer OPENCLAW_API_KEY (not INTEGRATION_API_KEY).
         headers = {
             "Authorization": f"Bearer {self.api_key}",
             "Content-Type": "application/json",

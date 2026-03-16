@@ -20,9 +20,9 @@ class Settings(BaseSettings):
     )
 
     database_url: str | None = Field(default=None, description="PostgreSQL URL (postgres:// or postgresql://); optional on serverless until configured")
-    openclaw_base_url: str | None = Field(default=None, description="Executor base URL")
-    openclaw_api_key: str | None = Field(default=None, description="Bearer token for executor")
-    integration_api_key: str | None = Field(default=None, description="Authenticates callers; used to sign execution tokens")
+    openclaw_base_url: str | None = Field(default=None, description="OpenClaw Gateway base URL (e.g. https://api.cdopenclaw.com)")
+    openclaw_api_key: str | None = Field(default=None, description="Bearer token for OpenClaw Gateway (POST .../v1/responses). Required by OpenClaw.")
+    integration_api_key: str | None = Field(default=None, description="Authorization for our API: callers use Bearer <this> to access /task, /audit, /gate, /status. Also used to sign execution tokens.")
     app_env: str = Field(default="development", description="development | preview | production")
     log_level: str = Field(default="info", description="Log level")
 

@@ -38,7 +38,51 @@ class Decisions(BaseModel):
 
 
 class SpecIn(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(
+        extra="forbid",
+        json_schema_extra={
+            "examples": [
+                {
+                    "spec_version": "1.0",
+                    "identity": "W-OCGG",
+                    "intent": "web-build",
+                    "target": {"resource_id": "site:marketing", "environment": "production"},
+                    "decisions": {
+                        "domain": "web",
+                        "operations": [
+                            {
+                                "op_id": "op-001",
+                                "type": "write_config",
+                                "target": "web/app",
+                                "inputs": {
+                                    "path": "app/config.json",
+                                    "content": "{\"featureFlags\":{\"newHomepage\":true}}",
+                                },
+                            },
+                            {
+                                "op_id": "op-002",
+                                "type": "build",
+                                "target": "web/app",
+                                "inputs": {"command": "npm run build"},
+                            },
+                            {
+                                "op_id": "op-003",
+                                "type": "deploy",
+                                "target": "web/app",
+                                "inputs": {"provider": "vercel", "project": "marketing-site"},
+                            },
+                        ],
+                    },
+                    "constraints": {"no_external_network": True, "max_runtime_seconds": 900},
+                    "signature": {
+                        "type": "human_signed",
+                        "signed_at": "2026-03-17T10:12:00Z",
+                        "hash": "sig_9f3d2b5a1c",
+                    },
+                }
+            ]
+        },
+    )
 
     spec_version: Literal["1.0"] = "1.0"
     identity: Literal["W-OCGG", "R-OCGG"]

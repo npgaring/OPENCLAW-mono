@@ -7,7 +7,7 @@ from app.ui.html import render_page
 router = APIRouter()
 
 
-@router.get("/privacy", response_class=HTMLResponse)
+@router.get("/privacy", response_class=HTMLResponse, include_in_schema=False)
 async def privacy_policy():
     html = render_page(
         title="Privacy - DUDE-X",
