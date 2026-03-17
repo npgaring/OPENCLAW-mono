@@ -6,7 +6,7 @@ import os
 from typing import Any
 
 import httpx
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 
 from app.ui.html import render_page
@@ -142,15 +142,21 @@ async def privacy_policy():
 @router.get("/openapi-unified.json", include_in_schema=False)
 async def openapi_unified(request: Request):
     """Unified OpenAPI schema for Dude-X + OpenClaw Integration."""
-    base_url = str(request.base_url).rstrip("/")
+    base_origin = f"{request.url.scheme}://{request.url.netloc}"
     dudex_root = _guess_dudex_root_path()
     integration_root = _guess_integration_root_path()
 
-    async with httpx.AsyncClient(timeout=10.0) as client:
-        dudex_url = f"{base_url}{dudex_root}/openapi.json"
-        dudex_resp = await client.get(dudex_url)
-        dudex_resp.raise_for_status()
-        dudex_schema = dudex_resp.json()
+    dudex_url = f"{base_origin}{dudex_root}/openapi.json"
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            dudex_resp = await client.get(dudex_url)
+            dudex_resp.raise_for_status()
+            dudex_schema = dudex_resp.json()
+    except httpx.HTTPError as e:
+        raise HTTPException(
+            status_code=502,
+            detail={"error": "Failed to load Dude-X OpenAPI", "url": dudex_url, "message": str(e)},
+        ) from e
 
     from app.main import app as integration_app
 
@@ -190,7 +196,7 @@ async def openapi_unified(request: Request):
             "version": "1.0.0",
             "description": "Combined OpenAPI schema for Dude-X and OpenClaw Integration.",
         },
-        "servers": [{"url": base_url, "description": "Production"}],
+        "servers": [{"url": base_origin, "description": "Production"}],
         "paths": combined_paths,
         "components": combined_components,
     }
