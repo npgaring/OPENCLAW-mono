@@ -1,6 +1,7 @@
-"""POST /task — submit task, gate, token, executor call."""
+"""POST /task — submit task, gate, token, executor call; POST /task/{id}/continue — follow-up."""
 import logging
 from typing import Any
+from uuid import UUID
 
 import httpx
 from fastapi import APIRouter, Body, Depends, HTTPException
@@ -14,7 +15,7 @@ from app.db.session import get_session
 from app.gate.engine import GateEngine
 from app.gate.policy import get_policy_version_at_execution
 from app.gate.token import generate_execution_token, hash_token, verify_execution_token
-from app.models import GateDecisionRecord, Task, TaskSubmitRequest, TaskSubmitResponse, UsedExecutionToken
+from app.models import GateDecisionRecord, Task, TaskContinueRequest, TaskSubmitRequest, TaskSubmitResponse, UsedExecutionToken
 from app.services.execution_client import OpenClawClient, OpenClawError
 
 logger = logging.getLogger(__name__)
@@ -108,12 +109,85 @@ async def submit_task(
 
     try:
         client = OpenClawClient()
-        result = await client.execute(plan_json, execution_token)
+        result = await client.execute(plan_json, execution_token, task_id=str(task.task_id))
     except OpenClawError as e:
         task.status = e.error_type
         task.audit_history = (task.audit_history or []) + [{"event_type": "execution_response", "payload": e.response}]
         if e.response.get("execution_id"):
             task.execution_id = e.response["execution_id"]
+        await session.commit()
+        reason_codes = ["EXECUTION_ABORTED"] if e.error_type == "execution_aborted" else []
+        return TaskSubmitResponse(
+            task_id=task.task_id,
+            status=e.error_type,
+            execution_response=e.response,
+            gate_outcome="PASS",
+            reason_codes=reason_codes,
+        )
+    task.execution_id = result.get("execution_id")
+    s = result.get("status")
+    task.status = "completed" if s == "success" else (s if s in ("failed", "partial", "needs_review") else "failed")
+    task.audit_history = (task.audit_history or []) + [{"event_type": "execution_response", "payload": result}]
+    await session.commit()
+    return TaskSubmitResponse(
+        task_id=task.task_id,
+        execution_id=task.execution_id,
+        status=task.status,
+        execution_response=result,
+        gate_outcome="PASS",
+        reason_codes=[],
+    )
+
+
+CONTINUABLE_STATUSES = frozenset({"completed", "partial", "needs_review"})
+
+
+def _prior_context_from_audit(audit_history: list[Any]) -> str:
+    """Build prior_context from last execution_response in audit (session_summary or message)."""
+    for i in range(len(audit_history) - 1, -1, -1):
+        entry = audit_history[i]
+        if isinstance(entry, dict) and entry.get("event_type") == "execution_response":
+            payload = entry.get("payload") or {}
+            if isinstance(payload, dict):
+                summary = payload.get("session_summary")
+                if summary and isinstance(summary, str):
+                    return summary
+                msg = payload.get("message")
+                if msg and isinstance(msg, str):
+                    return msg
+            break
+    return ""
+
+
+@router.post("/task/{task_id}/continue", response_model=TaskSubmitResponse)
+async def continue_task(
+    task_id: UUID,
+    body: TaskContinueRequest,
+    session: AsyncSession = Depends(get_session),
+):
+    """Send a follow-up message for an existing task (same Gateway user/session). Task must be completed, partial, or needs_review."""
+    task = await session.get(Task, task_id)
+    if not task:
+        raise HTTPException(status_code=404, detail="Task not found")
+    if task.status not in CONTINUABLE_STATUSES:
+        raise HTTPException(
+            status_code=422,
+            detail={"code": ErrorCodes.INVALID_PAYLOAD, "message": f"Task not continuable (status={task.status})"},
+        )
+    prior_context = body.prior_context if body.prior_context is not None else _prior_context_from_audit(task.audit_history or [])
+    client = OpenClawClient()
+    try:
+        result = await client.execute_follow_up(
+            task_id=str(task_id),
+            domain=task.domain,
+            message=body.message,
+            prior_context=prior_context,
+        )
+    except OpenClawError as e:
+        task.audit_history = (task.audit_history or []) + [{"event_type": "execution_response", "payload": e.response}]
+        if e.response.get("execution_id"):
+            task.execution_id = e.response["execution_id"]
+        task.status = e.error_type
         await session.commit()
         return TaskSubmitResponse(
             task_id=task.task_id,
@@ -123,7 +197,8 @@ async def submit_task(
             reason_codes=[],
         )
     task.execution_id = result.get("execution_id")
-    task.status = "completed" if result.get("status") == "success" else "failed"
+    s = result.get("status")
+    task.status = "completed" if s == "success" else (s if s in ("failed", "partial", "needs_review") else "failed")
     task.audit_history = (task.audit_history or []) + [{"event_type": "execution_response", "payload": result}]
     await session.commit()
     return TaskSubmitResponse(

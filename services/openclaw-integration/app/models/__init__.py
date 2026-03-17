@@ -12,6 +12,7 @@ from app.models.audit_event import AuditEvent
 from app.models.gate_decision import GateDecisionRecord
 from app.models.task import (
     Task,
+    TaskContinueRequest,
     TaskOperation,
     TaskStatus,
     TaskStatusResponse,
@@ -29,6 +30,7 @@ __all__ = [
     "GateEvaluateRequest",
     "HealthResponse",
     "Task",
+    "TaskContinueRequest",
     "TaskOperation",
     "TaskStatus",
     "TaskStatusResponse",

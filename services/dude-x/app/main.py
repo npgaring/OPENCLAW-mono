@@ -15,7 +15,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.openapi.utils import get_openapi
 
-from app.api import compile as compile_api, gate, health, plans, privacy, root
+from app.api import compile as compile_api, health, plans, privacy, root
 from app.core.auth import verify_api_key
 from app.core.config import settings
 from app.core.errors import DUDEXError, ErrorCode, ErrorResponse
@@ -157,7 +157,6 @@ async def unhandled_error_handler(request: Request, exc: Exception):
 # Routers with API key (order as in overview)
 app.include_router(compile_api.router, dependencies=[Depends(verify_api_key)])
 app.include_router(plans.router, dependencies=[Depends(verify_api_key)])
-app.include_router(gate.router, dependencies=[Depends(verify_api_key)])
 # Public
 app.include_router(health.router)
 app.include_router(root.router)

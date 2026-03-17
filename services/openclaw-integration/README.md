@@ -15,7 +15,8 @@ Governance-gated layer between callers (e.g. Builder System) and the runtime exe
 
 ## API
 
-- `POST /task` — Submit task (ocgg_identity, plan_hash, operations); gate → persist → if PASS call executor.
+- `POST /task` — Submit task (ocgg_identity, plan_hash, operations; optional goal, context, acceptance_criteria); gate → persist → if PASS call executor.
+- `POST /task/{task_id}/continue` — Follow-up message for an existing task (body: `message`, optional `prior_context`). Task must be `completed`, `partial`, or `needs_review`. Uses same Gateway user for session continuity.
 - `POST /audit` — Callback: update task status and append audit event.
 - `POST /gate/evaluate` — Evaluate spec only; return GateDecision (no DB, no execution).
 - `POST /gate/verify-token` — Verify token in tenant context.
@@ -33,4 +34,4 @@ Execution is sent to the **OpenClaw Gateway** OpenResponses API. Set `OPENCLAW_B
 
 - **Endpoint**: `POST {OPENCLAW_BASE_URL}/v1/responses`
 - **Auth**: Use **OPENCLAW_API_KEY** as Bearer when calling the Gateway (OpenClaw requires it). **INTEGRATION_API_KEY** is only for authorizing callers to our API (/task, /audit, etc.), not for the Gateway.
-- The integration maps each plan `{domain, plan_hash, operations}` to an OpenResponses request (`model: "openclaw:main"`, `user`, `instructions`, `input`) and maps the Gateway response to `execution_id`, `status` ("success" or "failed"). Ensure the Gateway has `gateway.http.endpoints.responses.enabled: true`. See [OpenResponses HTTP API](https://docs.openclaw.ai/gateway/openresponses-http-api).
+- The integration maps each plan to an OpenResponses request and maps the Gateway response to `execution_id` and task `status`. Task statuses: `submitted`, `completed`, `failed`, `partial`, `needs_review`, plus error types (`error`, `auth_error`, etc.). Ensure the Gateway has `gateway.http.endpoints.responses.enabled: true`. See [OpenResponses HTTP API](https://docs.openclaw.ai/gateway/openresponses-http-api).

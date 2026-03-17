@@ -5,16 +5,29 @@ from app.core.identity import IDENTITY_ALLOWED_OPERATIONS, IDENTITY_DOMAIN_MAP
 from app.core.security import hash_payload
 from app.gate.models import Defect, GateDecision, GateEvaluation, GateOutcome
 from app.gate.policy import (
+    ALLOWED_TARGET_DOMAINS,
+    ALLOWED_WRITE_ROOT,
     APPROVAL_REFERENCE_FIELD,
     APPROVER_FIELD,
     ARTIFACT_OWNER_REGISTRY,
     CONTRADICTION_RULES,
     FORBIDDEN_OPERATION_TYPES,
+    MAX_CPU_SECONDS,
+    MAX_MEMORY_MB,
     MAX_OPERATIONS_PER_PLAN,
+    NETWORK_INPUT_KEYS,
+    NETWORK_OP_TYPES,
+    PATH_KEYS,
+    PLUGIN_INPUT_KEYS,
+    PLUGIN_OP_TYPES,
     POLICY_VERSION,
     PROD_DEPLOYMENT_TARGETS,
+    REGISTERED_PLUGINS,
+    RESOURCE_INPUT_KEYS,
     SCRIPT_CONTENT_BLOCKLIST,
     get_policy_version_at_execution,
+    host_from_url_or_host,
+    path_escapes_allowed_root,
 )
 
 
@@ -64,12 +77,80 @@ class GateEngine:
             if not isinstance(op, dict):
                 continue
             op_type = op.get("type") or ""
+            inputs = op.get("inputs") if isinstance(op.get("inputs"), dict) else {}
+
             if op_type in FORBIDDEN_OPERATION_TYPES:
                 reason_codes.append("FORBIDDEN_COMMAND")
                 defects.append(Defect("FORBIDDEN_COMMAND", f"operations[{i}].type", op_type))
             if allowed_ops and op_type not in allowed_ops:
                 reason_codes.append("CROSS_IDENTITY_OPERATION")
                 defects.append(Defect("CROSS_IDENTITY_OPERATION", f"operations[{i}].type", op_type))
+
+            # F1 — Filesystem escalation: path must not escape ALLOWED_WRITE_ROOT
+            for key in PATH_KEYS:
+                val = inputs.get(key) if key in inputs else op.get(key)
+                if isinstance(val, str) and path_escapes_allowed_root(val):
+                    reason_codes.append("CAPABILITY_ENVELOPE_VIOLATION")
+                    defects.append(Defect("CAPABILITY_ENVELOPE_VIOLATION", f"operations[{i}].{key}", "Write outside allowed directory"))
+                    break
+
+            # F2 — Network egress: outbound target must be in ALLOWED_TARGET_DOMAINS
+            if op_type in NETWORK_OP_TYPES or any(k in inputs for k in NETWORK_INPUT_KEYS):
+                found_unauthorized = False
+                for key in NETWORK_INPUT_KEYS:
+                    val = inputs.get(key)
+                    if isinstance(val, str):
+                        host = host_from_url_or_host(val)
+                        if host and host not in ALLOWED_TARGET_DOMAINS:
+                            reason_codes.append("UNAUTHORIZED_NETWORK_EGRESS")
+                            defects.append(Defect("UNAUTHORIZED_NETWORK_EGRESS", f"operations[{i}].inputs.{key}", "Unauthorized outbound connection"))
+                            found_unauthorized = True
+                            break
+                if not found_unauthorized and op_type in NETWORK_OP_TYPES and not any(inputs.get(k) for k in NETWORK_INPUT_KEYS if isinstance(inputs.get(k), str)):
+                    reason_codes.append("UNAUTHORIZED_NETWORK_EGRESS")
+                    defects.append(Defect("UNAUTHORIZED_NETWORK_EGRESS", f"operations[{i}].type", "Network op without allowed target"))
+
+            # F3 — Command/shell injection: blocklisted script content
+            injection_found = False
+            for key in ("command", "script", "cmd", "content"):
+                if injection_found:
+                    break
+                val = inputs.get(key) if key in inputs else op.get(key)
+                if isinstance(val, str):
+                    for pattern in SCRIPT_CONTENT_BLOCKLIST:
+                        if pattern.search(val):
+                            reason_codes.append("SANDBOX_REJECTION")
+                            defects.append(Defect("SANDBOX_REJECTION", f"operations[{i}].{key}", "Shell injection attempt"))
+                            injection_found = True
+                            break
+
+            # F4 — Resource limits: gate blocks plans requesting over limit
+            for key in RESOURCE_INPUT_KEYS:
+                val = inputs.get(key)
+                if isinstance(val, (int, float)):
+                    if key in ("memory_mb", "memory_mb_per_op") and val > MAX_MEMORY_MB:
+                        reason_codes.append("RESOURCE_LIMIT_EXCEEDED")
+                        defects.append(Defect("RESOURCE_LIMIT_EXCEEDED", f"operations[{i}].inputs.{key}", f"Exceeds max {MAX_MEMORY_MB} MB"))
+                        break
+                    if key in ("cpu_seconds", "timeout_seconds") and val > MAX_CPU_SECONDS:
+                        reason_codes.append("RESOURCE_LIMIT_EXCEEDED")
+                        defects.append(Defect("RESOURCE_LIMIT_EXCEEDED", f"operations[{i}].inputs.{key}", f"Exceeds max {MAX_CPU_SECONDS}s"))
+                        break
+
+            # F5 — Plugin injection: only REGISTERED_PLUGINS may be loaded
+            if op_type in PLUGIN_OP_TYPES or any(k in inputs for k in PLUGIN_INPUT_KEYS):
+                plugin_blocked = False
+                for key in PLUGIN_INPUT_KEYS:
+                    val = inputs.get(key)
+                    if isinstance(val, str) and val.strip():
+                        if val.strip() not in REGISTERED_PLUGINS:
+                            reason_codes.append("UNREGISTERED_PLUGIN")
+                            defects.append(Defect("UNREGISTERED_PLUGIN", f"operations[{i}].inputs.{key}", "Unregistered addon"))
+                            plugin_blocked = True
+                            break
+                if not plugin_blocked and op_type in PLUGIN_OP_TYPES and not any(inputs.get(k) for k in PLUGIN_INPUT_KEYS if isinstance(inputs.get(k), str)):
+                    reason_codes.append("UNREGISTERED_PLUGIN")
+                    defects.append(Defect("UNREGISTERED_PLUGIN", f"operations[{i}].type", "Plugin op without registered plugin id"))
 
         for left, right in CONTRADICTION_RULES:
             if spec.get(left) and spec.get(right):
@@ -90,6 +171,12 @@ class GateEngine:
         spec_hash = hash_payload(spec)
         plan_hash = computed_plan_hash
         plan_json = {"domain": domain, "plan_hash": plan_hash, "operations": operations}
+        if spec.get("goal"):
+            plan_json["goal"] = spec["goal"]
+        if spec.get("context"):
+            plan_json["context"] = spec["context"]
+        if spec.get("acceptance_criteria"):
+            plan_json["acceptance_criteria"] = spec["acceptance_criteria"]
         decision = GateDecision(
             outcome=outcome,
             reason_codes=list(set(reason_codes)),
@@ -112,6 +199,13 @@ class GateEngine:
         domain = IDENTITY_DOMAIN_MAP.get(ocgg_identity, "web")
         operations = spec.get("operations", []) if isinstance(spec, dict) else []
         plan_json = {"domain": domain, "plan_hash": "", "operations": operations}
+        if isinstance(spec, dict):
+            if spec.get("goal"):
+                plan_json["goal"] = spec["goal"]
+            if spec.get("context"):
+                plan_json["context"] = spec["context"]
+            if spec.get("acceptance_criteria"):
+                plan_json["acceptance_criteria"] = spec["acceptance_criteria"]
         spec_hash = hash_payload(spec) if isinstance(spec, dict) else ""
         plan_hash = hash_payload(plan_json) if plan_json.get("operations") else ""
         decision = GateDecision(

@@ -34,6 +34,16 @@ async def lifespan(app: FastAPI):
         await init_db()
     except Exception as e:
         logger.warning("Startup init_db failed (migrations will run on first request): %s", e)
+    # H4: Recover tasks orphaned by gate restart (token consumed, no execution_id)
+    try:
+        from app.db.session import get_sessionmaker
+        from app.services.orphan_recovery import recover_orphaned_tasks
+        async with get_sessionmaker()() as session:
+            n = await recover_orphaned_tasks(session)
+            if n:
+                logger.info("Orphan recovery: marked %d task(s) as error", n)
+    except Exception as e:
+        logger.warning("Orphan recovery failed (non-fatal): %s", e)
     yield
 
 

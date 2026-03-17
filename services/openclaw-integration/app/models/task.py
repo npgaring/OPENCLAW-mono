@@ -17,6 +17,9 @@ class TaskStatus(str, Enum):
     auth_error = "auth_error"
     invalid_plan = "invalid_plan"
     domain_rejected = "domain_rejected"
+    partial = "partial"
+    needs_review = "needs_review"
+    execution_aborted = "execution_aborted"  # F4: CPU/memory exhaustion or resource limit
 
 
 class Task(SQLModel, table=True):
@@ -89,6 +92,10 @@ class TaskSubmitRequest(BaseModel):
     ocgg_identity: str  # W-OCGG | R-OCGG
     plan_hash: str
     operations: list[TaskOperation]
+    # Optional: richer plan for OpenClaw (not part of plan_hash)
+    goal: str | None = None
+    context: str | None = None
+    acceptance_criteria: list[str] | None = None
 
 
 class TaskSubmitResponse(BaseModel):
@@ -106,6 +113,11 @@ class TaskSubmitResponse(BaseModel):
     artifact_owner: str | None = None
     operator_identity: str | None = None
     approver_identity: str | None = None
+
+
+class TaskContinueRequest(BaseModel):
+    message: str
+    prior_context: str | None = None
 
 
 class TaskStatusResponse(BaseModel):

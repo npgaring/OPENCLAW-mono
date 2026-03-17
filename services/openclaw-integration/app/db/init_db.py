@@ -11,11 +11,12 @@ from app.models import AuditEvent, GateDecisionRecord, Task, UsedExecutionToken
 
 logger = logging.getLogger(__name__)
 
-# Run in order so shared DB has dude-x tables (001, 002) then openclaw-integration (003)
+# Run in order: dude-x (001, 002), openclaw-integration (003, 004)
 _MIGRATION_FILES = [
     "001_dude_x_tables.sql",
     "002_add_identity_columns.sql",
     "003_openclaw_integration_tables.sql",
+    "004_task_status_partial_needs_review.sql",
 ]
 
 _init_lock = asyncio.Lock()

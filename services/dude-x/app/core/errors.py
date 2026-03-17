@@ -29,7 +29,7 @@ class ErrorResponse(BaseModel):
 
 
 class DUDEXError(Exception):
-    """Raised for compile/gate/plans validation failures; mapped to 400 + ErrorResponse."""
+    """Raised for compile/plans validation failures; mapped to 400 + ErrorResponse."""
 
     def __init__(
         self,

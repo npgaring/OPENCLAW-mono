@@ -17,7 +17,6 @@ Compile-only deterministic planner: validates human-signed specs and expands the
 
 - `POST /compile` — compile spec to plan (requires `X-API-Key`).
 - `GET /plans/{plan_hash}` — fetch plan by hash.
-- `POST /gate` — gate check (addon registry).
 - `GET /health` — health check.
 - `GET /`, `GET /privacy` — HTML pages.
 - `GET /docs` — Swagger UI.
