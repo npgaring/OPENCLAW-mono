@@ -1,6 +1,6 @@
 """GET /: landing HTML."""
 from fastapi import APIRouter
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, RedirectResponse
 
 from app.ui.html import render_page
 
@@ -25,3 +25,8 @@ async def root():
         meta="Protected endpoints require Authorization: Bearer <INTEGRATION_API_KEY>.",
     )
     return HTMLResponse(html)
+
+
+@router.get("/openapi-unified.json", include_in_schema=False)
+async def openapi_unified_redirect():
+    return RedirectResponse(url="/openclaw-integration/openapi-unified.json", status_code=307)

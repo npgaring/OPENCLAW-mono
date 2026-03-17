@@ -64,6 +64,35 @@ def _apply_component_namespace(schema: dict[str, Any], prefix: str) -> dict[str,
     return schema
 
 
+def _normalize_request_body_schema(schema: dict[str, Any]) -> None:
+    paths = schema.get("paths", {})
+    if not isinstance(paths, dict):
+        return
+    for path_item in paths.values():
+        if not isinstance(path_item, dict):
+            continue
+        for operation in path_item.values():
+            if not isinstance(operation, dict):
+                continue
+            request_body = operation.get("requestBody")
+            if not isinstance(request_body, dict):
+                continue
+            content = request_body.get("content")
+            if not isinstance(content, dict):
+                continue
+            for media in content.values():
+                if not isinstance(media, dict):
+                    continue
+                body_schema = media.get("schema")
+                if not isinstance(body_schema, dict):
+                    continue
+                examples = body_schema.get("examples")
+                if isinstance(examples, dict):
+                    body_schema["examples"] = list(examples.values())
+                if "examples" in body_schema and "type" not in body_schema and "$ref" not in body_schema:
+                    body_schema["type"] = "object"
+
+
 def _guess_dudex_root_path() -> str:
     dudex_root = os.getenv("DUDEX_ROOT_PATH")
     if dudex_root:
@@ -203,4 +232,5 @@ async def openapi_unified(request: Request):
     if combined_tags:
         combined["tags"] = combined_tags
 
+    _normalize_request_body_schema(combined)
     return JSONResponse(content=combined)
