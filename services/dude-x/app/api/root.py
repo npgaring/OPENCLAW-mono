@@ -19,9 +19,9 @@ async def root():
             {"label": "Swagger UI", "href": "/docs", "kind": "primary"},
             {"label": "ReDoc", "href": "/redoc", "kind": "secondary"},
             {"label": "Health", "href": "/health", "kind": "secondary"},
-            {"label": "OpenAPI JSON", "href": "/openapi.json", "kind": "secondary"},
+            {"label": "OpenAPI JSON", "href": "/openapi-unified.json", "kind": "secondary"},
             {"label": "Privacy", "href": "/privacy", "kind": "ghost"},
         ],
-        meta="Requires X-API-Key for protected endpoints.",
+        meta="Protected endpoints require Authorization: Bearer <INTEGRATION_API_KEY>.",
     )
     return HTMLResponse(html)

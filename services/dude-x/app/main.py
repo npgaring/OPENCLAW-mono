@@ -16,7 +16,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.openapi.utils import get_openapi
 
 from app.api import compile as compile_api, health, plans, privacy, root
-from app.core.auth import verify_api_key
+from app.core.auth import require_integration_auth
 from app.core.config import settings
 from app.core.errors import DUDEXError, ErrorCode, ErrorResponse
 from app.db.init_db import init_db
@@ -95,10 +95,10 @@ def custom_openapi():
     else:
         production_url = f"https://openclaw-mono.vercel.app{DUDEX_ROOT_PATH or ''}"
     schema["servers"] = [{"url": production_url, "description": "Production server"}]
-    schema.setdefault("components", {}).setdefault("securitySchemes", {})["apiKeyAuth"] = {
-        "type": "apiKey",
-        "in": "header",
-        "name": "X-API-Key",
+    schema.setdefault("components", {}).setdefault("securitySchemes", {})["bearerAuth"] = {
+        "type": "http",
+        "scheme": "bearer",
+        "bearerFormat": "Bearer",
     }
     for path in schema.get("paths", {}):
         if path in ("/", "/health", "/privacy", "/openapi.json", "/docs", "/redoc"):
@@ -106,7 +106,7 @@ def custom_openapi():
         schema["paths"][path] = dict(schema["paths"][path])
         for method in schema["paths"][path]:
             if method in ("get", "post", "put", "delete", "patch"):
-                schema["paths"][path][method]["security"] = [{"apiKeyAuth": []}]
+                schema["paths"][path][method]["security"] = [{"bearerAuth": []}]
     app.openapi_schema = schema
     return schema
 
@@ -155,8 +155,8 @@ async def unhandled_error_handler(request: Request, exc: Exception):
 
 
 # Routers with API key (order as in overview)
-app.include_router(compile_api.router, dependencies=[Depends(verify_api_key)])
-app.include_router(plans.router, dependencies=[Depends(verify_api_key)])
+app.include_router(compile_api.router, dependencies=[Depends(require_integration_auth)])
+app.include_router(plans.router, dependencies=[Depends(require_integration_auth)])
 # Public
 app.include_router(health.router)
 app.include_router(root.router)

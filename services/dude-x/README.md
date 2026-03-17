@@ -4,7 +4,7 @@ Compile-only deterministic planner: validates human-signed specs and expands the
 
 ## Setup
 
-1. Copy `example.env` to `.env` and set `DATABASE_URL` (Neon PostgreSQL) and `DUDE_X_DUSKY_API_KEY`.
+1. Copy `example.env` to `.env` and set `DATABASE_URL` (Neon PostgreSQL) and `INTEGRATION_API_KEY`.
 2. Run migrations on the shared DB (from repo root): `psql $DATABASE_URL -f migration/001_dude_x_tables.sql` then `002_add_identity_columns.sql` if needed.
 3. `pip install -r requirements.txt`
 
@@ -15,7 +15,7 @@ Compile-only deterministic planner: validates human-signed specs and expands the
 
 ## API
 
-- `POST /compile` — compile spec to plan (requires `X-API-Key`).
+- `POST /compile` — compile spec to plan (requires `Authorization: Bearer <INTEGRATION_API_KEY>`).
 - `GET /plans/{plan_hash}` — fetch plan by hash.
 - `GET /health` — health check.
 - `GET /`, `GET /privacy` — HTML pages.

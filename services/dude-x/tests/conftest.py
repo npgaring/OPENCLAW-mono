@@ -5,7 +5,7 @@ import pytest
 
 # Set before any app/db import so init_db and session use in-memory DB
 os.environ["DATABASE_URL"] = "sqlite+aiosqlite:///:memory:"
-os.environ.setdefault("DUDE_X_DUSKY_API_KEY", "test-key")
+os.environ.setdefault("INTEGRATION_API_KEY", "test-token")
 
 
 @pytest.fixture

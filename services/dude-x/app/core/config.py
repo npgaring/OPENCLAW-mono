@@ -23,9 +23,9 @@ class Settings(BaseSettings):
     )
     app_env: str = Field(default="development", description="APP_ENV")
     log_level: str = Field(default="info", description="Log level")
-    dude_x_dusky_api_key: str = Field(
+    integration_api_key: str = Field(
         default="",
-        description="API key for X-API-Key header (required at runtime)",
+        description="Bearer token for Authorization header (required at runtime)",
     )
     cors_origins: str = Field(
         default="*",
