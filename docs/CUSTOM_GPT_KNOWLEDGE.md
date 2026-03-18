@@ -34,8 +34,8 @@ Required shape (or send inside `params` for GPT Action compatibility):
 
 1. Build dude-x spec (target, decisions.operations, constraints, signature).
 2. **dude-x POST /compile** (header X-API-Key). On success → identity, ocgg_identity, domain, operations, integration_plan_hash.
-3. **Integration POST /gate/evaluate**: `ocgg_identity` = plan.ocgg_identity, `plan_hash: ""` (or use `integration_plan_hash`), `operations` = plan.operations; optional `goal`, `context`, `acceptance_criteria`. Use response `plan_hash` for step 4 (should match `integration_plan_hash`).
-4. **Integration POST /task**: same + `plan_hash` from step 3 (or `integration_plan_hash`). Response: task_id, status, execution_id, execution_response, gate_outcome, reason_codes.
+3. **Integration POST /gate/evaluate**: `ocgg_identity` = plan.ocgg_identity, `integration_plan_hash: ""` (or use `integration_plan_hash`), `operations` = plan.operations; optional `goal`, `context`, `acceptance_criteria`. Use response `plan_hash` for step 4 (should match `integration_plan_hash`).
+4. **Integration POST /task**: same + `integration_plan_hash` from step 3 (or compile response). Response: task_id, status, execution_id, execution_response, gate_outcome, reason_codes.
 5. **Follow-up**: **POST /task/{task_id}/continue** with `{ "message": "..." }`. Task must be completed, partial, or needs_review.
 6. **Status**: **GET /status/{task_id}**.
 
@@ -151,7 +151,7 @@ Use these exact payloads and expected responses when the user asks to **simulate
 ### Shared integration building blocks
 
 - **Operations for gate/task:** Use the **`operations`** array returned by **POST /compile** (must match what you send to the gate; include **`outputs: {}`** on ops if present in the compiled plan).
-- **Integration `plan_hash`:** For **POST /gate/evaluate** send `"plan_hash": ""` (or `integration_plan_hash`). The response includes the integration’s **`plan_hash`**. For **POST /task**, use that **`plan_hash`** (or `integration_plan_hash`) from the prior **POST /gate/evaluate** (same `ocgg_identity`, `operations`, `deployment_target`).
+- **Integration `plan_hash`:** For **POST /gate/evaluate** send `"integration_plan_hash": ""` (or a real value from compile). The response includes the integration’s **`plan_hash`**. For **POST /task**, use **`integration_plan_hash`** (or the response `plan_hash`) from the prior **POST /gate/evaluate** (same `ocgg_identity`, `operations`, `deployment_target`).
 
 ---
 
@@ -162,7 +162,7 @@ Use these exact payloads and expected responses when the user asks to **simulate
 ```json
 {
   "ocgg_identity": "W-OCGG",
-  "plan_hash": "<integration_plan_hash or from POST /gate/evaluate after compile>",
+  "integration_plan_hash": "<from dude-x compile or from POST /gate/evaluate>",
   "operations": [
     {
       "op_id": "op-001",
@@ -205,12 +205,12 @@ Use these exact payloads and expected responses when the user asks to **simulate
 
 ### Gate evaluate (dry run, after compile)
 
-**User sends:** **POST /gate/evaluate** — same shape as task, with `"plan_hash": ""` (or `integration_plan_hash`) and **`operations`** copied from dude-x compile response:
+**User sends:** **POST /gate/evaluate** — same shape as task, with `"integration_plan_hash": ""` (or a real value) and **`operations`** copied from dude-x compile response:
 
 ```json
 {
   "ocgg_identity": "W-OCGG",
-  "plan_hash": "",
+  "integration_plan_hash": "",
   "operations": [
     {
       "op_id": "op-001",
@@ -248,7 +248,7 @@ Use the response’s **`plan_hash`** (or the compile response’s `integration_p
 **Simulation instructions for the Custom GPT:** When the user asks to simulate the demo (or “run the 59s demo”, etc.), walk through in order:
 
 1. **dude-x POST /compile** — show the signed spec and the returned **plan** (`identity`, `operations`); explain that dude-x is compile-only (no execution).
-2. **POST /gate/evaluate** (optional) — same `operations` as compile, `plan_hash: ""` (or `integration_plan_hash`) → BLOCK + defect message + integration **`plan_hash`**.
+2. **POST /gate/evaluate** (optional) — same `operations` as compile, `integration_plan_hash: ""` (or a real value) → BLOCK + defect message + integration **`plan_hash`**.
 3. **POST /task** without approval → **BLOCK** (same narrative as tests).
 4. **POST /task** with **`approval_reference`** → **PASS** + execution.
 5. **GET /status/{task_id}** — receipt / audit trail.

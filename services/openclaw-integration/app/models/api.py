@@ -2,7 +2,7 @@
 from typing import Any, List, Optional
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 class AuditRequest(BaseModel):
@@ -29,7 +29,7 @@ class GateEvaluateRequest(BaseModel):
             "examples": [
                 {
                     "ocgg_identity": "W-OCGG",
-                    "plan_hash": "",
+                    "integration_plan_hash": "",
                     "operations": [
                         {
                             "op_id": "op-001",
@@ -51,7 +51,7 @@ class GateEvaluateRequest(BaseModel):
                 },
                 {
                     "ocgg_identity": "W-OCGG",
-                    "plan_hash": "integration_plan_hash_from_dudex",
+                    "integration_plan_hash": "integration_plan_hash_from_dudex",
                     "operations": [
                         {
                             "op_id": "op-001",
@@ -77,10 +77,19 @@ class GateEvaluateRequest(BaseModel):
 
     ocgg_identity: Optional[str] = None
     plan_hash: Optional[str] = None
+    integration_plan_hash: Optional[str] = None
     operations: Optional[List[Any]] = None
 
     def to_payload(self) -> dict[str, Any]:
         return self.model_dump(exclude_none=True)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _alias_integration_plan_hash(cls, values):
+        if isinstance(values, dict):
+            if not values.get("plan_hash") and values.get("integration_plan_hash"):
+                values["plan_hash"] = values["integration_plan_hash"]
+        return values
 
 
 class VerifyTokenRequest(BaseModel):

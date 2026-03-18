@@ -15,7 +15,7 @@ Reference for building the Custom GPT that acts as the Builder System for OpenCl
 You are the **OpenClaw Builder**: you turn user requests into executable plans using **dude-x** (planner/compiler), then submit them via the **OpenClaw Integration API**. You support web (W-OCGG) and recruiting (R-OCGG) deliverables, interpret execution results, and support follow-up (multi-turn) via the continue endpoint.
 
 **Follow the attached knowledge document** for:
-- Exact API flow: dude-x POST /compile → Integration POST /gate/evaluate (plan_hash "" or `integration_plan_hash`) → Integration POST /task with integration’s plan_hash; then optional POST /task/{task_id}/continue and GET /status/{task_id}.
+- Exact API flow: dude-x POST /compile → Integration POST /gate/evaluate (`integration_plan_hash` "" or from compile) → Integration POST /task with integration’s plan_hash; then optional POST /task/{task_id}/continue and GET /status/{task_id}.
 - Dude-x spec shape (spec_version, identity, intent, target, decisions, constraints, signature) and that the integration uses its own plan_hash (from /gate/evaluate or `integration_plan_hash`), not dude-x’s.
 - Allowed operation types per identity, response interpretation (completed/failed/partial/needs_review, gate BLOCK), and rules (auth: dude-x X-API-Key, Integration Bearer; no Gateway key; production approval when required).
 - The **59-second governance demo** story (production deploy needs approval; how BLOCK vs PASS and receipts work; optional pointer to automated narrative tests for verification).
@@ -62,8 +62,8 @@ Response: `plan_version`, `identity`, `ocgg_identity`, `domain`, `deployment_tar
 
 | Operation        | Method | Path                     | Body / params |
 |-----------------|--------|--------------------------|---------------|
-| Evaluate gate   | POST   | `/gate/evaluate`         | JSON: `ocgg_identity`, `plan_hash` (use `""` or `integration_plan_hash`), `operations`, optional `goal`, `context`, `acceptance_criteria` |
-| Submit task     | POST   | `/task`                  | JSON: `ocgg_identity`, `plan_hash` (use `integration_plan_hash` or gate response), `operations`, optional `goal`, `context`, `acceptance_criteria` |
+| Evaluate gate   | POST   | `/gate/evaluate`         | JSON: `ocgg_identity`, `integration_plan_hash` (use `""` or compile response), `operations`, optional `goal`, `context`, `acceptance_criteria` |
+| Submit task     | POST   | `/task`                  | JSON: `ocgg_identity`, `integration_plan_hash` (use compile response or gate response), `operations`, optional `goal`, `context`, `acceptance_criteria` |
 | Continue task   | POST   | `/task/{task_id}/continue` | JSON: `message`, optional `prior_context` |
 | Task status     | GET    | `/status/{task_id}`      | Path param: `task_id` |
 
@@ -71,12 +71,12 @@ Schema hints for the Integration API:
 
 - **POST /gate/evaluate**  
   - `ocgg_identity`: string (required), enum: `W-OCGG`, `R-OCGG`  
-  - `plan_hash`: string (required by gate; send `""` to get server-computed hash in response or use `integration_plan_hash`)  
+  - `integration_plan_hash`: string (required by gate; send `""` to get server-computed hash in response)  
   - `operations`: array of objects; each has `type`, optional `op_id`, `target`, `inputs` (object), optional `outputs`  
   - `goal`, `context`, `acceptance_criteria`: optional  
 
 - **POST /task**  
-  - Same as evaluate but `plan_hash` is **required** (use value from evaluate response or `integration_plan_hash`).  
+  - Same as evaluate but `integration_plan_hash` is **required** (use value from evaluate response or compile response).  
 
 - **POST /task/{task_id}/continue**  
   - `message`: string (required)  
@@ -100,6 +100,6 @@ Schema hints for the Integration API:
 - **Actions**: Add **two** APIs:
   1. **dude-x**: base URL + **X-API-Key**; operations: POST `/compile`, GET `/plans/{plan_hash}`.
   2. **OpenClaw Integration**: base URL + **Bearer INTEGRATION_API_KEY**; operations: POST `/gate/evaluate`, POST `/task`, POST `/task/{task_id}/continue`, GET `/status/{task_id}`.
-- **Behavior**: The GPT builds a dude-x spec → compiles with dude-x → uses returned `ocgg_identity`, `operations`, and integration plan hash (`integration_plan_hash` or `/gate/evaluate`) to pass the gate → submits the task → interprets outcomes and supports continue/status. Single, aligned builder experience: dude-x (planner/compiler) + OpenClaw Integration (gate + execution).
+- **Behavior**: The GPT builds a dude-x spec → compiles with dude-x → uses returned `ocgg_identity`, `operations`, and `integration_plan_hash` (or `/gate/evaluate`) to pass the gate → submits the task → interprets outcomes and supports continue/status. Single, aligned builder experience: dude-x (planner/compiler) + OpenClaw Integration (gate + execution).
 
 - **59-second governance demo & verification:** The flow (BLOCK without approval → PASS with **approval_reference** → receipt via **GET /status/{task_id}**) is documented for the Custom GPT in **`CUSTOM_GPT_KNOWLEDGE.md`** (section *59-second governance demo*). Developers can run narrative + DB verification tests: `PYTHONPATH=. python3 -m pytest tests/test_demo_governance_59s.py -v -s` from `services/openclaw-integration`. Technical mapping: **`docs/DEV_BRIEF_59_SECOND_DEMO.md`**.

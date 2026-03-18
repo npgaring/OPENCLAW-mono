@@ -4,7 +4,7 @@ from enum import Enum
 from typing import Any, List, Optional
 from uuid import UUID, uuid4
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 from sqlalchemy import Column, Enum as SaEnum, JSON, Text
 from sqlmodel import Field as SqlField, SQLModel
 
@@ -60,7 +60,7 @@ class TaskSubmitRequest(BaseModel):
             "examples": [
                 {
                     "ocgg_identity": "W-OCGG",
-                    "plan_hash": "integration_plan_hash_from_dudex",
+                    "integration_plan_hash": "integration_plan_hash_from_dudex",
                     "operations": [
                         {
                             "op_id": "op-001",
@@ -92,6 +92,7 @@ class TaskSubmitRequest(BaseModel):
 
     ocgg_identity: str  # W-OCGG | R-OCGG
     plan_hash: str
+    integration_plan_hash: Optional[str] = None
     operations: list[TaskOperation]
     # Optional: richer plan for OpenClaw (not part of plan_hash)
     goal: Optional[str] = None
@@ -101,6 +102,14 @@ class TaskSubmitRequest(BaseModel):
     deployment_target: Optional[str] = None
     approval_reference: Optional[str] = None
     approver_id: Optional[str] = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def _alias_integration_plan_hash(cls, values):
+        if isinstance(values, dict):
+            if not values.get("plan_hash") and values.get("integration_plan_hash"):
+                values["plan_hash"] = values["integration_plan_hash"]
+        return values
 
 
 class TaskSubmitResponse(BaseModel):
