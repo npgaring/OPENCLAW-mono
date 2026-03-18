@@ -45,7 +45,14 @@ def build_plan(spec: SpecIn) -> PlanPayload:
     integration_plan_hash = integration_hash_payload(
         {"domain": domain, "operations": plan_body["operations"]}
     )
-    plan_hash = hash_payload(plan_body)
+    plan_hash_body = {
+        "plan_version": plan_body["plan_version"],
+        "identity": plan_body["identity"],
+        "domain": plan_body["domain"],
+        "operations": plan_body["operations"],
+        "rollback": plan_body["rollback"],
+    }
+    plan_hash = hash_payload(plan_hash_body)
     plan_body["plan_hash"] = plan_hash
     plan_body["integration_plan_hash"] = integration_plan_hash
     return PlanPayload(**plan_body)
