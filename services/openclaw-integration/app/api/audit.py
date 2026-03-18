@@ -5,8 +5,9 @@ from sqlalchemy import select
 from app.core.errors import task_not_found
 from app.db.session import get_session
 from app.gate.policy import POLICY_VERSION
-from app.models import AuditEvent, AuditAck, AuditRequest, GateDecisionRecord, Task
+from app.models import AuditEvent, AuditAck, AuditRequest, GateDecisionRecord, Task, TaskStatus
 from fastapi import APIRouter, Depends, HTTPException
+from fastapi.encoders import jsonable_encoder
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm.attributes import flag_modified
 
@@ -44,7 +45,11 @@ async def receive_audit(
         payload["execution_token_hash"] = gate_record.execution_token_hash
     if task.policy_version != POLICY_VERSION:
         payload["policy_version_delta"] = True
-    task.status = body.status
+    try:
+        task.status = TaskStatus(body.status)
+    except ValueError:
+        task.status = TaskStatus.error
+    payload = jsonable_encoder(payload)
     task.audit_history = task.audit_history or []
     task.audit_history.append({
         "event_type": body.event_type or "audit",
