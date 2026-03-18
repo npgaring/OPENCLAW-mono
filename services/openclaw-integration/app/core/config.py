@@ -1,6 +1,7 @@
 """Settings from environment. Copy example.env to .env."""
 import re
 from pathlib import Path
+from typing import Optional
 from urllib.parse import parse_qs, urlparse, urlunparse
 
 from pydantic import Field
@@ -19,10 +20,10 @@ class Settings(BaseSettings):
         extra="ignore",
     )
 
-    database_url: str | None = Field(default=None, description="PostgreSQL URL (postgres:// or postgresql://); optional on serverless until configured")
-    openclaw_base_url: str | None = Field(default=None, description="OpenClaw Gateway base URL (e.g. https://api.cdopenclaw.com)")
-    openclaw_api_key: str | None = Field(default=None, description="Bearer token for OpenClaw Gateway (POST .../v1/responses). Required by OpenClaw.")
-    integration_api_key: str | None = Field(default=None, description="Authorization for our API: callers use Bearer <this> to access /task, /audit, /gate, /status. Also used to sign execution tokens.")
+    database_url: Optional[str] = Field(default=None, description="PostgreSQL URL (postgres:// or postgresql://); optional on serverless until configured")
+    openclaw_base_url: Optional[str] = Field(default=None, description="OpenClaw Gateway base URL (e.g. https://api.cdopenclaw.com)")
+    openclaw_api_key: Optional[str] = Field(default=None, description="Bearer token for OpenClaw Gateway (POST .../v1/responses). Required by OpenClaw.")
+    integration_api_key: Optional[str] = Field(default=None, description="Authorization for our API: callers use Bearer <this> to access /task, /audit, /gate, /status. Also used to sign execution tokens.")
     app_env: str = Field(default="development", description="development | preview | production")
     log_level: str = Field(default="info", description="Log level")
 
@@ -41,7 +42,7 @@ class Settings(BaseSettings):
         return url
 
     @property
-    def db_sslmode(self) -> str | None:
+    def db_sslmode(self) -> Optional[str]:
         if not hasattr(self, "_db_sslmode"):
             parsed = urlparse(self.database_url or "")
             qs = parse_qs(parsed.query)

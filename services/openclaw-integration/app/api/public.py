@@ -91,6 +91,34 @@ def _normalize_request_body_schema(schema: dict[str, Any]) -> None:
                     body_schema["examples"] = list(examples.values())
                 if "examples" in body_schema and "type" not in body_schema and "$ref" not in body_schema:
                     body_schema["type"] = "object"
+                if body_schema.get("type") == "object" and "properties" not in body_schema and "$ref" not in body_schema:
+                    body_schema["properties"] = {"payload": {"type": "object"}}
+                    body_schema.setdefault("additionalProperties", True)
+
+
+def _normalize_security(schema: dict[str, Any]) -> None:
+    components = schema.get("components")
+    if not isinstance(components, dict):
+        components = {}
+        schema["components"] = components
+    components["securitySchemes"] = {
+        "bearerAuth": {
+            "type": "http",
+            "scheme": "bearer",
+            "bearerFormat": "Bearer",
+        }
+    }
+    paths = schema.get("paths", {})
+    if not isinstance(paths, dict):
+        return
+    for path_item in paths.values():
+        if not isinstance(path_item, dict):
+            continue
+        for operation in path_item.values():
+            if not isinstance(operation, dict):
+                continue
+            if "security" in operation:
+                operation["security"] = [{"bearerAuth": []}]
 
 
 def _guess_dudex_root_path() -> str:
@@ -233,4 +261,5 @@ async def openapi_unified(request: Request):
         combined["tags"] = combined_tags
 
     _normalize_request_body_schema(combined)
+    _normalize_security(combined)
     return JSONResponse(content=combined)

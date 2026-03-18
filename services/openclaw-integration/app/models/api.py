@@ -1,5 +1,5 @@
 """API request/response Pydantic models."""
-from typing import Any
+from typing import Any, List, Optional
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -8,9 +8,9 @@ from pydantic import BaseModel, ConfigDict, Field
 class AuditRequest(BaseModel):
     model_config = ConfigDict(extra="allow")
 
-    task_id: UUID | None = None
-    status: str | None = None
-    event_type: str | None = None
+    task_id: Optional[UUID] = None
+    status: Optional[str] = None
+    event_type: Optional[str] = None
 
     def to_payload(self) -> dict[str, Any]:
         return self.model_dump(exclude_none=True)
@@ -52,9 +52,9 @@ class GateEvaluateRequest(BaseModel):
         },
     )
 
-    ocgg_identity: str | None = None
-    plan_hash: str | None = None
-    operations: list[Any] | None = None
+    ocgg_identity: Optional[str] = None
+    plan_hash: Optional[str] = None
+    operations: Optional[List[Any]] = None
 
     def to_payload(self) -> dict[str, Any]:
         return self.model_dump(exclude_none=True)
@@ -80,12 +80,12 @@ class VerifyTokenRequest(BaseModel):
 class VerifyTokenResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    execution_id: str | None = None
+    execution_id: Optional[str] = None
     token_verified: bool
     tenant_context: str
-    token_tenant: str | None = None
+    token_tenant: Optional[str] = None
     result: str  # PASS | BLOCK
-    reason: str | None = None
+    reason: Optional[str] = None
 
 
 class HealthResponse(BaseModel):

@@ -4,7 +4,7 @@ import hashlib
 import hmac
 import json
 import time
-from typing import Any
+from typing import Any, Optional, Tuple
 
 from app.core.config import settings
 from app.gate.policy import POLICY_VERSION
@@ -24,10 +24,10 @@ def _base64url_decode(s: str) -> bytes:
 
 
 def generate_execution_token(
-    payload: dict[str, Any],
-    secret: str | None = None,
-    issued_at: int | None = None,
-    expires_at: int | None = None,
+    payload: dict,
+    secret: Optional[str] = None,
+    issued_at: Optional[int] = None,
+    expires_at: Optional[int] = None,
 ) -> str:
     secret = secret or settings.integration_api_key
     now = int(time.time())
@@ -39,7 +39,7 @@ def generate_execution_token(
     return _base64url_encode(payload_bytes) + "." + _base64url_encode(sig)
 
 
-def verify_execution_token(token: str, secret: str | None = None) -> tuple[bool, dict[str, Any] | None]:
+def verify_execution_token(token: str, secret: Optional[str] = None) -> Tuple[bool, Optional[dict]]:
     secret = secret or settings.integration_api_key
     if "." not in token:
         return False, None
@@ -57,7 +57,7 @@ def verify_execution_token(token: str, secret: str | None = None) -> tuple[bool,
     return True, payload
 
 
-def is_token_expired(payload: dict[str, Any], now: int | None = None) -> bool:
+def is_token_expired(payload: dict, now: Optional[int] = None) -> bool:
     exp = payload.get("expires_at")
     if not exp:
         return True

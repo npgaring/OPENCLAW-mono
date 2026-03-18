@@ -1,0 +1,98 @@
+# OpenClaw Builder — Knowledge (attach this file to the Custom GPT)
+
+Use this document for exact API flow, request/response shapes, and rules. The GPT Instructions should tell the assistant to follow this knowledge.
+
+---
+
+## Architecture
+
+- **dude-x**: Compile-only deterministic planner. Validates human-signed specs and compiles them into execution plans. **POST /compile** with full spec → returns plan (identity, domain, operations, plan_hash). Auth: **X-API-Key**.
+- **OpenClaw Integration**: Gate + executor gateway. **POST /gate/evaluate** → get integration’s plan_hash and gate decision. **POST /task** → submit. Auth: **Authorization: Bearer \<INTEGRATION_API_KEY\>**. Integration plan_hash is from `{ domain, operations }` only (not dude-x’s plan_hash).
+- **Flow**: Build dude-x spec → dude-x **POST /compile** → use returned `identity` and `operations` → Integration **POST /gate/evaluate** (plan_hash `""`) → Integration **POST /task** with integration’s plan_hash.
+
+---
+
+## Dude-x spec (POST /compile)
+
+Required shape (or send inside `params` for GPT Action compatibility):
+
+- `spec_version`: `"1.0"`
+- `identity`: `"W-OCGG"` or `"R-OCGG"`
+- `intent`: `"web-build"` | `"web-maintenance"` | `"recruiting-update"` (W-OCGG → web-build or web-maintenance; R-OCGG → recruiting-update)
+- `target`: `{ "resource_id": string, "environment": "preview" | "production" }`
+- `decisions`: `{ "domain": "web" | "recruiting" | null, "operations": [ { "op_id", "type", "target", "inputs", optional "outputs", "addon" } ] }`
+- `constraints`: object (e.g. `{}`). If `"rollback"` key present, value must be non-empty.
+- `signature`: `{ "type": "human_signed", "signed_at": "<ISO8601>", "hash": "<non-empty>" }` (synthetic OK: e.g. hash = "sig_builder_" + timestamp).
+
+**Response (PlanPayload)**: `plan_version`, `identity`, `domain`, `operations`, `rollback`, `plan_hash`. Use **identity** and **operations** for Integration; do **not** use dude-x’s plan_hash as the integration’s plan_hash.
+
+**Errors**: IDENTITY_INTENT_MISMATCH → fix intent for identity; DOMAIN_MISMATCH → set decisions.domain; MISSING_DECISION → non-empty operations; fix and retry.
+
+---
+
+## API flow (strict)
+
+1. Build dude-x spec (target, decisions.operations, constraints, signature).
+2. **dude-x POST /compile** (header X-API-Key). On success → identity, domain, operations.
+3. **Integration POST /gate/evaluate**: `ocgg_identity` = plan.identity, `plan_hash: ""`, `operations` = plan.operations; optional `goal`, `context`, `acceptance_criteria`. Use response `plan_hash` for step 4.
+4. **Integration POST /task**: same + `plan_hash` from step 3. Response: task_id, status, execution_id, execution_response, gate_outcome, reason_codes.
+5. **Follow-up**: **POST /task/{task_id}/continue** with `{ "message": "..." }`. Task must be completed, partial, or needs_review.
+6. **Status**: **GET /status/{task_id}**.
+
+---
+
+## Operation types
+
+- **W-OCGG**: create_file, write_config, build, deploy, test, rollback_prep.
+- **R-OCGG**: create_file, write_config.
+
+Examples (for decisions.operations): write_config with path/content; build with command; deploy with provider, project. Recruiting: create_file/write_config for job descriptions; keep compliant.
+
+---
+
+## Response interpretation
+
+- **completed**: success; summarize artifacts and steps.
+- **failed**: show message; suggest fixes or new plan.
+- **partial** / **needs_review**: show what’s done; offer continue or follow-up.
+- **gate_outcome BLOCK**: do not submit; explain reason_codes and defect_list; fix spec or operations.
+
+---
+
+## Rules
+
+- dude-x: X-API-Key. Integration: Bearer INTEGRATION_API_KEY. Never expose OpenClaw Gateway key.
+- Only allowed operation types per identity. Integration plan_hash comes only from /gate/evaluate (not dude-x plan_hash).
+- Production deploy may require approver_id or approval_reference; on PROD_DEPLOY_NO_APPROVAL or SOD_VIOLATION, explain and ask user.
+- After API calls, briefly summarize what you did and the outcome (e.g. "Compiled with dude-x; submitted; task_id …" and status, message, artifacts).
+- If dude-x or Integration base URL/API key is missing, ask user to set them in GPT configuration.
+
+---
+
+## 59-second governance demo (verification & narrative)
+
+**What it is:** A short story the integration enforces: production deploy without approval is **BLOCK**; the same plan with **approval_reference** (or **approver_id**) can **PASS** and execute. The Custom GPT should mirror that story when explaining governance to users (e.g. “without approval the gate blocks; add an approval reference and resubmit”).
+
+**User-facing flow (matches API):**
+
+1. User sends **POST /task** with `deployment_target: "production"` and **no** `approval_reference` / `approver_id` → system returns **gate_outcome: BLOCK**, **reason_codes** including `PROD_DEPLOY_NO_APPROVAL`; no execution.
+2. User adds **approval_reference** (or valid **approver_id**) and resubmits → **gate_outcome: PASS**, **task_id**, **execution_id** / **execution_response** when execution succeeds.
+3. **Receipt:** **GET /status/{task_id}** shows **audit_history** with events like `gate_decision` and `execution_response`.
+
+**Optional dry run:** **POST /gate/evaluate** with the same payload shape (no persistence) returns **outcome**, **reason_codes**, **defect_list** — useful to explain *why* the gate would block before submitting **POST /task**.
+
+**Developer verification (automated tests):** In the repo, `services/openclaw-integration/tests/test_demo_governance_59s.py` prints each scenario in narrative form when run with **`pytest … -s`**:
+
+- **User sending this request:** method, path, and JSON body.
+- **The system returns:** status and response JSON.
+- **Verification receipts:** database rows for **tasks**, **gate_decisions**, **used_execution_tokens** (what was persisted for audit and replay protection).
+
+Run (from `services/openclaw-integration`):
+
+```bash
+PYTHONPATH=. python3 -m pytest tests/test_demo_governance_59s.py -v -s
+```
+
+Full technical mapping: **`docs/DEV_BRIEF_59_SECOND_DEMO.md`**.
+
+**If a user asks how we know the demo works:** Point them to that test file and brief, or summarize: production without approval → BLOCK; with approval → PASS + execution; status endpoint shows the receipt trail.

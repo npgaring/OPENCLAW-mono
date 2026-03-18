@@ -1,6 +1,7 @@
 """Run idempotent SQL migration files on startup (PostgreSQL only)."""
 import logging
 from pathlib import Path
+from typing import List, Optional
 
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncConnection
@@ -8,7 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncConnection
 logger = logging.getLogger(__name__)
 
 # Bundled with app (app/db/migrations/) so Vercel includes it; fallbacks for local dev
-def _migration_dir() -> Path | None:
+def _migration_dir() -> Optional[Path]:
     candidates = [
         Path(__file__).resolve().parent / "migrations",  # app/db/migrations/
         Path(__file__).resolve().parents[2] / "migration",
@@ -23,7 +24,7 @@ def _migration_dir() -> Path | None:
 
 def _strip_line_comments(content: str) -> str:
     """Remove -- line comments. Simple and sufficient for our migration files."""
-    cleaned: list[str] = []
+    cleaned: List[str] = []
     for line in content.splitlines():
         if "--" in line:
             line = line.split("--", 1)[0]
@@ -31,11 +32,11 @@ def _strip_line_comments(content: str) -> str:
     return "\n".join(cleaned)
 
 
-def _split_sql(content: str) -> list[str]:
+def _split_sql(content: str) -> List[str]:
     """Split SQL by ';' but not inside $$...$$ blocks."""
     content = _strip_line_comments(content)
     statements = []
-    current: list[str] = []
+    current: List[str] = []
     i = 0
     in_dollar = False
     n = len(content)
@@ -64,8 +65,8 @@ def _split_sql(content: str) -> list[str]:
 
 async def run_migration_files(
     conn: AsyncConnection,
-    filenames: list[str],
-    migration_dir: Path | None = None,
+    filenames: List[str],
+    migration_dir: Optional[Path] = None,
 ) -> None:
     """Execute SQL migration files in order. No-op if dir or file missing."""
     base = migration_dir or _migration_dir()

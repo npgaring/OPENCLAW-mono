@@ -1,7 +1,7 @@
 """Gate outcome and evaluation models."""
 from dataclasses import dataclass
 from enum import Enum
-from typing import Any
+from typing import Any, List, Optional
 
 from pydantic import BaseModel, ConfigDict
 
@@ -20,20 +20,20 @@ OUTCOME_PRIORITY = {GateOutcome.BLOCK: 3, GateOutcome.CLARIFY: 2, GateOutcome.RE
 @dataclass
 class Defect:
     code: str
-    field: str | None
+    field: Optional[str]
     message: str
 
 
 @dataclass
 class GateDecision:
     outcome: GateOutcome
-    reason_codes: list[str]
-    defect_list: list[Defect]
+    reason_codes: List[str]
+    defect_list: List[Defect]
     policy_version: str
     spec_hash: str
     plan_hash: str
-    approver_id: str | None
-    execution_token: str | None = None
+    approver_id: Optional[str]
+    execution_token: Optional[str] = None
 
 
 @dataclass
@@ -48,10 +48,10 @@ class GateDecisionResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     outcome: str
-    reason_codes: list[str] = []
-    defect_list: list[dict[str, Any]] = []
+    reason_codes: List[str] = []
+    defect_list: List[dict] = []
     policy_version: str
     spec_hash: str
     plan_hash: str
-    approver_id: str | None = None
-    execution_token: str | None = None
+    approver_id: Optional[str] = None
+    execution_token: Optional[str] = None

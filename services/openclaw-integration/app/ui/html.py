@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Iterable, Mapping
+from typing import Iterable, Mapping, Optional
 
 
 BASE_CSS = """
@@ -142,8 +142,8 @@ def render_page(
     eyebrow: str,
     heading: str,
     description: str,
-    actions: Iterable[Mapping[str, str]] | None = None,
-    meta: str | None = None,
+    actions: Optional[Iterable[Mapping[str, str]]] = None,
+    meta: Optional[str] = None,
 ) -> str:
     actions_html = ""
     if actions:

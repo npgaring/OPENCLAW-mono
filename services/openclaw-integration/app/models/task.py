@@ -1,7 +1,7 @@
 """Task table and request/response models."""
 from datetime import datetime
 from enum import Enum
-from typing import Any
+from typing import Any, List, Optional
 from uuid import UUID, uuid4
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -29,28 +29,28 @@ class Task(SQLModel, table=True):
     ocgg_identity: str = SqlField(index=True)
     domain: str = SqlField()
     plan_hash: str = SqlField()
-    spec_hash: str | None = SqlField(default=None, index=True)
-    policy_version: str | None = SqlField(default=None)
-    gate_outcome: str | None = SqlField(default=None)
-    reason_codes: list[str] = SqlField(default_factory=list, sa_column=Column(JSON, nullable=False))
-    execution_token_hash: str | None = SqlField(default=None)
-    approval_reference: str | None = SqlField(default=None)
-    plan_json: dict[str, Any] = SqlField(default_factory=dict, sa_column=Column(JSON, nullable=False))
-    audit_history: list[Any] = SqlField(default_factory=list, sa_column=Column(JSON, nullable=False))
+    spec_hash: Optional[str] = SqlField(default=None, index=True)
+    policy_version: Optional[str] = SqlField(default=None)
+    gate_outcome: Optional[str] = SqlField(default=None)
+    reason_codes: List[str] = SqlField(default_factory=list, sa_column=Column(JSON, nullable=False))
+    execution_token_hash: Optional[str] = SqlField(default=None)
+    approval_reference: Optional[str] = SqlField(default=None)
+    plan_json: dict = SqlField(default_factory=dict, sa_column=Column(JSON, nullable=False))
+    audit_history: List[Any] = SqlField(default_factory=list, sa_column=Column(JSON, nullable=False))
     status: str = SqlField(default="submitted")  # taskstatus enum in PG
     created_at: datetime = SqlField(default_factory=datetime.utcnow)
     updated_at: datetime = SqlField(default_factory=datetime.utcnow)
-    execution_id: str | None = SqlField(default=None, index=True)
+    execution_id: Optional[str] = SqlField(default=None, index=True)
 
 
 class TaskOperation(BaseModel):
     model_config = ConfigDict(extra="allow")
 
     type: str
-    op_id: str | None = None
-    target: str | None = None
-    inputs: dict[str, Any] = Field(default_factory=dict)
-    outputs: dict[str, Any] = Field(default_factory=dict)
+    op_id: Optional[str] = None
+    target: Optional[str] = None
+    inputs: dict = Field(default_factory=dict)
+    outputs: dict = Field(default_factory=dict)
 
 
 class TaskSubmitRequest(BaseModel):
@@ -93,31 +93,35 @@ class TaskSubmitRequest(BaseModel):
     plan_hash: str
     operations: list[TaskOperation]
     # Optional: richer plan for OpenClaw (not part of plan_hash)
-    goal: str | None = None
-    context: str | None = None
-    acceptance_criteria: list[str] | None = None
+    goal: Optional[str] = None
+    context: Optional[str] = None
+    acceptance_criteria: Optional[List[str]] = None
+    # Gate: production deploy requires one of these
+    deployment_target: Optional[str] = None
+    approval_reference: Optional[str] = None
+    approver_id: Optional[str] = None
 
 
 class TaskSubmitResponse(BaseModel):
     model_config = ConfigDict(extra="allow")
 
     task_id: UUID
-    execution_id: str | None = None
+    execution_id: Optional[str] = None
     status: str
-    execution_response: dict[str, Any] | None = None
-    gate_outcome: str | None = None
-    reason_codes: list[str] = Field(default_factory=list)
-    audit_trace_id: str | None = None
-    tenant_id: str | None = None
-    artifact_id: str | None = None
-    artifact_owner: str | None = None
-    operator_identity: str | None = None
-    approver_identity: str | None = None
+    execution_response: Optional[dict] = None
+    gate_outcome: Optional[str] = None
+    reason_codes: List[str] = Field(default_factory=list)
+    audit_trace_id: Optional[str] = None
+    tenant_id: Optional[str] = None
+    artifact_id: Optional[str] = None
+    artifact_owner: Optional[str] = None
+    operator_identity: Optional[str] = None
+    approver_identity: Optional[str] = None
 
 
 class TaskContinueRequest(BaseModel):
     message: str
-    prior_context: str | None = None
+    prior_context: Optional[str] = None
 
 
 class TaskStatusResponse(BaseModel):
@@ -125,5 +129,5 @@ class TaskStatusResponse(BaseModel):
 
     task_id: UUID
     status: str
-    execution_id: str | None = None
-    audit_history: list[Any] = Field(default_factory=list)
+    execution_id: Optional[str] = None
+    audit_history: List[Any] = Field(default_factory=list)

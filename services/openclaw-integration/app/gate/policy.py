@@ -1,6 +1,7 @@
 """Policy constants for gate engine."""
 import os
 import re
+from typing import Optional
 
 POLICY_VERSION = "1.0.0"
 REQUIRED_FIELDS = ["ocgg_identity", "plan_hash", "operations"]
@@ -79,7 +80,7 @@ def path_escapes_allowed_root(path: str) -> bool:
     return len(parts) < root_count
 
 
-def host_from_url_or_host(value: str) -> str | None:
+def host_from_url_or_host(value: str) -> Optional[str]:
     """Extract hostname from URL or return value if it looks like a host."""
     if not value or not isinstance(value, str):
         return None

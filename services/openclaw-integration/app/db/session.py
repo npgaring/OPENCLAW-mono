@@ -20,14 +20,18 @@ def get_engine():
             connect_args["ssl"] = True
         if "sqlite" in url:
             connect_args["check_same_thread"] = False
+            if "file:" in url and ("mode=memory" in url or "cache=shared" in url):
+                connect_args["uri"] = True
         pool_class = NullPool if settings.app_env in ("production", "preview") and is_pg else None
+        # Use explicit pool_recycle: 300 for PostgreSQL, -1 for SQLite (no recycle). Passing None can leave pool._recycle as None and break SQLAlchemy's pool comparison on some versions.
+        pool_recycle = 300 if is_pg else -1
         _engine = create_async_engine(
             url,
             echo=False,
             future=True,
             connect_args=connect_args or {},
             pool_pre_ping=is_pg,
-            pool_recycle=300 if is_pg else None,
+            pool_recycle=pool_recycle,
             poolclass=pool_class,
         )
     return _engine

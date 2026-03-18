@@ -2,7 +2,7 @@
 import json
 import logging
 import re
-from typing import Any, Literal
+from typing import Any, List, Literal, Optional
 
 import httpx
 from pydantic import BaseModel, ConfigDict
@@ -20,7 +20,7 @@ DEFAULT_TIMEOUT = 60.0  # LLM execution can take longer than 10s
 
 
 class OpenClawError(Exception):
-    def __init__(self, error_type: str, message: str, status_code: int | None = None, response: dict | None = None):
+    def __init__(self, error_type: str, message: str, status_code: Optional[int] = None, response: Optional[dict] = None):
         self.error_type = error_type
         self.message = message
         self.status_code = status_code
@@ -40,12 +40,12 @@ class AgentResponseSchema(BaseModel):
     model_config = ConfigDict(extra="allow")
     status: Literal["success", "failed", "partial", "needs_review"]
     message: str = ""
-    artifacts: list[ArtifactItem] | None = None
-    steps_completed: list[str] | None = None
-    session_summary: str | None = None
+    artifacts: Optional[List[ArtifactItem]] = None
+    steps_completed: Optional[List[str]] = None
+    session_summary: Optional[str] = None
 
 
-def _extract_json_from_text(text: str) -> dict[str, Any] | None:
+def _extract_json_from_text(text: str) -> Optional[dict]:
     """Try to parse a JSON object from text (strip markdown code fences, find {...})."""
     if not text or not text.strip():
         return None
@@ -94,7 +94,7 @@ DOMAIN_INSTRUCTIONS: dict[str, str] = {
 }
 
 
-def _plan_to_openresponses_body(plan: dict[str, Any], task_id: str | None = None) -> dict[str, Any]:
+def _plan_to_openresponses_body(plan: dict, task_id: Optional[str] = None) -> dict:
     """Build OpenResponses request body from plan { domain, plan_hash, operations }.
 
     Mapping from /task flow:
@@ -200,7 +200,7 @@ def _parse_gateway_error(resp_body: dict[str, Any], status_code: int, fallback_t
 
 
 class OpenClawClient:
-    def __init__(self, base_url: str | None = None, api_key: str | None = None, timeout: float = DEFAULT_TIMEOUT):
+    def __init__(self, base_url: Optional[str] = None, api_key: Optional[str] = None, timeout: float = DEFAULT_TIMEOUT):
         self.base_url = (base_url or settings.openclaw_base_url).rstrip("/")
         self.api_key = api_key or settings.openclaw_api_key
         self.timeout = timeout
@@ -208,8 +208,8 @@ class OpenClawClient:
     async def execute(
         self,
         plan: dict[str, Any],
-        execution_token: str | None,
-        task_id: str | None = None,
+        execution_token: Optional[str],
+        task_id: Optional[str] = None,
     ) -> dict[str, Any]:
         if not execution_token:
             raise OpenClawError("auth_error", "Execution token required")

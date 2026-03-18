@@ -1,6 +1,6 @@
 """AuditEvent table."""
 from datetime import datetime
-from typing import Any
+from typing import Any, Optional
 from uuid import UUID, uuid4
 
 from sqlalchemy import JSON
@@ -13,5 +13,5 @@ class AuditEvent(SQLModel, table=True):
     id: UUID = Field(primary_key=True, default_factory=uuid4)
     task_id: UUID = Field(index=True)
     event_type: str = Field()
-    payload: dict[str, Any] | None = Field(default=None, sa_type=JSON)
+    payload: Optional[dict] = Field(default=None, sa_type=JSON)
     timestamp: datetime = Field(default_factory=datetime.utcnow)
