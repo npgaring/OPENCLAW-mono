@@ -37,7 +37,10 @@ class Task(SQLModel, table=True):
     approval_reference: Optional[str] = SqlField(default=None)
     plan_json: dict = SqlField(default_factory=dict, sa_column=Column(JSON, nullable=False))
     audit_history: List[Any] = SqlField(default_factory=list, sa_column=Column(JSON, nullable=False))
-    status: str = SqlField(default="submitted")  # taskstatus enum in PG
+    status: TaskStatus = SqlField(
+        default=TaskStatus.submitted,
+        sa_column=Column(SaEnum(TaskStatus, name="taskstatus"), nullable=False),
+    )
     created_at: datetime = SqlField(default_factory=datetime.utcnow)
     updated_at: datetime = SqlField(default_factory=datetime.utcnow)
     execution_id: Optional[str] = SqlField(default=None, index=True)

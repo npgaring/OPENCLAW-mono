@@ -15,7 +15,7 @@ from app.db.session import get_session
 from app.gate.engine import GateEngine
 from app.gate.policy import get_policy_version_at_execution
 from app.gate.token import generate_execution_token, hash_token, verify_execution_token
-from app.models import GateDecisionRecord, Task, TaskContinueRequest, TaskSubmitRequest, TaskSubmitResponse, UsedExecutionToken
+from app.models import GateDecisionRecord, Task, TaskContinueRequest, TaskStatus, TaskSubmitRequest, TaskSubmitResponse, UsedExecutionToken
 from app.services.execution_client import OpenClawClient, OpenClawError
 
 logger = logging.getLogger(__name__)
@@ -49,7 +49,7 @@ async def submit_task(
         reason_codes=decision.reason_codes,
         plan_json=plan_json,
         audit_history=[],
-        status="submitted",
+        status=TaskStatus.submitted,
     )
     session.add(task)
     await session.flush()
@@ -75,7 +75,7 @@ async def submit_task(
     if decision.outcome.value != "PASS":
         return TaskSubmitResponse(
             task_id=task.task_id,
-            status=task.status,
+            status=task.status.value,
             gate_outcome=decision.outcome.value,
             reason_codes=decision.reason_codes,
         )
@@ -90,19 +90,39 @@ async def submit_task(
     token_hash = hash_token(execution_token)
     verified, _ = verify_execution_token(execution_token)
     if not verified:
-        return TaskSubmitResponse(task_id=task.task_id, status="submitted", gate_outcome="BLOCK", reason_codes=["EXECUTION_TOKEN_INVALID"])
+        return TaskSubmitResponse(
+            task_id=task.task_id,
+            status=TaskStatus.submitted.value,
+            gate_outcome="BLOCK",
+            reason_codes=["EXECUTION_TOKEN_INVALID"],
+        )
     if get_policy_version_at_execution() != decision.policy_version:
-        return TaskSubmitResponse(task_id=task.task_id, status="submitted", gate_outcome="BLOCK", reason_codes=["RE_EVALUATION_REQUIRED"])
+        return TaskSubmitResponse(
+            task_id=task.task_id,
+            status=TaskStatus.submitted.value,
+            gate_outcome="BLOCK",
+            reason_codes=["RE_EVALUATION_REQUIRED"],
+        )
     existing = await session.get(UsedExecutionToken, token_hash)
     if existing:
-        return TaskSubmitResponse(task_id=task.task_id, status="submitted", gate_outcome="BLOCK", reason_codes=["TOKEN_ALREADY_USED"])
+        return TaskSubmitResponse(
+            task_id=task.task_id,
+            status=TaskStatus.submitted.value,
+            gate_outcome="BLOCK",
+            reason_codes=["TOKEN_ALREADY_USED"],
+        )
     used = UsedExecutionToken(token_hash=token_hash, task_id=task.task_id)
     session.add(used)
     try:
         await session.flush()
     except IntegrityError:
         await session.rollback()
-        return TaskSubmitResponse(task_id=task.task_id, status="submitted", gate_outcome="BLOCK", reason_codes=["TOKEN_ALREADY_USED"])
+        return TaskSubmitResponse(
+            task_id=task.task_id,
+            status=TaskStatus.submitted.value,
+            gate_outcome="BLOCK",
+            reason_codes=["TOKEN_ALREADY_USED"],
+        )
     gate_record.execution_token_hash = token_hash
     task.execution_token_hash = token_hash
     await session.commit()
@@ -111,7 +131,10 @@ async def submit_task(
         client = OpenClawClient()
         result = await client.execute(plan_json, execution_token, task_id=str(task.task_id))
     except OpenClawError as e:
-        task.status = e.error_type
+        try:
+            task.status = TaskStatus(e.error_type)
+        except ValueError:
+            task.status = TaskStatus.error
         task.audit_history = (task.audit_history or []) + [{"event_type": "execution_response", "payload": e.response}]
         if e.response.get("execution_id"):
             task.execution_id = e.response["execution_id"]
@@ -119,20 +142,25 @@ async def submit_task(
         reason_codes = ["EXECUTION_ABORTED"] if e.error_type == "execution_aborted" else []
         return TaskSubmitResponse(
             task_id=task.task_id,
-            status=e.error_type,
+            status=task.status.value,
             execution_response=e.response,
             gate_outcome="PASS",
             reason_codes=reason_codes,
         )
     task.execution_id = result.get("execution_id")
     s = result.get("status")
-    task.status = "completed" if s == "success" else (s if s in ("failed", "partial", "needs_review") else "failed")
+    if s == "success":
+        task.status = TaskStatus.completed
+    elif s in ("failed", "partial", "needs_review"):
+        task.status = TaskStatus(s)
+    else:
+        task.status = TaskStatus.failed
     task.audit_history = (task.audit_history or []) + [{"event_type": "execution_response", "payload": result}]
     await session.commit()
     return TaskSubmitResponse(
         task_id=task.task_id,
         execution_id=task.execution_id,
-        status=task.status,
+        status=task.status.value,
         execution_response=result,
         gate_outcome="PASS",
         reason_codes=[],

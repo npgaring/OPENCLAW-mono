@@ -11,18 +11,18 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm.attributes import flag_modified
 
-from app.models import Task
+from app.models import Task, TaskStatus
 
 logger = logging.getLogger(__name__)
 
-ORPHAN_STATUS = "error"
+ORPHAN_STATUS = TaskStatus.error
 ORPHAN_AUDIT_EVENT = "gate_restart_orphan_recovery"
 
 
 async def recover_orphaned_tasks(session: AsyncSession) -> int:
     """Find tasks that have token consumed but no execution_id (gate died mid-flow). Mark as error."""
     stmt = select(Task).where(
-        Task.status == "submitted",
+        Task.status == TaskStatus.submitted,
         Task.execution_token_hash.isnot(None),
         Task.execution_id.is_(None),
     )
@@ -39,6 +39,6 @@ async def recover_orphaned_tasks(session: AsyncSession) -> int:
         })
         task.audit_history = audit
         flag_modified(task, "audit_history")
-        logger.info("Recovered orphan task task_id=%s -> status=%s", task.task_id, ORPHAN_STATUS)
+        logger.info("Recovered orphan task task_id=%s -> status=%s", task.task_id, ORPHAN_STATUS.value)
     await session.commit()
     return len(orphans)

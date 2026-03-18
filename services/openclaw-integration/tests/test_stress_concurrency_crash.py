@@ -18,7 +18,7 @@ from httpx import ASGITransport
 
 from app.core.identity import IDENTITY_DOMAIN_MAP
 from app.core.security import hash_payload
-from app.models import Task, UsedExecutionToken
+from app.models import Task, TaskStatus, UsedExecutionToken
 from app.services.execution_client import OpenClawClient, OpenClawError
 from app.services.orphan_recovery import ORPHAN_AUDIT_EVENT, ORPHAN_STATUS, recover_orphaned_tasks
 
@@ -196,7 +196,7 @@ async def test_H3_crash_after_commit_before_execute_task_eventually_recoverable(
             reason_codes=[],
             plan_json={"domain": domain, "plan_hash": plan_hash, "operations": operations},
             audit_history=[],
-            status="submitted",
+            status=TaskStatus.submitted,
             execution_token_hash=token_hash,
             execution_id=None,
         )
@@ -262,7 +262,7 @@ async def test_H4_gate_restart_during_evaluation_no_orphaned_execution():
             reason_codes=[],
             plan_json={"domain": domain, "plan_hash": plan_hash, "operations": operations},
             audit_history=[],
-            status="submitted",
+            status=TaskStatus.submitted,
             execution_token_hash=token_hash,
             execution_id=None,
         )
