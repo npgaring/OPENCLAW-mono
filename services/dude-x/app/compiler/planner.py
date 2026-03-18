@@ -39,6 +39,7 @@ def build_plan(spec: SpecIn) -> PlanPayload:
         "identity": spec.identity,
         "ocgg_identity": spec.identity,
         "domain": domain,
+        "deployment_target": spec.target.environment,
         "operations": [op.model_dump() for op in operations],
         "rollback": rollback,
     }

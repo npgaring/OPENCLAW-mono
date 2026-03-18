@@ -24,7 +24,7 @@ Required shape (or send inside `params` for GPT Action compatibility):
 - `constraints`: object (e.g. `{}`). If `"rollback"` key present, value must be non-empty.
 - `signature`: `{ "type": "human_signed", "signed_at": "<ISO8601>", "hash": "<non-empty>" }` (synthetic OK: e.g. hash = "sig_builder_" + timestamp).
 
-**Response (PlanPayload)**: `plan_version`, `identity`, `ocgg_identity`, `domain`, `operations`, `rollback`, `plan_hash`, `integration_plan_hash`. Use **ocgg_identity** and **operations** for Integration; use **integration_plan_hash** (or the hash returned by `/gate/evaluate`). Do **not** use dude-x’s `plan_hash` as the integration’s plan_hash.
+**Response (PlanPayload)**: `plan_version`, `identity`, `ocgg_identity`, `domain`, `deployment_target`, `operations`, `rollback`, `plan_hash`, `integration_plan_hash`. Use **ocgg_identity**, **operations**, and **deployment_target** for Integration; use **integration_plan_hash** (or the hash returned by `/gate/evaluate`). Do **not** use dude-x’s `plan_hash` as the integration’s plan_hash.
 
 **Errors**: IDENTITY_INTENT_MISMATCH → fix intent for identity; DOMAIN_MISMATCH → set decisions.domain; MISSING_DECISION → non-empty operations; fix and retry.
 

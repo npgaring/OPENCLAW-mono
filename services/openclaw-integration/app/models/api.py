@@ -47,6 +47,7 @@ class GateEvaluateRequest(BaseModel):
                             "inputs": {"provider": "vercel", "project": "marketing-site"},
                         },
                     ],
+                    "deployment_target": "production",
                 },
                 {
                     "ocgg_identity": "W-OCGG",
@@ -68,6 +69,7 @@ class GateEvaluateRequest(BaseModel):
                             "inputs": {"provider": "vercel", "project": "marketing-site"},
                         },
                     ],
+                    "deployment_target": "production",
                 },
             ]
         },

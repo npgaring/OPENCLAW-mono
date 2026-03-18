@@ -25,6 +25,7 @@ class PlanPayload(BaseModel):
                     "identity": "W-OCGG",
                     "ocgg_identity": "W-OCGG",
                     "domain": "web",
+                    "deployment_target": "production",
                     "operations": [
                         {
                             "op_id": "op-001",
@@ -60,6 +61,7 @@ class PlanPayload(BaseModel):
     identity: Literal["W-OCGG", "R-OCGG"]
     ocgg_identity: Literal["W-OCGG", "R-OCGG"] | None = None
     domain: Literal["web", "recruiting"]
+    deployment_target: str | None = None
     operations: list[PlanOperation]
     rollback: dict[str, Any] = Field(default_factory=dict)
     plan_hash: str

@@ -50,7 +50,7 @@ Configure **two** APIs in the Custom GPT editor: **dude-x** (planner/compiler) a
 - `constraints`: object (e.g. `{}`)  
 - `signature`: `{ "type": "human_signed", "signed_at": "<ISO8601>", "hash": "<non-empty>" }`  
 
-Response: `plan_version`, `identity`, `ocgg_identity`, `domain`, `operations`, `rollback`, `plan_hash`, `integration_plan_hash`.
+Response: `plan_version`, `identity`, `ocgg_identity`, `domain`, `deployment_target`, `operations`, `rollback`, `plan_hash`, `integration_plan_hash`.
 
 ### 2.2 OpenClaw Integration (gate + execution)
 

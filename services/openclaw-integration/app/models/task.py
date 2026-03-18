@@ -84,6 +84,7 @@ class TaskSubmitRequest(BaseModel):
                             "inputs": {"provider": "vercel", "project": "marketing-site"},
                         },
                     ],
+                    "deployment_target": "production",
                 }
             ]
         },
