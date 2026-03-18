@@ -96,3 +96,120 @@ PYTHONPATH=. python3 -m pytest tests/test_demo_governance_59s.py -v -s
 Full technical mapping: **`docs/DEV_BRIEF_59_SECOND_DEMO.md`**.
 
 **If a user asks how we know the demo works:** Point them to that test file and brief, or summarize: production without approval → BLOCK; with approval → PASS + execution; status endpoint shows the receipt trail.
+
+---
+
+## Sample demo scenes (for simulation)
+
+Use these exact payloads and expected responses when the user asks to **simulate** the 59-second demo or a specific scene (e.g. “simulate scene 1”, “show me the block then pass flow”). You can either call the real APIs if configured, or **narrate** the request/response as if the user had sent them.
+
+**Shared building blocks:**
+
+- **Identity:** `W-OCGG` (domain `web`).
+- **Operations** (minimal production deploy; include `outputs: {}` so plan_hash matches gate):
+  ```json
+  [
+    {
+      "op_id": "op-001",
+      "type": "deploy",
+      "target": "web/app",
+      "inputs": { "provider": "vercel", "project": "marketing-site" },
+      "outputs": {}
+    }
+  ]
+  ```
+- **plan_hash:** For **POST /gate/evaluate** send `"plan_hash": ""`; the response will include the correct `plan_hash`. For **POST /task** use the `plan_hash` returned by a prior **POST /gate/evaluate** (same `ocgg_identity` + `operations` + `deployment_target`).
+
+---
+
+### Scene 1–2: Request without approval → BLOCK
+
+**User sends (POST /task):**
+
+```json
+{
+  "ocgg_identity": "W-OCGG",
+  "plan_hash": "<use plan_hash from previous POST /gate/evaluate>",
+  "operations": [
+    {
+      "op_id": "op-001",
+      "type": "deploy",
+      "target": "web/app",
+      "inputs": { "provider": "vercel", "project": "marketing-site" },
+      "outputs": {}
+    }
+  ],
+  "deployment_target": "production"
+}
+```
+
+(No `approval_reference` or `approver_id`.)
+
+**System returns (200):**
+
+- `gate_outcome`: `"BLOCK"`
+- `reason_codes`: includes `"PROD_DEPLOY_NO_APPROVAL"`
+- `execution_id`: `null` (or absent)
+- No execution is run.
+
+---
+
+### Scene 3–4: Same request with approval → PASS and execution
+
+**User sends (POST /task):** Same as above, plus:
+
+```json
+"approval_reference": "demo-approval-ref-001"
+```
+
+**System returns (200):**
+
+- `gate_outcome`: `"PASS"`
+- `task_id`: non-null UUID string
+- `execution_id` or `execution_response`: present (execution authorised and run)
+
+---
+
+### Gate evaluate (dry run, no persistence)
+
+**User sends (POST /gate/evaluate):**
+
+```json
+{
+  "ocgg_identity": "W-OCGG",
+  "plan_hash": "",
+  "operations": [
+    {
+      "op_id": "op-001",
+      "type": "deploy",
+      "target": "web/app",
+      "inputs": { "provider": "vercel", "project": "marketing-site" },
+      "outputs": {}
+    }
+  ],
+  "deployment_target": "production"
+}
+```
+
+**System returns (200):**
+
+- `outcome`: `"BLOCK"`
+- `reason_codes`: includes `"PROD_DEPLOY_NO_APPROVAL"`
+- `defect_list`: at least one defect whose `message` mentions “approval” (e.g. production deploy requires approver_id or approval_reference).
+
+Use the response’s `plan_hash` for a subsequent **POST /task** if the user then adds approval and submits.
+
+---
+
+### Receipt (after a PASS)
+
+**User sends:** `GET /status/{task_id}` (use the `task_id` from the PASS response).
+
+**System returns (200):**
+
+- `execution_id` or `status` (e.g. `completed`, `failed`, `partial`, `needs_review`)
+- `audit_history`: list of events; must include `event_type`: `"gate_decision"` and `"execution_response"` (or equivalent so the receipt shows the full trail).
+
+---
+
+**Simulation instructions for the Custom GPT:** When the user asks to simulate the demo (or “show scene 1”, “run the 59s demo”, etc.), walk through: (1) optional **POST /gate/evaluate** to show BLOCK and get plan_hash; (2) **POST /task** without approval → BLOCK; (3) **POST /task** with `approval_reference` → PASS + execution; (4) **GET /status/{task_id}** for the receipt. Use the request/response shapes above; if APIs are not configured, describe them in narrative form so the user sees the exact payloads and outcomes.

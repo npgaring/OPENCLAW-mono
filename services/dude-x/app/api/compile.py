@@ -2,6 +2,7 @@
 import logging
 
 from fastapi import APIRouter, Body, Depends
+from pydantic import ValidationError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.compiler.invariants import validate_invariants
@@ -19,14 +20,21 @@ router = APIRouter()
 
 def parse_compile_body(body: dict) -> SpecIn:
     """Handle raw JSON: unwrap GPT Action params if present, ensure constraints key."""
-    if "params" in body and isinstance(body["params"], dict):
-        params = dict(body["params"])
-        if "constraints" not in params:
-            params["constraints"] = body.get("constraints", {})
-        return SpecIn.model_validate(params)
-    if "constraints" not in body:
-        body = {**body, "constraints": {}}
-    return SpecIn.model_validate(body)
+    try:
+        if "params" in body and isinstance(body["params"], dict):
+            params = dict(body["params"])
+            if "constraints" not in params:
+                params["constraints"] = body.get("constraints", {})
+            return SpecIn.model_validate(params)
+        if "constraints" not in body:
+            body = {**body, "constraints": {}}
+        return SpecIn.model_validate(body)
+    except ValidationError as exc:
+        raise DUDEXError(
+            ErrorCode.INVALID_SPEC,
+            "Spec validation failed",
+            details={"errors": exc.errors()},
+        ) from exc
 
 
 @router.post("/compile", response_model=PlanPayload)
