@@ -37,7 +37,56 @@ def parse_compile_body(body: dict) -> SpecIn:
         ) from exc
 
 
-@router.post("/compile", response_model=PlanPayload)
+@router.post(
+    "/compile",
+    response_model=PlanPayload,
+    openapi_extra={
+        "requestBody": {
+            "content": {
+                "application/json": {
+                    "example": {
+                        "spec_version": "1.0",
+                        "identity": "W-OCGG",
+                        "intent": "web-build",
+                        "target": {
+                            "resource_id": "site:marketing",
+                            "environment": "production",
+                        },
+                        "decisions": {
+                            "domain": "web",
+                            "operations": [
+                                {
+                                    "op_id": "op-001",
+                                    "type": "write_config",
+                                    "target": "web/app",
+                                    "inputs": {
+                                        "path": "app/config.json",
+                                        "content": "{\"featureFlags\":{\"newHomepage\":true}}",
+                                    },
+                                },
+                                {
+                                    "op_id": "op-002",
+                                    "type": "build",
+                                    "target": "web/app",
+                                    "inputs": {"command": "npm run build"},
+                                },
+                            ],
+                        },
+                        "constraints": {
+                            "no_external_network": True,
+                            "max_runtime_seconds": 900,
+                        },
+                        "signature": {
+                            "type": "human_signed",
+                            "signed_at": "2026-03-17T10:12:00Z",
+                            "hash": "sig_9f3d2b5a1c",
+                        },
+                    }
+                }
+            }
+        }
+    },
+)
 async def compile_spec(
     body: dict = Body(
         ...,

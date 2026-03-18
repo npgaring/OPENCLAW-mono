@@ -73,13 +73,14 @@ Examples (for decisions.operations): write_config with path/content; build with 
 
 **What it is:** A short story the integration enforces: production deploy without approval is **BLOCK**; the same plan with **approval_reference** (or **approver_id**) can **PASS** and execute. The Custom GPT should mirror that story when explaining governance to users (e.g. “without approval the gate blocks; add an approval reference and resubmit”).
 
-**User-facing flow (matches API):**
+**User-facing flow (matches API, compiler first):**
 
-1. User sends **POST /task** with `deployment_target: "production"` and **no** `approval_reference` / `approver_id` → system returns **gate_outcome: BLOCK**, **reason_codes** including `PROD_DEPLOY_NO_APPROVAL`; no execution.
-2. User adds **approval_reference** (or valid **approver_id**) and resubmits → **gate_outcome: PASS**, **task_id**, **execution_id** / **execution_response** when execution succeeds.
+0. **dude-x (compiler):** User submits a **human-signed spec** via **POST /compile** → dude-x validates and returns a **plan** (`identity`, `domain`, `operations`, `plan_hash`). That plan is the *compiled* intent; the integration gate does not use dude-x’s `plan_hash` for submission—it uses its own hash from `/gate/evaluate`.
+1. User sends **POST /gate/evaluate** (optional dry run) and/or **POST /task** with `ocgg_identity` = plan’s `identity`, `operations` = plan’s `operations`, `deployment_target: "production"`, and **no** `approval_reference` / `approver_id` → integration returns **BLOCK** / **gate_outcome: BLOCK**, **reason_codes** including `PROD_DEPLOY_NO_APPROVAL`; no execution.
+2. User adds **approval_reference** (or valid **approver_id**) and resubmits **POST /task** → **gate_outcome: PASS**, **task_id**, **execution_id** / **execution_response** when execution succeeds.
 3. **Receipt:** **GET /status/{task_id}** shows **audit_history** with events like `gate_decision` and `execution_response`.
 
-**Optional dry run:** **POST /gate/evaluate** with the same payload shape (no persistence) returns **outcome**, **reason_codes**, **defect_list** — useful to explain *why* the gate would block before submitting **POST /task**.
+**Optional dry run:** **POST /gate/evaluate** with `plan_hash: ""` and the compiled `operations` returns **outcome**, **reason_codes**, **defect_list** — useful to explain *why* the gate would block before **POST /task**.
 
 **Developer verification (automated tests):** In the repo, `services/openclaw-integration/tests/test_demo_governance_59s.py` prints each scenario in narrative form when run with **`pytest … -s`**:
 
@@ -101,35 +102,67 @@ Full technical mapping: **`docs/DEV_BRIEF_59_SECOND_DEMO.md`**.
 
 ## Sample demo scenes (for simulation)
 
-Use these exact payloads and expected responses when the user asks to **simulate** the 59-second demo or a specific scene (e.g. “simulate scene 1”, “show me the block then pass flow”). You can either call the real APIs if configured, or **narrate** the request/response as if the user had sent them.
+Use these exact payloads and expected responses when the user asks to **simulate** the 59-second demo or a specific scene (e.g. “simulate scene 1”, “show me the block then pass flow”). **Always start with dude-x compile** so the story is: *spec → compiler plan → gate → task*. You can either call the real APIs if configured, or **narrate** each step.
 
-**Shared building blocks:**
-
-- **Identity:** `W-OCGG` (domain `web`).
-- **Operations** (minimal production deploy; include `outputs: {}` so plan_hash matches gate):
-  ```json
-  [
-    {
-      "op_id": "op-001",
-      "type": "deploy",
-      "target": "web/app",
-      "inputs": { "provider": "vercel", "project": "marketing-site" },
-      "outputs": {}
-    }
-  ]
-  ```
-- **plan_hash:** For **POST /gate/evaluate** send `"plan_hash": ""`; the response will include the correct `plan_hash`. For **POST /task** use the `plan_hash` returned by a prior **POST /gate/evaluate** (same `ocgg_identity` + `operations` + `deployment_target`).
+**Auth:** dude-x **POST /compile** → header **X-API-Key**. Integration → **Authorization: Bearer \<INTEGRATION_API_KEY\>**.
 
 ---
 
-### Scene 1–2: Request without approval → BLOCK
+### Scene 0: dude-x — compile spec → plan (compiler)
 
-**User sends (POST /task):**
+**User sends:** **POST /compile** (dude-x base URL):
+
+```json
+{
+  "spec_version": "1.0",
+  "identity": "W-OCGG",
+  "intent": "web-build",
+  "target": {
+    "resource_id": "site:marketing",
+    "environment": "production"
+  },
+  "decisions": {
+    "domain": "web",
+    "operations": [
+      {
+        "op_id": "op-001",
+        "type": "deploy",
+        "target": "web/app",
+        "inputs": { "provider": "vercel", "project": "marketing-site" },
+        "outputs": {}
+      }
+    ]
+  },
+  "constraints": {},
+  "signature": {
+    "type": "human_signed",
+    "signed_at": "2026-03-17T12:00:00Z",
+    "hash": "sig_demo_59s_governance"
+  }
+}
+```
+
+**dude-x returns (200):** `plan_version`, `identity` (`W-OCGG`), `domain` (`web`), `operations` (same deploy op, normalized), `rollback`, **`plan_hash`** (dude-x’s plan fingerprint).
+
+**For integration:** Use **`identity`** as **`ocgg_identity`** and **`operations`** from this response for **POST /gate/evaluate** and **POST /task**. Do **not** paste dude-x’s `plan_hash` into the integration as the integration’s `plan_hash`—the integration’s `plan_hash` comes only from **POST /gate/evaluate** (see below).
+
+---
+
+### Shared integration building blocks
+
+- **Operations for gate/task:** Use the **`operations`** array returned by **POST /compile** (must match what you send to the gate; include **`outputs: {}`** on ops if present in the compiled plan).
+- **Integration `plan_hash`:** For **POST /gate/evaluate** send `"plan_hash": ""`. The response includes the integration’s **`plan_hash`**. For **POST /task**, use that **`plan_hash`** from the prior **POST /gate/evaluate** (same `ocgg_identity`, `operations`, `deployment_target`).
+
+---
+
+### Scene 1–2: After compile — request without approval → BLOCK
+
+**User sends:** **POST /task** (integration):
 
 ```json
 {
   "ocgg_identity": "W-OCGG",
-  "plan_hash": "<use plan_hash from previous POST /gate/evaluate>",
+  "plan_hash": "<from POST /gate/evaluate after compile>",
   "operations": [
     {
       "op_id": "op-001",
@@ -143,9 +176,9 @@ Use these exact payloads and expected responses when the user asks to **simulate
 }
 ```
 
-(No `approval_reference` or `approver_id`.)
+(Use the exact `operations` from dude-x’s compile response if they differ slightly; always keep them in sync with the evaluate step. No `approval_reference` or `approver_id`.)
 
-**System returns (200):**
+**Integration returns (200):**
 
 - `gate_outcome`: `"BLOCK"`
 - `reason_codes`: includes `"PROD_DEPLOY_NO_APPROVAL"`
@@ -154,15 +187,15 @@ Use these exact payloads and expected responses when the user asks to **simulate
 
 ---
 
-### Scene 3–4: Same request with approval → PASS and execution
+### Scene 3–4: Same plan with approval → PASS and execution
 
-**User sends (POST /task):** Same as above, plus:
+**User sends (POST /task):** Same as Scene 1–2, plus:
 
 ```json
 "approval_reference": "demo-approval-ref-001"
 ```
 
-**System returns (200):**
+**Integration returns (200):**
 
 - `gate_outcome`: `"PASS"`
 - `task_id`: non-null UUID string
@@ -170,9 +203,9 @@ Use these exact payloads and expected responses when the user asks to **simulate
 
 ---
 
-### Gate evaluate (dry run, no persistence)
+### Gate evaluate (dry run, after compile)
 
-**User sends (POST /gate/evaluate):**
+**User sends:** **POST /gate/evaluate** — same shape as task, with `"plan_hash": ""` and **`operations`** copied from dude-x compile response:
 
 ```json
 {
@@ -191,13 +224,13 @@ Use these exact payloads and expected responses when the user asks to **simulate
 }
 ```
 
-**System returns (200):**
+**Integration returns (200):**
 
 - `outcome`: `"BLOCK"`
 - `reason_codes`: includes `"PROD_DEPLOY_NO_APPROVAL"`
-- `defect_list`: at least one defect whose `message` mentions “approval” (e.g. production deploy requires approver_id or approval_reference).
+- `defect_list`: at least one defect whose `message` mentions “approval”.
 
-Use the response’s `plan_hash` for a subsequent **POST /task** if the user then adds approval and submits.
+Use the response’s **`plan_hash`** for **POST /task** when the user adds approval and submits.
 
 ---
 
@@ -205,11 +238,19 @@ Use the response’s `plan_hash` for a subsequent **POST /task** if the user the
 
 **User sends:** `GET /status/{task_id}` (use the `task_id` from the PASS response).
 
-**System returns (200):**
+**Integration returns (200):**
 
 - `execution_id` or `status` (e.g. `completed`, `failed`, `partial`, `needs_review`)
-- `audit_history`: list of events; must include `event_type`: `"gate_decision"` and `"execution_response"` (or equivalent so the receipt shows the full trail).
+- `audit_history`: list of events; must include `event_type`: `"gate_decision"` and `"execution_response"` (or equivalent).
 
 ---
 
-**Simulation instructions for the Custom GPT:** When the user asks to simulate the demo (or “show scene 1”, “run the 59s demo”, etc.), walk through: (1) optional **POST /gate/evaluate** to show BLOCK and get plan_hash; (2) **POST /task** without approval → BLOCK; (3) **POST /task** with `approval_reference` → PASS + execution; (4) **GET /status/{task_id}** for the receipt. Use the request/response shapes above; if APIs are not configured, describe them in narrative form so the user sees the exact payloads and outcomes.
+**Simulation instructions for the Custom GPT:** When the user asks to simulate the demo (or “run the 59s demo”, etc.), walk through in order:
+
+1. **dude-x POST /compile** — show the signed spec and the returned **plan** (`identity`, `operations`); explain that dude-x is compile-only (no execution).
+2. **POST /gate/evaluate** (optional) — same `operations` as compile, `plan_hash: ""` → BLOCK + defect message + integration **`plan_hash`**.
+3. **POST /task** without approval → **BLOCK** (same narrative as tests).
+4. **POST /task** with **`approval_reference`** → **PASS** + execution.
+5. **GET /status/{task_id}** — receipt / audit trail.
+
+If APIs are not configured, narrate each step with the payloads and outcomes above. If only integration is available, say: “In production you would compile first with dude-x; here are the `operations` that came from compile…” and continue from step 2.
