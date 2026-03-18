@@ -10,7 +10,7 @@ This document evaluates the implementation plan against **actually existing sour
 |--------|-------------------|
 | **openclaw-integration** (gate/engine.py, models/task.py, api/task.py, execution_client.py, identity.py) | plan_hash formula, plan_json shape, request model, task flow, Gateway payload |
 | **openclaw-integration** (db/migrations/003) | taskstatus ENUM, tasks table columns |
-| **dude-x** (models/plan.py, compiler) | Plan has domain, operations, plan_hash; no goal/context/acceptance_criteria today |
+| **dude-x** (models/plan.py, compiler) | Plan has domain, operations, plan_hash, integration_plan_hash; no goal/context/acceptance_criteria today |
 | **OpenClaw docs** (docs.openclaw.ai/gateway/openresponses-http-api) | input string or array; instructions merged into system prompt; user for session; message roles |
 | **PostgreSQL** | ALTER TYPE ... ADD VALUE [ IF NOT EXISTS ] for enums (supported in current PG) |
 

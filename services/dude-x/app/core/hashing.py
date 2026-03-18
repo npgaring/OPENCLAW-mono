@@ -29,3 +29,21 @@ def canonical_json(data: Any) -> str:
 def hash_payload(data: Any) -> str:
     """SHA-256 hex of canonical JSON (utf-8)."""
     return hashlib.sha256(canonical_json(data).encode("utf-8")).hexdigest()
+
+
+def integration_hash_payload(data: Any) -> str:
+    """Hash compatible with openclaw-integration (no numeric normalization)."""
+    def _normalize(value: Any) -> Any:
+        if isinstance(value, dict):
+            return {k: _normalize(v) for k, v in sorted(value.items())}
+        if isinstance(value, list):
+            return [_normalize(x) for x in value]
+        return value
+
+    canonical = json.dumps(
+        _normalize(data),
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+    )
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()

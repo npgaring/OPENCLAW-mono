@@ -76,7 +76,7 @@ The demo flow is **implemented and testable** in the OpenClaw integration. The f
 1. **Request (Scene 1)**  
    - **POST /task** (or **POST /gate/evaluate** for evaluate-only) with:
      - `ocgg_identity`: `"W-OCGG"`
-     - `plan_hash`: (correct hash for the plan)
+     - `plan_hash`: (integration hash for `{ domain, operations }`, e.g. `integration_plan_hash` from dude-x or from `/gate/evaluate`)
      - `operations`: e.g. one `deploy` operation to a production target
      - `deployment_target`: `"production"`
      - **No** `approval_reference` or `approver_id`

@@ -29,7 +29,7 @@ class GateEvaluateRequest(BaseModel):
             "examples": [
                 {
                     "ocgg_identity": "W-OCGG",
-                    "plan_hash": "plan_8e7c8b20b2",
+                    "plan_hash": "",
                     "operations": [
                         {
                             "op_id": "op-001",
@@ -47,7 +47,28 @@ class GateEvaluateRequest(BaseModel):
                             "inputs": {"provider": "vercel", "project": "marketing-site"},
                         },
                     ],
-                }
+                },
+                {
+                    "ocgg_identity": "W-OCGG",
+                    "plan_hash": "integration_plan_hash_from_dudex",
+                    "operations": [
+                        {
+                            "op_id": "op-001",
+                            "type": "write_config",
+                            "target": "web/app",
+                            "inputs": {
+                                "path": "app/config.json",
+                                "content": "{\"featureFlags\":{\"newHomepage\":true}}",
+                            },
+                        },
+                        {
+                            "op_id": "op-002",
+                            "type": "deploy",
+                            "target": "web/app",
+                            "inputs": {"provider": "vercel", "project": "marketing-site"},
+                        },
+                    ],
+                },
             ]
         },
     )

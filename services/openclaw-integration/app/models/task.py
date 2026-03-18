@@ -60,7 +60,7 @@ class TaskSubmitRequest(BaseModel):
             "examples": [
                 {
                     "ocgg_identity": "W-OCGG",
-                    "plan_hash": "plan_8e7c8b20b2",
+                    "plan_hash": "integration_plan_hash_from_dudex",
                     "operations": [
                         {
                             "op_id": "op-001",

@@ -6,9 +6,9 @@ Use this document for exact API flow, request/response shapes, and rules. The GP
 
 ## Architecture
 
-- **dude-x**: Compile-only deterministic planner. Validates human-signed specs and compiles them into execution plans. **POST /compile** with full spec → returns plan (identity, domain, operations, plan_hash). Auth: **X-API-Key**.
-- **OpenClaw Integration**: Gate + executor gateway. **POST /gate/evaluate** → get integration’s plan_hash and gate decision. **POST /task** → submit. Auth: **Authorization: Bearer \<INTEGRATION_API_KEY\>**. Integration plan_hash is from `{ domain, operations }` only (not dude-x’s plan_hash).
-- **Flow**: Build dude-x spec → dude-x **POST /compile** → use returned `identity` and `operations` → Integration **POST /gate/evaluate** (plan_hash `""`) → Integration **POST /task** with integration’s plan_hash.
+- **dude-x**: Compile-only deterministic planner. Validates human-signed specs and compiles them into execution plans. **POST /compile** with full spec → returns plan (`identity`, `ocgg_identity`, `domain`, `operations`, `plan_hash`, `integration_plan_hash`). Auth: **X-API-Key**.
+- **OpenClaw Integration**: Gate + executor gateway. **POST /gate/evaluate** → get integration’s plan_hash and gate decision. **POST /task** → submit. Auth: **Authorization: Bearer \<INTEGRATION_API_KEY\>**. Integration plan_hash is computed from `{ domain, operations }` only (not dude-x’s plan_hash).
+- **Flow**: Build dude-x spec → dude-x **POST /compile** → use returned `ocgg_identity` + `operations` → Integration **POST /gate/evaluate** (plan_hash `""` or `integration_plan_hash`) → Integration **POST /task** with the integration plan_hash.
 
 ---
 
@@ -24,7 +24,7 @@ Required shape (or send inside `params` for GPT Action compatibility):
 - `constraints`: object (e.g. `{}`). If `"rollback"` key present, value must be non-empty.
 - `signature`: `{ "type": "human_signed", "signed_at": "<ISO8601>", "hash": "<non-empty>" }` (synthetic OK: e.g. hash = "sig_builder_" + timestamp).
 
-**Response (PlanPayload)**: `plan_version`, `identity`, `domain`, `operations`, `rollback`, `plan_hash`. Use **identity** and **operations** for Integration; do **not** use dude-x’s plan_hash as the integration’s plan_hash.
+**Response (PlanPayload)**: `plan_version`, `identity`, `ocgg_identity`, `domain`, `operations`, `rollback`, `plan_hash`, `integration_plan_hash`. Use **ocgg_identity** and **operations** for Integration; use **integration_plan_hash** (or the hash returned by `/gate/evaluate`). Do **not** use dude-x’s `plan_hash` as the integration’s plan_hash.
 
 **Errors**: IDENTITY_INTENT_MISMATCH → fix intent for identity; DOMAIN_MISMATCH → set decisions.domain; MISSING_DECISION → non-empty operations; fix and retry.
 
@@ -33,9 +33,9 @@ Required shape (or send inside `params` for GPT Action compatibility):
 ## API flow (strict)
 
 1. Build dude-x spec (target, decisions.operations, constraints, signature).
-2. **dude-x POST /compile** (header X-API-Key). On success → identity, domain, operations.
-3. **Integration POST /gate/evaluate**: `ocgg_identity` = plan.identity, `plan_hash: ""`, `operations` = plan.operations; optional `goal`, `context`, `acceptance_criteria`. Use response `plan_hash` for step 4.
-4. **Integration POST /task**: same + `plan_hash` from step 3. Response: task_id, status, execution_id, execution_response, gate_outcome, reason_codes.
+2. **dude-x POST /compile** (header X-API-Key). On success → identity, ocgg_identity, domain, operations, integration_plan_hash.
+3. **Integration POST /gate/evaluate**: `ocgg_identity` = plan.ocgg_identity, `plan_hash: ""` (or use `integration_plan_hash`), `operations` = plan.operations; optional `goal`, `context`, `acceptance_criteria`. Use response `plan_hash` for step 4 (should match `integration_plan_hash`).
+4. **Integration POST /task**: same + `plan_hash` from step 3 (or `integration_plan_hash`). Response: task_id, status, execution_id, execution_response, gate_outcome, reason_codes.
 5. **Follow-up**: **POST /task/{task_id}/continue** with `{ "message": "..." }`. Task must be completed, partial, or needs_review.
 6. **Status**: **GET /status/{task_id}**.
 
@@ -62,7 +62,7 @@ Examples (for decisions.operations): write_config with path/content; build with 
 ## Rules
 
 - dude-x: X-API-Key. Integration: Bearer INTEGRATION_API_KEY. Never expose OpenClaw Gateway key.
-- Only allowed operation types per identity. Integration plan_hash comes only from /gate/evaluate (not dude-x plan_hash).
+- Only allowed operation types per identity. Integration plan_hash comes from the integration canonical hash (`{ domain, operations }`), available via `/gate/evaluate` or as `integration_plan_hash` from dude-x.
 - Production deploy may require approver_id or approval_reference; on PROD_DEPLOY_NO_APPROVAL or SOD_VIOLATION, explain and ask user.
 - After API calls, briefly summarize what you did and the outcome (e.g. "Compiled with dude-x; submitted; task_id …" and status, message, artifacts).
 - If dude-x or Integration base URL/API key is missing, ask user to set them in GPT configuration.
@@ -75,12 +75,12 @@ Examples (for decisions.operations): write_config with path/content; build with 
 
 **User-facing flow (matches API, compiler first):**
 
-0. **dude-x (compiler):** User submits a **human-signed spec** via **POST /compile** → dude-x validates and returns a **plan** (`identity`, `domain`, `operations`, `plan_hash`). That plan is the *compiled* intent; the integration gate does not use dude-x’s `plan_hash` for submission—it uses its own hash from `/gate/evaluate`.
+0. **dude-x (compiler):** User submits a **human-signed spec** via **POST /compile** → dude-x validates and returns a **plan** (`identity`, `ocgg_identity`, `domain`, `operations`, `plan_hash`, `integration_plan_hash`). That plan is the *compiled* intent; the integration gate does not use dude-x’s `plan_hash` for submission—it uses the integration hash (`integration_plan_hash` or from `/gate/evaluate`).
 1. User sends **POST /gate/evaluate** (optional dry run) and/or **POST /task** with `ocgg_identity` = plan’s `identity`, `operations` = plan’s `operations`, `deployment_target: "production"`, and **no** `approval_reference` / `approver_id` → integration returns **BLOCK** / **gate_outcome: BLOCK**, **reason_codes** including `PROD_DEPLOY_NO_APPROVAL`; no execution.
 2. User adds **approval_reference** (or valid **approver_id**) and resubmits **POST /task** → **gate_outcome: PASS**, **task_id**, **execution_id** / **execution_response** when execution succeeds.
 3. **Receipt:** **GET /status/{task_id}** shows **audit_history** with events like `gate_decision` and `execution_response`.
 
-**Optional dry run:** **POST /gate/evaluate** with `plan_hash: ""` and the compiled `operations` returns **outcome**, **reason_codes**, **defect_list** — useful to explain *why* the gate would block before **POST /task**.
+**Optional dry run:** **POST /gate/evaluate** with `plan_hash: ""` (or `integration_plan_hash`) and the compiled `operations` returns **outcome**, **reason_codes**, **defect_list** — useful to explain *why* the gate would block before **POST /task**.
 
 **Developer verification (automated tests):** In the repo, `services/openclaw-integration/tests/test_demo_governance_59s.py` prints each scenario in narrative form when run with **`pytest … -s`**:
 
@@ -142,16 +142,16 @@ Use these exact payloads and expected responses when the user asks to **simulate
 }
 ```
 
-**dude-x returns (200):** `plan_version`, `identity` (`W-OCGG`), `domain` (`web`), `operations` (same deploy op, normalized), `rollback`, **`plan_hash`** (dude-x’s plan fingerprint).
+**dude-x returns (200):** `plan_version`, `identity` (`W-OCGG`), `ocgg_identity` (`W-OCGG`), `domain` (`web`), `operations` (same deploy op, normalized), `rollback`, **`plan_hash`** (dude-x’s plan fingerprint), **`integration_plan_hash`** (integration-compatible hash).
 
-**For integration:** Use **`identity`** as **`ocgg_identity`** and **`operations`** from this response for **POST /gate/evaluate** and **POST /task**. Do **not** paste dude-x’s `plan_hash` into the integration as the integration’s `plan_hash`—the integration’s `plan_hash` comes only from **POST /gate/evaluate** (see below).
+**For integration:** Use **`ocgg_identity`** and **`operations`** from this response for **POST /gate/evaluate** and **POST /task**. Use **`integration_plan_hash`** (or the hash returned by `/gate/evaluate`). Do **not** paste dude-x’s `plan_hash` into the integration as the integration’s `plan_hash`.
 
 ---
 
 ### Shared integration building blocks
 
 - **Operations for gate/task:** Use the **`operations`** array returned by **POST /compile** (must match what you send to the gate; include **`outputs: {}`** on ops if present in the compiled plan).
-- **Integration `plan_hash`:** For **POST /gate/evaluate** send `"plan_hash": ""`. The response includes the integration’s **`plan_hash`**. For **POST /task**, use that **`plan_hash`** from the prior **POST /gate/evaluate** (same `ocgg_identity`, `operations`, `deployment_target`).
+- **Integration `plan_hash`:** For **POST /gate/evaluate** send `"plan_hash": ""` (or `integration_plan_hash`). The response includes the integration’s **`plan_hash`**. For **POST /task**, use that **`plan_hash`** (or `integration_plan_hash`) from the prior **POST /gate/evaluate** (same `ocgg_identity`, `operations`, `deployment_target`).
 
 ---
 
@@ -162,7 +162,7 @@ Use these exact payloads and expected responses when the user asks to **simulate
 ```json
 {
   "ocgg_identity": "W-OCGG",
-  "plan_hash": "<from POST /gate/evaluate after compile>",
+  "plan_hash": "<integration_plan_hash or from POST /gate/evaluate after compile>",
   "operations": [
     {
       "op_id": "op-001",
@@ -205,7 +205,7 @@ Use these exact payloads and expected responses when the user asks to **simulate
 
 ### Gate evaluate (dry run, after compile)
 
-**User sends:** **POST /gate/evaluate** — same shape as task, with `"plan_hash": ""` and **`operations`** copied from dude-x compile response:
+**User sends:** **POST /gate/evaluate** — same shape as task, with `"plan_hash": ""` (or `integration_plan_hash`) and **`operations`** copied from dude-x compile response:
 
 ```json
 {
@@ -230,7 +230,7 @@ Use these exact payloads and expected responses when the user asks to **simulate
 - `reason_codes`: includes `"PROD_DEPLOY_NO_APPROVAL"`
 - `defect_list`: at least one defect whose `message` mentions “approval”.
 
-Use the response’s **`plan_hash`** for **POST /task** when the user adds approval and submits.
+Use the response’s **`plan_hash`** (or the compile response’s `integration_plan_hash`) for **POST /task** when the user adds approval and submits.
 
 ---
 
@@ -248,7 +248,7 @@ Use the response’s **`plan_hash`** for **POST /task** when the user adds appro
 **Simulation instructions for the Custom GPT:** When the user asks to simulate the demo (or “run the 59s demo”, etc.), walk through in order:
 
 1. **dude-x POST /compile** — show the signed spec and the returned **plan** (`identity`, `operations`); explain that dude-x is compile-only (no execution).
-2. **POST /gate/evaluate** (optional) — same `operations` as compile, `plan_hash: ""` → BLOCK + defect message + integration **`plan_hash`**.
+2. **POST /gate/evaluate** (optional) — same `operations` as compile, `plan_hash: ""` (or `integration_plan_hash`) → BLOCK + defect message + integration **`plan_hash`**.
 3. **POST /task** without approval → **BLOCK** (same narrative as tests).
 4. **POST /task** with **`approval_reference`** → **PASS** + execution.
 5. **GET /status/{task_id}** — receipt / audit trail.
