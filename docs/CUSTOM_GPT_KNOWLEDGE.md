@@ -59,6 +59,15 @@ Examples (for decisions.operations): write_config with path/content; build with 
 
 ---
 
+## Approval, BLOCK/REFORM, and Recompile
+
+- **Who decides BLOCK/REFORM:** OpenClaw Integration (gate) returns `gate_outcome: "BLOCK"` plus `reason_codes` explaining what failed.
+- **How a blocked execution gets approved:** Add `approval_reference` or `approver_id` and **re-submit** the same plan (`ocgg_identity`, `operations`, `integration_plan_hash`). The gate re-evaluates and can return **PASS**.
+- **When a recompile is required:** If the reason codes indicate a plan change (e.g., invalid operation types, unauthorized network egress, domain mismatch), the user must **update the spec** and call **dude-x `/compile` again**.
+- **Does dude-x auto‑recompile?** No. Dude-x compiles only when a new spec is submitted. Integration never compiles; it only evaluates and executes.
+
+---
+
 ## Rules
 
 - dude-x: X-API-Key. Integration: Bearer INTEGRATION_API_KEY. Never expose OpenClaw Gateway key.

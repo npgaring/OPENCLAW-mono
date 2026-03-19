@@ -61,20 +61,19 @@ app = FastAPI(
 )
 raw_cors = (settings.cors_origins or "").strip()
 if not raw_cors:
-    allow_origins = ["*"]
+    # Default local dev origin for browser-based demos.
+    allow_origins = ["http://localhost:3000", "http://127.0.0.1:3000"]
 elif raw_cors == "*":
     allow_origins = ["*"]
 else:
     allow_origins = [item.strip() for item in raw_cors.split(",") if item.strip()]
-allow_credentials = True
-if "*" in allow_origins:
-    allow_credentials = False
+allow_credentials = "*" not in allow_origins
 app.add_middleware(
     CORSMiddleware,
     allow_origins=allow_origins,
     allow_credentials=allow_credentials,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=["POST", "OPTIONS"],
+    allow_headers=["authorization", "content-type"],
 )
 
 
