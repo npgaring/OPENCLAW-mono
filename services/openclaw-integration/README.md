@@ -5,7 +5,7 @@ Governance-gated layer between callers (e.g. Builder System) and the runtime exe
 ## Setup
 
 1. Copy `example.env` to `.env` and set `DATABASE_URL` (shared Neon PostgreSQL), `OPENCLAW_BASE_URL`, `OPENCLAW_API_KEY`, `INTEGRATION_API_KEY`.
-2. Run migrations (from repo root): `migration/001_dude_x_tables.sql`, `002`, `003_openclaw_integration_tables.sql`.
+2. Run migrations (from repo root): `migration/001_dude_x_tables.sql`, `002`, `003_openclaw_integration_tables.sql`, and integration SQL through **`005_trace_id.sql`** (see `app/db/migrations/`).
 3. `pip install -r requirements.txt`
 
 ## Run
@@ -15,14 +15,18 @@ Governance-gated layer between callers (e.g. Builder System) and the runtime exe
 
 ## API
 
-- `POST /task` — Submit task (ocgg_identity, plan_hash, operations; optional goal, context, acceptance_criteria); gate → persist → if PASS call executor.
-- `POST /task/{task_id}/continue` — Follow-up message for an existing task (body: `message`, optional `prior_context`). Task must be `completed`, `partial`, or `needs_review`. Uses same Gateway user for session continuity.
+- `POST /task` — Submit task (ocgg_identity, plan_hash, operations; optional goal, context, acceptance_criteria, **trace_id**); gate → persist → if PASS call executor. Response includes **`trace_id`** / **`audit_trace_id`** for correlation with DUDE-X compile.
+- `POST /task/{task_id}/continue` — Follow-up for an existing task (`message`, optional `prior_context`, **`trace_id` when the task has one**). Task must be `completed`, `partial`, or `needs_review`, and must have `execution_token_hash` from the initial gated run. **Does not re-run the full gate** — see [Governance backend](../../docs/governance-backend.md).
+- `POST /test/execute` — **Non-governed** OpenResponses proxy. **Off in production** unless `TEST_EXECUTE_ENABLED=true`. Prefer `POST /task` for demos.
 - `POST /audit` — Callback: update task status and append audit event.
-- `POST /gate/evaluate` — Evaluate spec only; return GateDecision (no DB, no execution).
+- `GET /audit/reconstruct` — `task_id` and/or `trace_id`: JSON snapshot for replay (task + latest gate row). See [Governance backend](../../docs/governance-backend.md).
+- `POST /gate/evaluate` — Evaluate spec only; return GateDecision (no DB, no execution). Optional **trace_id** echoed in response.
 - `POST /gate/verify-token` — Verify token in tenant context.
 - `GET /status/{task_id}` — Task status, execution_id, audit_history.
 - `GET /health` — Health check.
 - `GET /`, `GET /privacy` — HTML.
+
+**OpenAPI**: `GET /openapi.json` (includes new optional fields when the app is running).
 
 ## Tests
 

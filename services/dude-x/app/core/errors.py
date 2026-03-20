@@ -1,6 +1,8 @@
 """Structured error codes and response model."""
+from __future__ import annotations
+
 from enum import Enum
-from typing import Any
+from typing import Any, Optional
 
 from pydantic import BaseModel, ConfigDict
 
@@ -25,7 +27,7 @@ class ErrorResponse(BaseModel):
 
     code: ErrorCode
     message: str
-    details: dict[str, Any] | None = None
+    details: Optional[dict[str, Any]] = None
 
 
 class DUDEXError(Exception):
@@ -35,7 +37,7 @@ class DUDEXError(Exception):
         self,
         code: ErrorCode,
         message: str,
-        details: dict[str, Any] | None = None,
+        details: Optional[dict[str, Any]] = None,
     ):
         self.code = code
         self.message = message

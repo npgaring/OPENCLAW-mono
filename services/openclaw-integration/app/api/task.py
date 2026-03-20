@@ -1,6 +1,6 @@
 """POST /task — submit task, gate, token, executor call; POST /task/{id}/continue — follow-up."""
 import logging
-from typing import Any
+from typing import Any, Optional
 from uuid import UUID
 
 import httpx
@@ -9,7 +9,9 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm.attributes import flag_modified
 
+from app.core.config import settings
 from app.core.errors import ErrorCodes
+from app.core.trace_id import normalize_trace_id
 from app.core.identity import IDENTITY_DOMAIN_MAP
 from app.db.session import get_session
 from app.gate.engine import GateEngine
@@ -22,6 +24,19 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 
+def _task_submit_response(
+    *,
+    task_id: UUID,
+    status: str,
+    trace_id: Optional[str] = None,
+    **kwargs: Any,
+) -> TaskSubmitResponse:
+    if trace_id:
+        kwargs["trace_id"] = trace_id
+        kwargs["audit_trace_id"] = trace_id
+    return TaskSubmitResponse(task_id=task_id, status=status, **kwargs)
+
+
 @router.post("/task", response_model=TaskSubmitResponse)
 async def submit_task(
     body: TaskSubmitRequest,
@@ -32,6 +47,7 @@ async def submit_task(
         raise HTTPException(status_code=422, detail={"code": ErrorCodes.INVALID_PAYLOAD, "message": "Unknown ocgg_identity"})
     domain = IDENTITY_DOMAIN_MAP[body.ocgg_identity]
     spec = body.model_dump()
+    trace_id = normalize_trace_id(spec.pop("trace_id", None))
     engine = GateEngine()
     evaluation = engine.evaluate(spec, body.ocgg_identity)
     decision = evaluation.decision
@@ -50,6 +66,7 @@ async def submit_task(
         plan_json=plan_json,
         audit_history=[],
         status=TaskStatus.submitted,
+        trace_id=trace_id,
     )
     session.add(task)
     await session.flush()
@@ -63,6 +80,7 @@ async def submit_task(
         spec_hash=spec_hash,
         plan_hash=plan_hash,
         approver_id=decision.approver_id,
+        trace_id=trace_id,
     )
     session.add(gate_record)
     await session.commit()
@@ -73,9 +91,10 @@ async def submit_task(
     await session.commit()
 
     if decision.outcome.value != "PASS":
-        return TaskSubmitResponse(
+        return _task_submit_response(
             task_id=task.task_id,
             status=task.status.value,
+            trace_id=trace_id,
             gate_outcome=decision.outcome.value,
             reason_codes=decision.reason_codes,
         )
@@ -86,28 +105,32 @@ async def submit_task(
         "policy_version": decision.policy_version,
         "ocgg_identity": body.ocgg_identity,
         "outcome": "PASS",
+        "trace_id": trace_id,
     })
     token_hash = hash_token(execution_token)
     verified, _ = verify_execution_token(execution_token)
     if not verified:
-        return TaskSubmitResponse(
+        return _task_submit_response(
             task_id=task.task_id,
             status=TaskStatus.submitted.value,
+            trace_id=trace_id,
             gate_outcome="BLOCK",
             reason_codes=["EXECUTION_TOKEN_INVALID"],
         )
     if get_policy_version_at_execution() != decision.policy_version:
-        return TaskSubmitResponse(
+        return _task_submit_response(
             task_id=task.task_id,
             status=TaskStatus.submitted.value,
+            trace_id=trace_id,
             gate_outcome="BLOCK",
             reason_codes=["RE_EVALUATION_REQUIRED"],
         )
     existing = await session.get(UsedExecutionToken, token_hash)
     if existing:
-        return TaskSubmitResponse(
+        return _task_submit_response(
             task_id=task.task_id,
             status=TaskStatus.submitted.value,
+            trace_id=trace_id,
             gate_outcome="BLOCK",
             reason_codes=["TOKEN_ALREADY_USED"],
         )
@@ -117,9 +140,10 @@ async def submit_task(
         await session.flush()
     except IntegrityError:
         await session.rollback()
-        return TaskSubmitResponse(
+        return _task_submit_response(
             task_id=task.task_id,
             status=TaskStatus.submitted.value,
+            trace_id=trace_id,
             gate_outcome="BLOCK",
             reason_codes=["TOKEN_ALREADY_USED"],
         )
@@ -140,9 +164,10 @@ async def submit_task(
             task.execution_id = e.response["execution_id"]
         await session.commit()
         reason_codes = ["EXECUTION_ABORTED"] if e.error_type == "execution_aborted" else []
-        return TaskSubmitResponse(
+        return _task_submit_response(
             task_id=task.task_id,
             status=task.status.value,
+            trace_id=trace_id,
             execution_response=e.response,
             gate_outcome="PASS",
             reason_codes=reason_codes,
@@ -157,17 +182,18 @@ async def submit_task(
         task.status = TaskStatus.failed
     task.audit_history = (task.audit_history or []) + [{"event_type": "execution_response", "payload": result}]
     await session.commit()
-    return TaskSubmitResponse(
+    return _task_submit_response(
         task_id=task.task_id,
         execution_id=task.execution_id,
         status=task.status.value,
+        trace_id=trace_id,
         execution_response=result,
         gate_outcome="PASS",
         reason_codes=[],
     )
 
 
-CONTINUABLE_STATUSES = frozenset({"completed", "partial", "needs_review"})
+CONTINUABLE_STATUSES = frozenset({TaskStatus.completed, TaskStatus.partial, TaskStatus.needs_review})
 
 
 def _prior_context_from_audit(audit_history: list[Any]) -> str:
@@ -194,6 +220,14 @@ async def continue_task(
     session: AsyncSession = Depends(get_session),
 ):
     """Send a follow-up message for an existing task (same Gateway user/session). Task must be completed, partial, or needs_review."""
+    if not settings.allow_task_continue_route():
+        raise HTTPException(
+            status_code=403,
+            detail={
+                "code": "TASK_CONTINUE_DISABLED",
+                "message": "POST /task/{id}/continue is disabled (set TASK_CONTINUE_ENABLED=true to allow).",
+            },
+        )
     task = await session.get(Task, task_id)
     if not task:
         raise HTTPException(status_code=404, detail="Task not found")
@@ -202,6 +236,23 @@ async def continue_task(
             status_code=422,
             detail={"code": ErrorCodes.INVALID_PAYLOAD, "message": f"Task not continuable (status={task.status})"},
         )
+    if not task.execution_token_hash:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "code": "CONTINUE_REQUIRES_PRIOR_EXECUTION",
+                "message": "Task has no execution_token_hash; initial POST /task gated execution must have completed with a token.",
+            },
+        )
+    if task.trace_id:
+        if not body.trace_id or body.trace_id.strip() != task.trace_id:
+            raise HTTPException(
+                status_code=422,
+                detail={
+                    "code": "TRACE_ID_MISMATCH",
+                    "message": "Provide trace_id matching this task (from compile/gate/task response) to continue the same correlation chain.",
+                },
+            )
     prior_context = body.prior_context if body.prior_context is not None else _prior_context_from_audit(task.audit_history or [])
     client = OpenClawClient()
     try:
@@ -212,27 +263,45 @@ async def continue_task(
             prior_context=prior_context,
         )
     except OpenClawError as e:
-        task.audit_history = (task.audit_history or []) + [{"event_type": "execution_response", "payload": e.response}]
+        task.audit_history = (task.audit_history or []) + [
+            {"event_type": "task_continue", "payload": {"message": body.message[:500]}},
+            {"event_type": "execution_response", "payload": e.response},
+        ]
         if e.response.get("execution_id"):
             task.execution_id = e.response["execution_id"]
-        task.status = e.error_type
+        try:
+            task.status = TaskStatus(e.error_type)
+        except ValueError:
+            task.status = TaskStatus.error
+        flag_modified(task, "audit_history")
         await session.commit()
-        return TaskSubmitResponse(
+        return _task_submit_response(
             task_id=task.task_id,
-            status=e.error_type,
+            status=task.status.value,
+            trace_id=task.trace_id,
             execution_response=e.response,
             gate_outcome="PASS",
             reason_codes=[],
         )
     task.execution_id = result.get("execution_id")
     s = result.get("status")
-    task.status = "completed" if s == "success" else (s if s in ("failed", "partial", "needs_review") else "failed")
-    task.audit_history = (task.audit_history or []) + [{"event_type": "execution_response", "payload": result}]
+    if s == "success":
+        task.status = TaskStatus.completed
+    elif s in ("failed", "partial", "needs_review"):
+        task.status = TaskStatus(s)
+    else:
+        task.status = TaskStatus.failed
+    task.audit_history = (task.audit_history or []) + [
+        {"event_type": "task_continue", "payload": {"message": body.message[:500]}},
+        {"event_type": "execution_response", "payload": result},
+    ]
+    flag_modified(task, "audit_history")
     await session.commit()
-    return TaskSubmitResponse(
+    return _task_submit_response(
         task_id=task.task_id,
         execution_id=task.execution_id,
-        status=task.status,
+        status=task.status.value,
+        trace_id=task.trace_id,
         execution_response=result,
         gate_outcome="PASS",
         reason_codes=[],
@@ -257,6 +326,15 @@ async def test_execute(
     ),
 ):
     """Proxy a raw OpenResponses payload to OPENCLAW_BASE_URL/v1/responses for testing."""
+    if not settings.allow_test_execute_route():
+        raise HTTPException(
+            status_code=403,
+            detail={
+                "code": "TEST_EXECUTE_DISABLED",
+                "message": "POST /test/execute is off in production unless TEST_EXECUTE_ENABLED=true. "
+                "This route bypasses gate/token; do not expose in governed environments.",
+            },
+        )
     from app.client.openclaw_client import submit_execute
 
     try:

@@ -14,7 +14,7 @@ class Settings(BaseSettings):
         case_sensitive=False,  # allow DATABASE_URL in uppercase on Vercel
         env_file=_ENV_PATH if _ENV_PATH.exists() else None,
         env_file_encoding="utf-8",
-        extra="forbid",
+        extra="ignore",  # tolerate shared/Vercel .env keys not declared here
     )
 
     database_url: str = Field(

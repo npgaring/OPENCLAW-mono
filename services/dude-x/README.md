@@ -15,7 +15,7 @@ Compile-only deterministic planner: validates human-signed specs and expands the
 
 ## API
 
-- `POST /compile` — compile spec to plan (requires `Authorization: Bearer <INTEGRATION_API_KEY>`).
+- `POST /compile` — compile spec to plan (requires `Authorization: Bearer <INTEGRATION_API_KEY>`). Optional **`trace_id`** (UUID) on the JSON body is accepted for correlation with OpenClaw integration (`POST /gate/evaluate`, `POST /task`); returned on the plan payload and stored on compile events when present. Use **`integration_hash_payload`** from `app/core/hashing.py` when computing `plan_hash` for the integration gate (see [Governance backend](../../docs/governance-backend.md)).
 - `GET /plans/{plan_hash}` — fetch plan by hash.
 - `GET /health` — health check.
 - `GET /`, `GET /privacy` — HTML pages.

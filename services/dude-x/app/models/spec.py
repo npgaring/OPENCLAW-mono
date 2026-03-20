@@ -1,5 +1,7 @@
 """Spec input and stored models."""
-from typing import Any, Literal
+from __future__ import annotations
+
+from typing import Any, Literal, Optional
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -27,14 +29,14 @@ class OperationSpec(BaseModel):
     target: str
     inputs: dict[str, Any] = Field(default_factory=dict)
     outputs: dict[str, Any] = Field(default_factory=dict)
-    addon: str | None = None
+    addon: Optional[str] = None
 
 
 class Decisions(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     operations: list[OperationSpec]
-    domain: str | None = None
+    domain: Optional[str] = None
 
 
 class SpecIn(BaseModel):

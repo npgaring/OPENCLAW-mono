@@ -1,6 +1,7 @@
 """POST /gate/evaluate, POST /gate/verify-token."""
+from app.core.trace_id import normalize_trace_id
 from app.gate.engine import GateEngine
-from app.gate.models import GateDecisionResponse, GateOutcome
+from app.gate.models import GateDecisionResponse
 from app.gate.token import verify_execution_token
 from app.models import GateEvaluateRequest, VerifyTokenRequest, VerifyTokenResponse
 from fastapi import APIRouter, Depends, HTTPException
@@ -21,6 +22,7 @@ async def evaluate_gate(
     if not body.ocgg_identity or body.ocgg_identity not in IDENTITY_DOMAIN_MAP:
         raise HTTPException(status_code=422, detail={"code": ErrorCodes.INVALID_PAYLOAD, "message": "ocgg_identity must be W-OCGG or R-OCGG"})
     spec = body.to_payload()
+    trace_id = normalize_trace_id(spec.pop("trace_id", None) if isinstance(spec, dict) else None)
     evaluation = GateEngine().evaluate(spec, body.ocgg_identity)
     d = evaluation.decision
     return GateDecisionResponse(
@@ -32,6 +34,7 @@ async def evaluate_gate(
         plan_hash=d.plan_hash,
         approver_id=d.approver_id,
         execution_token=d.execution_token,
+        trace_id=trace_id,
     )
 
 

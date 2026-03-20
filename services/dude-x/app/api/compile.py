@@ -10,6 +10,7 @@ from app.compiler.planner import build_plan
 from app.compiler.validator import validate_spec
 from app.core.errors import DUDEXError, ErrorCode
 from app.core.hashing import hash_payload
+from app.core.trace_id import normalize_trace_id
 from app.db.session import get_session
 from app.models import CompileEvent, PlanRecord, PlanPayload, SpecIn, SpecRecord
 
@@ -133,9 +134,26 @@ async def compile_spec(
     """Compile spec to plan; persist spec, plan, and compile event."""
     if not isinstance(body, dict):
         raise DUDEXError(ErrorCode.INVALID_SPEC, "Body must be a JSON object", details={})
-    spec = parse_compile_body(body)
-    spec_payload = spec.model_dump(mode="python")
-    spec_hash = hash_payload(spec_payload)
+    body = dict(body)
+    trace_id = normalize_trace_id(body.pop("trace_id", None))
+    try:
+        spec = parse_compile_body(body)
+        spec_payload = spec.model_dump(mode="python")
+        spec_hash = hash_payload(spec_payload)
+    except DUDEXError as e:
+        session.add(
+            CompileEvent(
+                event_type="COMPILE_FAILED",
+                spec_hash="",
+                plan_hash=None,
+                metadata_={"code": e.code.value, "message": e.message, "trace_id": trace_id},
+            )
+        )
+        try:
+            await session.commit()
+        except Exception:
+            await session.rollback()
+        raise
 
     try:
         validate_spec(spec)
@@ -166,18 +184,18 @@ async def compile_spec(
                 event_type="COMPILE_OK",
                 spec_hash=spec_hash,
                 plan_hash=plan.plan_hash,
-                metadata_={"intent": spec.intent},
+                metadata_={"intent": spec.intent, "trace_id": trace_id},
             )
         )
         await session.commit()
-        return plan
+        return plan.model_copy(update={"trace_id": trace_id})
     except DUDEXError as e:
         session.add(
             CompileEvent(
                 event_type="COMPILE_FAILED",
                 spec_hash=spec_hash,
                 plan_hash=None,
-                metadata_={"code": e.code.value, "message": e.message},
+                metadata_={"code": e.code.value, "message": e.message, "trace_id": trace_id},
             )
         )
         try:
@@ -192,7 +210,7 @@ async def compile_spec(
                 event_type="COMPILE_FAILED",
                 spec_hash=spec_hash,
                 plan_hash=None,
-                metadata_={"code": ErrorCode.INVALID_SPEC.value, "message": str(e)},
+                metadata_={"code": ErrorCode.INVALID_SPEC.value, "message": str(e), "trace_id": trace_id},
             )
         )
         try:

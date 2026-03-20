@@ -1,5 +1,7 @@
 """Plan output models."""
-from typing import Any, Literal
+from __future__ import annotations
+
+from typing import Any, Literal, Optional
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -12,7 +14,7 @@ class PlanOperation(BaseModel):
     target: str
     inputs: dict[str, Any] = Field(default_factory=dict)
     outputs: dict[str, Any] = Field(default_factory=dict)
-    addon: str | None = None
+    addon: Optional[str] = None
 
 
 class PlanPayload(BaseModel):
@@ -59,13 +61,17 @@ class PlanPayload(BaseModel):
 
     plan_version: Literal["1.0"] = "1.0"
     identity: Literal["W-OCGG", "R-OCGG"]
-    ocgg_identity: Literal["W-OCGG", "R-OCGG"] | None = None
+    ocgg_identity: Optional[Literal["W-OCGG", "R-OCGG"]] = None
     domain: Literal["web", "recruiting"]
-    deployment_target: str | None = None
+    deployment_target: Optional[str] = None
     operations: list[PlanOperation]
     rollback: dict[str, Any] = Field(default_factory=dict)
     plan_hash: str
-    integration_plan_hash: str | None = None
+    integration_plan_hash: Optional[str] = None
+    trace_id: Optional[str] = Field(
+        default=None,
+        description="Server-generated or echoed correlation id; not part of plan_hash.",
+    )
 
     @model_validator(mode="after")
     def _default_ocgg_identity(self):

@@ -30,7 +30,7 @@ from app.main import app
 def _gate_evaluate_payload() -> dict[str, Any]:
     """Valid payload for POST /gate/evaluate (same outcome every time)."""
     domain = IDENTITY_DOMAIN_MAP["W-OCGG"]
-    operations = [{"type": "build", "op_id": "1", "target": "repo"}]
+    operations = [{"type": "build", "op_id": "1", "target": "repo", "inputs": {}, "outputs": {}}]
     plan_canonical = {"domain": domain, "operations": operations}
     return {
         "ocgg_identity": "W-OCGG",
@@ -42,7 +42,15 @@ def _gate_evaluate_payload() -> dict[str, Any]:
 def _task_submit_payload(unique_id: int) -> dict[str, Any]:
     """Valid payload for POST /task with unique plan (different plan_hash per id)."""
     domain = IDENTITY_DOMAIN_MAP["W-OCGG"]
-    operations = [{"type": "build", "op_id": f"op-{unique_id}", "target": "repo", "inputs": {"x": unique_id}}]
+    operations = [
+        {
+            "type": "build",
+            "op_id": f"op-{unique_id}",
+            "target": "repo",
+            "inputs": {"x": unique_id},
+            "outputs": {},
+        }
+    ]
     plan_canonical = {"domain": domain, "operations": operations}
     return {
         "ocgg_identity": "W-OCGG",

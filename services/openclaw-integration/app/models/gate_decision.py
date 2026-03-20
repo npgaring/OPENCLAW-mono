@@ -22,4 +22,5 @@ class GateDecisionRecord(SQLModel, table=True):
     approver_id: Optional[str] = Field(default=None)
     approval_reference: Optional[str] = Field(default=None)
     execution_token_hash: Optional[str] = Field(default=None)
+    trace_id: Optional[str] = Field(default=None, max_length=36, index=True)
     created_at: datetime = Field(default_factory=datetime.utcnow)

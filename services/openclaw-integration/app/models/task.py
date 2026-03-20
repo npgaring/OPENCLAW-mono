@@ -44,6 +44,7 @@ class Task(SQLModel, table=True):
     created_at: datetime = SqlField(default_factory=datetime.utcnow)
     updated_at: datetime = SqlField(default_factory=datetime.utcnow)
     execution_id: Optional[str] = SqlField(default=None, index=True)
+    trace_id: Optional[str] = SqlField(default=None, index=True, max_length=36)
 
 
 class TaskOperation(BaseModel):
@@ -105,6 +106,10 @@ class TaskSubmitRequest(BaseModel):
     deployment_target: Optional[str] = None
     approval_reference: Optional[str] = None
     approver_id: Optional[str] = None
+    trace_id: Optional[str] = Field(
+        default=None,
+        description="Optional UUID; omit to let server generate. Pass compile response trace_id for end-to-end correlation.",
+    )
 
     @model_validator(mode="before")
     @classmethod
@@ -124,7 +129,8 @@ class TaskSubmitResponse(BaseModel):
     execution_response: Optional[dict] = None
     gate_outcome: Optional[str] = None
     reason_codes: List[str] = Field(default_factory=list)
-    audit_trace_id: Optional[str] = None
+    trace_id: Optional[str] = None
+    audit_trace_id: Optional[str] = None  # deprecated alias; same as trace_id when set
     tenant_id: Optional[str] = None
     artifact_id: Optional[str] = None
     artifact_owner: Optional[str] = None
@@ -135,6 +141,10 @@ class TaskSubmitResponse(BaseModel):
 class TaskContinueRequest(BaseModel):
     message: str
     prior_context: Optional[str] = None
+    trace_id: Optional[str] = Field(
+        default=None,
+        description="Must match task.trace_id when the task has one (proves same correlation chain).",
+    )
 
 
 class TaskStatusResponse(BaseModel):

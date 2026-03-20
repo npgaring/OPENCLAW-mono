@@ -1,4 +1,5 @@
 """Settings from environment. Copy example.env to .env."""
+import os
 import re
 from pathlib import Path
 from typing import Optional
@@ -26,6 +27,9 @@ class Settings(BaseSettings):
     integration_api_key: Optional[str] = Field(default=None, description="Authorization for our API: callers use Bearer <this> to access /task, /audit, /gate, /status. Also used to sign execution tokens.")
     app_env: str = Field(default="development", description="development | preview | production")
     log_level: str = Field(default="info", description="Log level")
+    # P0 governance: bypass surfaces (see docs/governance-backend.md)
+    # TEST_EXECUTE_ENABLED: unset = allowed in non-production, blocked in production unless "true"
+    # TASK_CONTINUE_ENABLED: unset = true; set "false" to disable POST /task/{id}/continue entirely
 
     def get_database_url_normalized(self) -> str:
         """Convert to postgresql+asyncpg and strip sslmode into attribute."""
@@ -48,6 +52,21 @@ class Settings(BaseSettings):
             qs = parse_qs(parsed.query)
             self._db_sslmode = (qs.get("sslmode") or [None])[0]
         return getattr(self, "_db_sslmode", None)
+
+    def allow_test_execute_route(self) -> bool:
+        """Non-governed OpenResponses proxy; off in production unless TEST_EXECUTE_ENABLED=true."""
+        explicit = os.environ.get("TEST_EXECUTE_ENABLED")
+        if explicit is not None:
+            return explicit.strip().lower() in ("1", "true", "yes")
+        env = (self.app_env or "").lower()
+        return env not in ("production", "prod")
+
+    def allow_task_continue_route(self) -> bool:
+        """Follow-up execution without full re-gate; set TASK_CONTINUE_ENABLED=false to disable."""
+        explicit = os.environ.get("TASK_CONTINUE_ENABLED")
+        if explicit is not None:
+            return explicit.strip().lower() not in ("0", "false", "no", "off")
+        return True
 
 
 settings = Settings()

@@ -40,7 +40,7 @@ def test_gate_block_unknown_identity():
     spec = {
         "ocgg_identity": "UNKNOWN",
         "plan_hash": "x",
-        "operations": [],
+        "operations": [{"type": "build", "op_id": "1", "target": "repo"}],
     }
     evaluation = engine.evaluate(spec, "UNKNOWN")
     assert evaluation.decision.outcome.value == "BLOCK"

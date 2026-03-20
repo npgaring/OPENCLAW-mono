@@ -17,6 +17,7 @@ _MIGRATION_FILES = [
     "002_add_identity_columns.sql",
     "003_openclaw_integration_tables.sql",
     "004_task_status_partial_needs_review.sql",
+    "005_trace_id.sql",
 ]
 
 _init_lock = asyncio.Lock()

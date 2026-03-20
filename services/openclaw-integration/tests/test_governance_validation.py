@@ -29,9 +29,11 @@ from app.gate.token import (
 from app.main import app
 
 
-def _valid_spec(ocgg_identity: str = "W-OCGG") -> dict[str, Any]:
+def _valid_spec(ocgg_identity: str = "W-OCGG", seed: str = "") -> dict[str, Any]:
+    """Match TaskOperation shape (inputs/outputs) so POST /task body.model_dump() matches plan_hash."""
     domain = IDENTITY_DOMAIN_MAP[ocgg_identity]
-    operations = [{"type": "build", "op_id": "1", "target": "repo"}]
+    op_id = f"1-{seed}" if seed else "1"
+    operations = [{"type": "build", "op_id": op_id, "target": "repo", "inputs": {}, "outputs": {}}]
     plan_canonical = {"domain": domain, "operations": operations}
     return {
         "ocgg_identity": ocgg_identity,
@@ -178,7 +180,7 @@ class TestDomainA_AuthorityAndGate:
             "ocgg_identity": "W-OCGG", "outcome": "PASS",
         })
         with patch("app.api.task.generate_execution_token", return_value=real_token):
-            with respx.mock() as r:
+            with respx.mock(assert_all_called=False) as r:
                 r.post("https://mock-openclaw/v1/responses").respond(
                     200,
                     json={
@@ -363,7 +365,7 @@ class TestDomainG_AuditAndReplay:
     def test_G1_gate_decision_record_has_required_fields(self, client, auth_headers):
         """G1: After submit, gate decision is recorded with spec_hash, plan_hash, policy_version, outcome, reason_codes."""
         spec = _valid_spec()
-        with respx.mock() as r:
+        with respx.mock(assert_all_called=False) as r:
             r.post("https://mock-openclaw/v1/responses").respond(
                 200,
                 json={"id": "ex-1", "output": [{"content": '{"status":"success","message":"ok"}'}]},
@@ -477,18 +479,14 @@ class TestDomainF_RuntimeIsolation:
 
     def test_F4_execution_aborted_when_gateway_returns_resource_limit(self, client, auth_headers):
         """F4: When executor returns resource_limit/execution_aborted → status EXECUTION_ABORTED, reason_codes."""
-        spec = _valid_spec()
-        real_token = generate_execution_token({
-            "spec_hash": "s1", "plan_hash": "p1", "policy_version": POLICY_VERSION,
-            "ocgg_identity": "W-OCGG", "outcome": "PASS",
-        })
-        with patch("app.api.task.generate_execution_token", return_value=real_token):
-            with respx.mock() as r:
-                r.post("https://mock-openclaw/v1/responses").respond(
-                    400,
-                    json={"error": {"type": "execution_aborted", "message": "Resource limit exceeded"}},
-                )
-                resp = client.post("/task", json=spec, headers=auth_headers)
+        spec = _valid_spec(seed="f4")
+        # Use real token generation (do not reuse a static JWT — TOKEN_ALREADY_USED if hash collides with A5).
+        with respx.mock(assert_all_called=False) as r:
+            r.post("https://mock-openclaw/v1/responses").respond(
+                400,
+                json={"error": {"type": "execution_aborted", "message": "Resource limit exceeded"}},
+            )
+            resp = client.post("/task", json=spec, headers=auth_headers)
         assert resp.status_code == 200
         data = resp.json()
         assert data.get("status") == "execution_aborted"

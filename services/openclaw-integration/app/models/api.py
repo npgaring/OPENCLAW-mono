@@ -79,6 +79,10 @@ class GateEvaluateRequest(BaseModel):
     plan_hash: Optional[str] = None
     integration_plan_hash: Optional[str] = None
     operations: Optional[List[Any]] = None
+    trace_id: Optional[str] = Field(
+        default=None,
+        description="Optional UUID for correlation with compile + task; omitted → server generates one in response.",
+    )
 
     def to_payload(self) -> dict[str, Any]:
         return self.model_dump(exclude_none=True)

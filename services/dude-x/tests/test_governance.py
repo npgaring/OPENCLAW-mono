@@ -1,4 +1,6 @@
 """Governance and P-Stack tests."""
+from __future__ import annotations
+
 import pytest
 
 from app.compiler.invariants import validate_invariants
@@ -17,9 +19,13 @@ def _make_spec(
     domain_override: str | None = None,
     constraints: dict | None = None,
 ) -> SpecIn:
-    ops = operations or [
-        OperationSpec(op_id="op1", type="build", target="repo", inputs={}, outputs={}),
-    ]
+    ops = (
+        operations
+        if operations is not None
+        else [
+            OperationSpec(op_id="op1", type="build", target="repo", inputs={}, outputs={}),
+        ]
+    )
     return SpecIn(
         spec_version="1.0",
         identity=identity,

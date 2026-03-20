@@ -1,9 +1,14 @@
 """Bearer token authentication (shared integration token)."""
+from __future__ import annotations
+
+from typing import Optional
+
 from fastapi import Header, HTTPException
 
 from app.core.config import settings
 
-async def require_integration_auth(authorization: str | None = Header(None, include_in_schema=False)):
+
+async def require_integration_auth(authorization: Optional[str] = Header(None, include_in_schema=False)):
     """Dependency: require Authorization: Bearer <INTEGRATION_API_KEY>."""
     if not settings.integration_api_key:
         raise HTTPException(

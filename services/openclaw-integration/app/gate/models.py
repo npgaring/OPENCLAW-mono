@@ -55,3 +55,4 @@ class GateDecisionResponse(BaseModel):
     plan_hash: str
     approver_id: Optional[str] = None
     execution_token: Optional[str] = None
+    trace_id: Optional[str] = None
