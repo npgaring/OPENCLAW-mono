@@ -1,12 +1,25 @@
 """Task table and request/response models."""
 from datetime import datetime
 from enum import Enum
-from typing import Any, List, Optional
+from typing import Any, List, Literal, Optional
 from uuid import UUID, uuid4
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 from sqlalchemy import Column, Enum as SaEnum, JSON, Text
 from sqlmodel import Field as SqlField, SQLModel
+
+
+class UatoHints(BaseModel):
+    """Optional UATO admissibility overrides (trust × authority). Omitted fields use server defaults."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    trust_level: Optional[Literal["LOW", "HIGH"]] = None
+    authority_level: Optional[Literal["LOW", "HIGH"]] = None
+    trust_source: Optional[str] = None
+    request_source: Optional[str] = None
+    tenant_id: Optional[str] = None
+    evidence: Optional[List[str]] = None
 
 
 class TaskStatus(str, Enum):
@@ -33,6 +46,13 @@ class Task(SQLModel, table=True):
     policy_version: Optional[str] = SqlField(default=None)
     gate_outcome: Optional[str] = SqlField(default=None)
     reason_codes: List[str] = SqlField(default_factory=list, sa_column=Column(JSON, nullable=False))
+    uato_decision: Optional[str] = SqlField(default=None)
+    uato_reason_codes: List[str] = SqlField(default_factory=list, sa_column=Column(JSON, nullable=False))
+    uato_trust_level: Optional[str] = SqlField(default=None)
+    uato_authority_level: Optional[str] = SqlField(default=None)
+    uato_decision_version: Optional[str] = SqlField(default=None)
+    uato_input_hash: Optional[str] = SqlField(default=None, index=True)
+    uato_evaluated_at: Optional[datetime] = SqlField(default=None)
     execution_token_hash: Optional[str] = SqlField(default=None)
     approval_reference: Optional[str] = SqlField(default=None)
     plan_json: dict = SqlField(default_factory=dict, sa_column=Column(JSON, nullable=False))
@@ -110,6 +130,7 @@ class TaskSubmitRequest(BaseModel):
         default=None,
         description="Optional UUID; omit to let server generate. Pass compile response trace_id for end-to-end correlation.",
     )
+    uato: Optional[UatoHints] = Field(default=None, description="Optional UATO trust/authority hints for admissibility.")
 
     @model_validator(mode="before")
     @classmethod
@@ -129,6 +150,8 @@ class TaskSubmitResponse(BaseModel):
     execution_response: Optional[dict] = None
     gate_outcome: Optional[str] = None
     reason_codes: List[str] = Field(default_factory=list)
+    uato_decision: Optional[str] = None
+    uato_reason_codes: List[str] = Field(default_factory=list)
     trace_id: Optional[str] = None
     audit_trace_id: Optional[str] = None  # deprecated alias; same as trace_id when set
     tenant_id: Optional[str] = None

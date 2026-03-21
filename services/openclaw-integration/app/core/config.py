@@ -27,6 +27,14 @@ class Settings(BaseSettings):
     integration_api_key: Optional[str] = Field(default=None, description="Authorization for our API: callers use Bearer <this> to access /task, /audit, /gate, /status. Also used to sign execution tokens.")
     app_env: str = Field(default="development", description="development | preview | production")
     log_level: str = Field(default="info", description="Log level")
+    uato_default_trust_level: str = Field(
+        default="HIGH",
+        description="UATO trust level when request omits uato hints (HIGH|LOW). Default HIGH preserves legacy admissibility.",
+    )
+    uato_default_authority_level: str = Field(
+        default="HIGH",
+        description="UATO authority level when request omits uato hints (HIGH|LOW). Default HIGH preserves legacy admissibility.",
+    )
     # P0 governance: bypass surfaces (see docs/governance-backend.md)
     # TEST_EXECUTE_ENABLED: unset = allowed in non-production, blocked in production unless "true"
     # TASK_CONTINUE_ENABLED: unset = true; set "false" to disable POST /task/{id}/continue entirely

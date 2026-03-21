@@ -56,3 +56,6 @@ class GateDecisionResponse(BaseModel):
     approver_id: Optional[str] = None
     execution_token: Optional[str] = None
     trace_id: Optional[str] = None
+    uato_decision: Optional[str] = None
+    uato_reason_codes: List[str] = []
+    uato_skipped_gate: bool = False

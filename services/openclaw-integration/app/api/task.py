@@ -1,5 +1,6 @@
 """POST /task — submit task, gate, token, executor call; POST /task/{id}/continue — follow-up."""
 import logging
+from datetime import datetime
 from typing import Any, Optional
 from uuid import UUID
 
@@ -18,6 +19,9 @@ from app.gate.engine import GateEngine
 from app.gate.policy import get_policy_version_at_execution
 from app.gate.token import generate_execution_token, hash_token, verify_execution_token
 from app.models import GateDecisionRecord, Task, TaskContinueRequest, TaskStatus, TaskSubmitRequest, TaskSubmitResponse, UsedExecutionToken
+from app.uato import build_uato_input_from_spec, evaluate_uato, to_trace_record
+from app.uato.plan_bridge import integration_plan_preview
+from app.uato.types import UATO_DECISION_VERSION
 from app.services.execution_client import OpenClawClient, OpenClawError
 
 logger = logging.getLogger(__name__)
@@ -29,11 +33,17 @@ def _task_submit_response(
     task_id: UUID,
     status: str,
     trace_id: Optional[str] = None,
+    uato_decision: Optional[str] = None,
+    uato_reason_codes: Optional[list[str]] = None,
     **kwargs: Any,
 ) -> TaskSubmitResponse:
     if trace_id:
         kwargs["trace_id"] = trace_id
         kwargs["audit_trace_id"] = trace_id
+    if uato_decision is not None:
+        kwargs["uato_decision"] = uato_decision
+    if uato_reason_codes is not None:
+        kwargs["uato_reason_codes"] = uato_reason_codes
     return TaskSubmitResponse(task_id=task_id, status=status, **kwargs)
 
 
@@ -48,6 +58,80 @@ async def submit_task(
     domain = IDENTITY_DOMAIN_MAP[body.ocgg_identity]
     spec = body.model_dump()
     trace_id = normalize_trace_id(spec.pop("trace_id", None))
+    spec.pop("uato", None)
+
+    uato_in = build_uato_input_from_spec(
+        spec,
+        ocgg_identity=body.ocgg_identity,
+        trace_id=trace_id,
+        uato_hints=body.uato,
+    )
+    uato_res = evaluate_uato(uato_in)
+    uato_evaluated_at = datetime.utcnow()
+    uato_trace = to_trace_record(uato_in, uato_res)
+
+    if uato_res.decision != "PASS":
+        plan_json, plan_hash, spec_hash = integration_plan_preview(spec, body.ocgg_identity)
+        short_status = TaskStatus.needs_review if uato_res.decision == "ESCALATE" else TaskStatus.submitted
+        task = Task(
+            ocgg_identity=body.ocgg_identity,
+            domain=domain,
+            plan_hash=plan_hash,
+            spec_hash=spec_hash,
+            policy_version=UATO_DECISION_VERSION,
+            gate_outcome="BLOCK",
+            reason_codes=list(uato_res.reason_codes),
+            plan_json=plan_json,
+            audit_history=[
+                {
+                    "event_type": "uato_decision",
+                    "payload": {**uato_trace, "upstream_gate": "UATO", "admissibility_source": "UATO"},
+                }
+            ],
+            status=short_status,
+            trace_id=trace_id,
+            uato_decision=uato_res.decision,
+            uato_reason_codes=list(uato_res.reason_codes),
+            uato_trust_level=uato_in.trust_state.level,
+            uato_authority_level=uato_in.authority_state.level,
+            uato_decision_version=uato_res.decision_version,
+            uato_input_hash=uato_trace["uato_input_hash"],
+            uato_evaluated_at=uato_evaluated_at,
+        )
+        session.add(task)
+        await session.flush()
+        gate_record = GateDecisionRecord(
+            task_id=task.task_id,
+            ocgg_identity=body.ocgg_identity,
+            outcome="BLOCK",
+            reason_codes=list(uato_res.reason_codes),
+            defect_list=[],
+            policy_version=UATO_DECISION_VERSION,
+            spec_hash=spec_hash,
+            plan_hash=plan_hash,
+            approver_id=None,
+            trace_id=trace_id,
+            uato_decision=uato_res.decision,
+            uato_reason_codes=list(uato_res.reason_codes),
+            uato_trust_level=uato_in.trust_state.level,
+            uato_authority_level=uato_in.authority_state.level,
+            uato_decision_version=uato_res.decision_version,
+            uato_input_hash=uato_trace["uato_input_hash"],
+            uato_evaluated_at=uato_evaluated_at,
+        )
+        session.add(gate_record)
+        await session.commit()
+        await session.refresh(task)
+        return _task_submit_response(
+            task_id=task.task_id,
+            status=task.status.value,
+            trace_id=trace_id,
+            gate_outcome="BLOCK",
+            reason_codes=list(uato_res.reason_codes),
+            uato_decision=uato_res.decision,
+            uato_reason_codes=list(uato_res.reason_codes),
+        )
+
     engine = GateEngine()
     evaluation = engine.evaluate(spec, body.ocgg_identity)
     decision = evaluation.decision
@@ -64,9 +148,21 @@ async def submit_task(
         gate_outcome=decision.outcome.value,
         reason_codes=decision.reason_codes,
         plan_json=plan_json,
-        audit_history=[],
+        audit_history=[
+            {
+                "event_type": "uato_decision",
+                "payload": {**uato_trace, "upstream_gate": "UATO", "admissibility_source": "UATO"},
+            }
+        ],
         status=TaskStatus.submitted,
         trace_id=trace_id,
+        uato_decision=uato_res.decision,
+        uato_reason_codes=list(uato_res.reason_codes),
+        uato_trust_level=uato_in.trust_state.level,
+        uato_authority_level=uato_in.authority_state.level,
+        uato_decision_version=uato_res.decision_version,
+        uato_input_hash=uato_trace["uato_input_hash"],
+        uato_evaluated_at=uato_evaluated_at,
     )
     session.add(task)
     await session.flush()
@@ -81,6 +177,13 @@ async def submit_task(
         plan_hash=plan_hash,
         approver_id=decision.approver_id,
         trace_id=trace_id,
+        uato_decision=uato_res.decision,
+        uato_reason_codes=list(uato_res.reason_codes),
+        uato_trust_level=uato_in.trust_state.level,
+        uato_authority_level=uato_in.authority_state.level,
+        uato_decision_version=uato_res.decision_version,
+        uato_input_hash=uato_trace["uato_input_hash"],
+        uato_evaluated_at=uato_evaluated_at,
     )
     session.add(gate_record)
     await session.commit()
@@ -97,6 +200,8 @@ async def submit_task(
             trace_id=trace_id,
             gate_outcome=decision.outcome.value,
             reason_codes=decision.reason_codes,
+            uato_decision=uato_res.decision,
+            uato_reason_codes=list(uato_res.reason_codes),
         )
 
     execution_token = generate_execution_token({
@@ -116,6 +221,8 @@ async def submit_task(
             trace_id=trace_id,
             gate_outcome="BLOCK",
             reason_codes=["EXECUTION_TOKEN_INVALID"],
+            uato_decision=uato_res.decision,
+            uato_reason_codes=list(uato_res.reason_codes),
         )
     if get_policy_version_at_execution() != decision.policy_version:
         return _task_submit_response(
@@ -124,6 +231,8 @@ async def submit_task(
             trace_id=trace_id,
             gate_outcome="BLOCK",
             reason_codes=["RE_EVALUATION_REQUIRED"],
+            uato_decision=uato_res.decision,
+            uato_reason_codes=list(uato_res.reason_codes),
         )
     existing = await session.get(UsedExecutionToken, token_hash)
     if existing:
@@ -133,6 +242,8 @@ async def submit_task(
             trace_id=trace_id,
             gate_outcome="BLOCK",
             reason_codes=["TOKEN_ALREADY_USED"],
+            uato_decision=uato_res.decision,
+            uato_reason_codes=list(uato_res.reason_codes),
         )
     used = UsedExecutionToken(token_hash=token_hash, task_id=task.task_id)
     session.add(used)
@@ -146,6 +257,8 @@ async def submit_task(
             trace_id=trace_id,
             gate_outcome="BLOCK",
             reason_codes=["TOKEN_ALREADY_USED"],
+            uato_decision=uato_res.decision,
+            uato_reason_codes=list(uato_res.reason_codes),
         )
     gate_record.execution_token_hash = token_hash
     task.execution_token_hash = token_hash
@@ -171,6 +284,8 @@ async def submit_task(
             execution_response=e.response,
             gate_outcome="PASS",
             reason_codes=reason_codes,
+            uato_decision=uato_res.decision,
+            uato_reason_codes=list(uato_res.reason_codes),
         )
     task.execution_id = result.get("execution_id")
     s = result.get("status")
@@ -190,6 +305,8 @@ async def submit_task(
         execution_response=result,
         gate_outcome="PASS",
         reason_codes=[],
+        uato_decision=uato_res.decision,
+        uato_reason_codes=list(uato_res.reason_codes),
     )
 
 

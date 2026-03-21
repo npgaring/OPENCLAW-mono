@@ -4,6 +4,8 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from app.models.task import UatoHints
+
 
 class AuditRequest(BaseModel):
     model_config = ConfigDict(extra="allow")
@@ -83,6 +85,7 @@ class GateEvaluateRequest(BaseModel):
         default=None,
         description="Optional UUID for correlation with compile + task; omitted → server generates one in response.",
     )
+    uato: Optional[UatoHints] = Field(default=None, description="Optional UATO admissibility hints.")
 
     def to_payload(self) -> dict[str, Any]:
         return self.model_dump(exclude_none=True)

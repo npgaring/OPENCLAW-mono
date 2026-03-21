@@ -18,6 +18,7 @@ from app.models.task import (
     TaskStatusResponse,
     TaskSubmitRequest,
     TaskSubmitResponse,
+    UatoHints,
 )
 from app.models.used_token import UsedExecutionToken
 
@@ -36,6 +37,7 @@ __all__ = [
     "TaskStatusResponse",
     "TaskSubmitRequest",
     "TaskSubmitResponse",
+    "UatoHints",
     "UsedExecutionToken",
     "VerifyTokenRequest",
     "VerifyTokenResponse",
