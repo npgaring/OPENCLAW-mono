@@ -8,6 +8,9 @@ os.environ["DATABASE_URL"] = "sqlite+aiosqlite:///file:openclawtest?mode=memory&
 os.environ["OPENCLAW_BASE_URL"] = "https://mock-openclaw"
 os.environ["OPENCLAW_API_KEY"] = "test-key"
 os.environ["INTEGRATION_API_KEY"] = "test-integration-key"
+os.environ["OPENAI_FLOW_ENABLED"] = "true"
+os.environ["OPENAI_API_KEY"] = "test-openai-key"
+os.environ["OPENAI_PLAN_MODEL"] = "gpt-5.4-mini"
 
 
 @pytest.fixture

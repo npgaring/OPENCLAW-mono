@@ -10,6 +10,23 @@ from app.models.api import (
 )
 from app.models.audit_event import AuditEvent
 from app.models.gate_decision import GateDecisionRecord
+from app.models.openai_flow import (
+    AdapterToSubstrateRequest,
+    AdapterToSubstrateResponse,
+    CandidatePlan,
+    CandidatePlanMetadata,
+    CandidatePlanStep,
+    OpenAIPlanOutput,
+    OpenAIPlanRequest,
+    RiskLevel,
+    StepType,
+    SubstrateOperation,
+)
+from app.models.openai_flow_events import (
+    InvariantCDecisionRecord,
+    OpenAIVesselEvent,
+    SubstrateAdapterEvent,
+)
 from app.models.task import (
     Task,
     TaskContinueRequest,
@@ -26,10 +43,23 @@ __all__ = [
     "AuditAck",
     "AuditEvent",
     "AuditRequest",
+    "AdapterToSubstrateRequest",
+    "AdapterToSubstrateResponse",
+    "CandidatePlan",
+    "CandidatePlanMetadata",
+    "CandidatePlanStep",
     "ErrorResponse",
     "GateDecisionRecord",
     "GateEvaluateRequest",
     "HealthResponse",
+    "InvariantCDecisionRecord",
+    "OpenAIPlanOutput",
+    "OpenAIPlanRequest",
+    "OpenAIVesselEvent",
+    "RiskLevel",
+    "StepType",
+    "SubstrateAdapterEvent",
+    "SubstrateOperation",
     "Task",
     "TaskContinueRequest",
     "TaskOperation",

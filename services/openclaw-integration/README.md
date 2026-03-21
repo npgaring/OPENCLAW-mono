@@ -5,7 +5,7 @@ Governance-gated layer between callers (e.g. Builder System) and the runtime exe
 ## Setup
 
 1. Copy `example.env` to `.env` and set `DATABASE_URL` (shared Neon PostgreSQL), `OPENCLAW_BASE_URL`, `OPENCLAW_API_KEY`, `INTEGRATION_API_KEY`.
-2. Run migrations (from repo root): `migration/001_dude_x_tables.sql`, `002`, `003_openclaw_integration_tables.sql`, and integration SQL through **`005_trace_id.sql`** (see `app/db/migrations/`).
+2. Run migrations (from repo root): `migration/001_dude_x_tables.sql`, `002`, `003_openclaw_integration_tables.sql`, and integration SQL through **`007_openai_invariant_adapter.sql`** (see `app/db/migrations/`).
 3. `pip install -r requirements.txt`
 
 ## Run
@@ -23,6 +23,8 @@ Governance-gated layer between callers (e.g. Builder System) and the runtime exe
 - `POST /gate/evaluate` — Evaluate spec only; return GateDecision (no DB, no execution). Optional **trace_id** echoed in response.
 - `POST /gate/verify-token` — Verify token in tenant context.
 - `GET /status/{task_id}` — Task status, execution_id, audit_history.
+- `POST /openai/plan` — **Opt-in** (`OPENAI_FLOW_ENABLED=true`): bounded OpenAI vessel returning locked candidate-plan JSON only.
+- `POST /adapter/to-substrate` — **Opt-in**: runs Invariant-C on candidate plan and maps to governance-compatible substrate payload (no execution).
 - `GET /health` — Health check.
 - `GET /`, `GET /privacy` — HTML.
 

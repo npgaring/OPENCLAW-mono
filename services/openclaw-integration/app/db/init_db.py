@@ -7,7 +7,15 @@ from sqlmodel import SQLModel
 from app.core.config import settings
 from app.db.run_migrations import run_migration_files
 from app.db.session import get_engine
-from app.models import AuditEvent, GateDecisionRecord, Task, UsedExecutionToken
+from app.models import (
+    AuditEvent,
+    GateDecisionRecord,
+    InvariantCDecisionRecord,
+    OpenAIVesselEvent,
+    SubstrateAdapterEvent,
+    Task,
+    UsedExecutionToken,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -19,6 +27,7 @@ _MIGRATION_FILES = [
     "004_task_status_partial_needs_review.sql",
     "005_trace_id.sql",
     "006_uato_columns.sql",
+    "007_openai_invariant_adapter.sql",
 ]
 
 _init_lock = asyncio.Lock()

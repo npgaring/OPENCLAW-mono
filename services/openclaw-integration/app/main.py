@@ -15,6 +15,8 @@ from fastapi import Depends, FastAPI
 from fastapi.openapi.utils import get_openapi
 
 from app.api import audit, gate, health, public, status, task
+from app.api import openai_flow
+from app.core.config import settings
 from app.core.auth import require_integration_auth
 from app.db.init_db import init_db
 from app.logging.logger import configure_logging
@@ -112,6 +114,8 @@ app.include_router(task.router, tags=["task"], dependencies=[Depends(require_int
 app.include_router(audit.router, tags=["audit"], dependencies=[Depends(require_integration_auth)])
 app.include_router(gate.router, prefix="/gate", tags=["gate"], dependencies=[Depends(require_integration_auth)])
 app.include_router(status.router, tags=["status"], dependencies=[Depends(require_integration_auth)])
+if settings.openai_flow_enabled:
+    app.include_router(openai_flow.router, tags=["openai-flow"], dependencies=[Depends(require_integration_auth)])
 # Public
 app.include_router(health.router, tags=["health"])
 app.include_router(public.router, tags=["public"])

@@ -94,7 +94,7 @@ class GateEvaluateRequest(BaseModel):
     @classmethod
     def _alias_integration_plan_hash(cls, values):
         if isinstance(values, dict):
-            if not values.get("plan_hash") and values.get("integration_plan_hash"):
+            if values.get("integration_plan_hash"):
                 values["plan_hash"] = values["integration_plan_hash"]
         return values
 

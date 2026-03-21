@@ -35,6 +35,26 @@ class Settings(BaseSettings):
         default="HIGH",
         description="UATO authority level when request omits uato hints (HIGH|LOW). Default HIGH preserves legacy admissibility.",
     )
+    openai_flow_enabled: bool = Field(
+        default=False,
+        description="Enable opt-in OpenAI Vessel + Invariant-C + Substrate Adapter routes.",
+    )
+    openai_api_key: Optional[str] = Field(
+        default=None,
+        description="OpenAI API key for POST /openai/plan (Bearer auth to api.openai.com).",
+    )
+    openai_plan_model: str = Field(
+        default="gpt-5.4-mini",
+        description="OpenAI model used by the bounded plan vessel.",
+    )
+    openai_plan_timeout_seconds: int = Field(
+        default=30,
+        description="HTTP timeout (seconds) for OpenAI plan generation.",
+    )
+    openai_plan_max_retries: int = Field(
+        default=1,
+        description="Retry attempts for transient OpenAI vessel upstream failures.",
+    )
     # P0 governance: bypass surfaces (see docs/governance-backend.md)
     # TEST_EXECUTE_ENABLED: unset = allowed in non-production, blocked in production unless "true"
     # TASK_CONTINUE_ENABLED: unset = true; set "false" to disable POST /task/{id}/continue entirely
