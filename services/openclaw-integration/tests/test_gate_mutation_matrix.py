@@ -43,10 +43,11 @@ def _valid_spec():
     "name,mutator,expected_codes",
     [
         ("missing_plan_hash", lambda s: {k: v for k, v in s.items() if k != "plan_hash"}, {"MISSING_FIELD"}),
-        ("empty_plan_hash", lambda s: {**s, "plan_hash": ""}, {"MISSING_FIELD"}),
+        # UATO pre-gate admissibility blocks empty plan_hash / empty ops before governance (fail-closed).
+        ("empty_plan_hash", lambda s: {**s, "plan_hash": ""}, {"UATO_BLOCK_MALFORMED_PLAN"}),
         ("wrong_plan_hash", lambda s: {**s, "plan_hash": "deadbeef"}, {"PLAN_HASH_MISMATCH"}),
         ("missing_operations", lambda s: {k: v for k, v in s.items() if k != "operations"}, {"MISSING_FIELD"}),
-        ("empty_operations_list", lambda s: {**s, "operations": []}, {"MISSING_FIELD"}),
+        ("empty_operations_list", lambda s: {**s, "operations": []}, {"UATO_BLOCK_MALFORMED_PLAN"}),
         ("operations_not_list", lambda s: {**s, "operations": {}}, {"INVALID_SCHEMA"}),
     ],
 )

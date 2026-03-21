@@ -72,7 +72,14 @@ async def submit_task(
 
     if uato_res.decision != "PASS":
         plan_json, plan_hash, spec_hash = integration_plan_preview(spec, body.ocgg_identity)
-        short_status = TaskStatus.needs_review if uato_res.decision == "ESCALATE" else TaskStatus.submitted
+        if uato_res.decision == "ESCALATE":
+            short_status = TaskStatus.needs_review
+        elif uato_res.decision == "REQUIRE_APPROVAL":
+            short_status = TaskStatus.pending_approval
+        elif uato_res.decision == "BLOCK":
+            short_status = TaskStatus.uato_blocked
+        else:
+            short_status = TaskStatus.uato_blocked
         task = Task(
             ocgg_identity=body.ocgg_identity,
             domain=domain,

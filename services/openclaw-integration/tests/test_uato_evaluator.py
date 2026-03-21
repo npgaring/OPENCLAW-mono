@@ -120,3 +120,27 @@ def test_malformed_operations_block():
     inp2 = UatoInput(plan=p, trust_state=inp.trust_state, authority_state=inp.authority_state, context=inp.context)
     r = evaluate_uato(inp2)
     assert r.decision == "BLOCK"
+
+
+def test_missing_plan_hash_blocks():
+    inp = _base_input("HIGH", "HIGH")
+    p = copy.deepcopy(inp.plan)
+    p["plan_hash"] = ""
+    inp2 = UatoInput(plan=p, trust_state=inp.trust_state, authority_state=inp.authority_state, context=inp.context)
+    assert evaluate_uato(inp2).decision == "BLOCK"
+
+
+def test_empty_operations_blocks():
+    inp = _base_input("HIGH", "HIGH")
+    p = copy.deepcopy(inp.plan)
+    p["operations"] = []
+    inp2 = UatoInput(plan=p, trust_state=inp.trust_state, authority_state=inp.authority_state, context=inp.context)
+    assert evaluate_uato(inp2).decision == "BLOCK"
+
+
+def test_monotonic_authority_increase():
+    """Raising authority level must not yield a stricter decision than a lower level at same trust."""
+    high_low = evaluate_uato(_base_input("HIGH", "LOW"))
+    high_high = evaluate_uato(_base_input("HIGH", "HIGH"))
+    assert high_low.decision == "REQUIRE_APPROVAL"
+    assert high_high.decision == "PASS"

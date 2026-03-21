@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from app.uato import reason_codes as rc
+from app.uato.normalize import minimal_plan_admissibility_issues
 from app.uato.types import UATO_DECISION_VERSION, UatoDecision, UatoInput, UatoResult
 
 
@@ -35,6 +36,16 @@ def evaluate_uato(inp: UatoInput) -> UatoResult:
             trace_id=trace_id,
         )
 
+    shape_issues = minimal_plan_admissibility_issues(inp.plan)
+    if shape_issues:
+        return UatoResult(
+            decision="BLOCK",
+            reason_codes=(rc.UATO_BLOCK_MALFORMED_PLAN,),
+            decision_version=UATO_DECISION_VERSION,
+            requires_human_approval=False,
+            trace_id=trace_id,
+        )
+
     if not inp.authority_state.identity_bound:
         return UatoResult(
             decision="BLOCK",
@@ -48,16 +59,6 @@ def evaluate_uato(inp: UatoInput) -> UatoResult:
         return UatoResult(
             decision="BLOCK",
             reason_codes=(rc.UATO_BLOCK_TENANT_MISMATCH,),
-            decision_version=UATO_DECISION_VERSION,
-            requires_human_approval=False,
-            trace_id=trace_id,
-        )
-
-    ops = inp.plan.get("operations")
-    if ops is not None and not isinstance(ops, list):
-        return UatoResult(
-            decision="BLOCK",
-            reason_codes=(rc.UATO_BLOCK_MALFORMED_PLAN,),
             decision_version=UATO_DECISION_VERSION,
             requires_human_approval=False,
             trace_id=trace_id,

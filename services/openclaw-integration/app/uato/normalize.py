@@ -128,3 +128,22 @@ def stable_hash_uato_material(material: dict[str, Any]) -> str:
     from app.core.security import hash_payload
 
     return hash_payload(material)
+
+
+def minimal_plan_admissibility_issues(plan: dict[str, Any]) -> list[str]:
+    """
+    Fail-closed checks on the integration spec shape (same dict as GateEngine.evaluate).
+    Does not enforce governance policy hashes or operation semantics — only presence/shape.
+    """
+    issues: list[str] = []
+    ph = plan.get("plan_hash")
+    if ph is None or (isinstance(ph, str) and not ph.strip()):
+        issues.append("missing_or_empty_plan_hash")
+    ops = plan.get("operations")
+    if ops is None:
+        issues.append("missing_operations")
+    elif not isinstance(ops, list):
+        issues.append("operations_not_list")
+    elif len(ops) == 0:
+        issues.append("operations_empty")
+    return issues

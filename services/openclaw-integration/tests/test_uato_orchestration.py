@@ -87,3 +87,33 @@ async def test_gate_runs_when_uato_passes(monkeypatch):
     data = r.json()
     assert data.get("uato_skipped_gate") is False
     assert data.get("uato_decision") == "PASS"
+
+
+@pytest.mark.asyncio
+async def test_task_uato_require_approval_status_and_skips_gate(monkeypatch):
+    called = []
+
+    real_evaluate = GateEngine.evaluate
+
+    def wrapped(self, spec, ocgg_identity):
+        called.append(1)
+        return real_evaluate(self, spec, ocgg_identity)
+
+    monkeypatch.setattr(GateEngine, "evaluate", wrapped)
+
+    transport = ASGITransport(app=app)
+    spec = _valid_spec()
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        r = await client.post(
+            "/task",
+            json={
+                **spec,
+                "uato": {"trust_level": "HIGH", "authority_level": "LOW"},
+            },
+            headers={"Authorization": "Bearer test-integration-key"},
+        )
+    assert r.status_code == 200
+    data = r.json()
+    assert data.get("status") == "pending_approval"
+    assert data.get("uato_decision") == "REQUIRE_APPROVAL"
+    assert called == []

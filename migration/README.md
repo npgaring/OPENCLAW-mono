@@ -9,6 +9,7 @@ You can still run these manually against your Neon database (same `DATABASE_URL`
 3. **003_openclaw_integration_tables.sql** — Creates `tasks`, `gate_decisions`, `audit_events`, `used_execution_tokens` (openclaw-integration schema).
 4. **005_trace_id.sql** — Adds compile→gate→task correlation columns (`trace_id`) and indexes.
 5. **007_openai_invariant_adapter.sql** — Adds OpenAI vessel / Invariant-C / substrate adapter audit tables.
+6. **008_uato_task_statuses.sql** — Adds UATO task lifecycle enum values (`pending_approval`, `uato_blocked`).
 
 Example (from repo root):
 
@@ -20,6 +21,7 @@ psql "$DATABASE_URL" -f migration/002_add_identity_columns.sql
 psql "$DATABASE_URL" -f migration/003_openclaw_integration_tables.sql
 psql "$DATABASE_URL" -f migration/005_trace_id.sql
 psql "$DATABASE_URL" -f migration/007_openai_invariant_adapter.sql
+psql "$DATABASE_URL" -f migration/008_uato_task_statuses.sql
 ```
 
 Or from a GUI/client: run the SQL in each file in order.

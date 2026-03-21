@@ -2,8 +2,12 @@
 UATO types: trust/authority admissibility only.
 
 Plan shape: integration gate spec (POST /task, POST /gate/evaluate) — see TaskSubmitRequest / GateEvaluateRequest.
-TODO: DUDE-X compile payload uses `integration_plan_hash` naming; integration hashes `{ domain, operations }` only
-      (see docs/CUSTOM_GPT_KNOWLEDGE.md). This module accepts the same dict the gate engine consumes.
+The canonical runtime contract is the integration spec dict consumed by ``GateEngine.evaluate`` (``plan_hash``,
+``operations``, optional ``goal`` / ``context`` / ``deployment_target`` / approvals, etc.).
+
+TODO (contract naming): DUDE-X / compile outputs may label the hash ``integration_plan_hash``; API models alias that
+field to ``plan_hash`` before the gate. The gate hashes only ``{ domain, operations }`` for ``plan_hash`` verification.
+Keep UATO aligned with the integration-side dict; do not assume a separate parallel plan DTO.
 """
 from __future__ import annotations
 

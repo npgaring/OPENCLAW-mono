@@ -13,7 +13,7 @@ from app.uato.normalize import (
     normalize_trust_state,
     normalize_uato_context,
 )
-from app.uato.types import AuthorityLevel, TrustLevel, TrustSource, UatoInput
+from app.uato.types import AuthorityLevel, TrustLevel, TrustSource, UatoContext, UatoInput
 
 
 def _map_app_env_to_uato_env() -> str:
@@ -76,7 +76,14 @@ def build_uato_input_from_spec(
         request_source=rs,
         trace_id=norm_trace,
     )
-    assert ctx is not None
+    if ctx is None:
+        # Fail-closed: invalid env/tenant/trace — tenant_id "" yields tenant_match False in evaluator.
+        ctx = UatoContext(
+            environment="dev",
+            tenant_id="",
+            request_source="API",
+            trace_id=norm_trace,
+        )
 
     identity_bound = derive_identity_bound(ocgg_identity)
     tenant_match = tenant_id == ocgg_identity

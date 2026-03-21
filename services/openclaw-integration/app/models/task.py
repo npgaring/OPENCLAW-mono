@@ -33,6 +33,8 @@ class TaskStatus(str, Enum):
     partial = "partial"
     needs_review = "needs_review"
     execution_aborted = "execution_aborted"  # F4: CPU/memory exhaustion or resource limit
+    pending_approval = "pending_approval"  # UATO REQUIRE_APPROVAL: admissibility holds pending human approval
+    uato_blocked = "uato_blocked"  # UATO BLOCK: fail-closed admissibility (not governance policy)
 
 
 class Task(SQLModel, table=True):
