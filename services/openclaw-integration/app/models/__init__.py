@@ -8,6 +8,7 @@ from app.models.api import (
     VerifyTokenRequest,
     VerifyTokenResponse,
 )
+from app.models.approval_request import ApprovalRequest
 from app.models.audit_event import AuditEvent
 from app.models.gate_decision import GateDecisionRecord
 from app.models.openai_flow import (
@@ -40,6 +41,7 @@ from app.models.task import (
 from app.models.used_token import UsedExecutionToken
 
 __all__ = [
+    "ApprovalRequest",
     "AuditAck",
     "AuditEvent",
     "AuditRequest",

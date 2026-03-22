@@ -187,7 +187,7 @@ class TestDemoGovernance59s:
             "output": [{"type": "message", "content": [{"type": "text", "text": '{"status":"success","message":"Deployed."}'}]}],
             "usage": {},
         }
-        with patch("app.api.task.OpenClawClient") as mock_client_class:
+        with patch("app.services.task_submission.OpenClawClient") as mock_client_class:
             mock_client_class.return_value.execute = AsyncMock(return_value=mock_response)
             resp = client.post("/task", json=spec, headers=auth_headers)
         assert resp.status_code == 200, resp.text
@@ -224,7 +224,7 @@ class TestDemoGovernance59s:
             "output": [{"type": "message", "content": [{"type": "text", "text": '{"status":"success","message":"Done."}'}]}],
             "usage": {},
         }
-        with patch("app.api.task.OpenClawClient") as mock_client_class:
+        with patch("app.services.task_submission.OpenClawClient") as mock_client_class:
             mock_client_class.return_value.execute = AsyncMock(return_value=mock_response)
             resp2 = client.post("/task", json=spec_pass, headers=auth_headers)
         assert resp2.status_code == 200

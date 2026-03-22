@@ -83,7 +83,7 @@ class TestDomainA_AuthorityAndGate:
     def test_A2_pass_but_token_verify_fails_rejects_execution(self, client, auth_headers):
         """A2: If token verification fails after PASS, execution is rejected (BLOCK, no executor call)."""
         spec = _valid_spec()
-        with patch("app.api.task.verify_execution_token", return_value=(False, None)):
+        with patch("app.services.task_submission.verify_execution_token", return_value=(False, None)):
             with respx.mock(assert_all_called=False) as r:
                 r.post("https://mock-openclaw/v1/responses").respond(200, json={"id": "ex-1", "output": []})
                 resp = client.post("/task", json=spec, headers=auth_headers)
@@ -179,7 +179,7 @@ class TestDomainA_AuthorityAndGate:
             "spec_hash": "s1", "plan_hash": "p1", "policy_version": POLICY_VERSION,
             "ocgg_identity": "W-OCGG", "outcome": "PASS",
         })
-        with patch("app.api.task.generate_execution_token", return_value=real_token):
+        with patch("app.services.task_submission.generate_execution_token", return_value=real_token):
             with respx.mock(assert_all_called=False) as r:
                 r.post("https://mock-openclaw/v1/responses").respond(
                     200,
@@ -194,7 +194,7 @@ class TestDomainA_AuthorityAndGate:
         assert first.get("gate_outcome") == "PASS"
         assert first.get("status") in ("completed", "failed", "partial", "needs_review")
 
-        with patch("app.api.task.generate_execution_token", return_value=real_token):
+        with patch("app.services.task_submission.generate_execution_token", return_value=real_token):
             r2 = client.post("/task", json=spec, headers=auth_headers)
         assert r2.status_code == 200
         second = r2.json()
@@ -346,7 +346,7 @@ class TestDomainE_GovernanceDrift:
     def test_E1_policy_version_mismatch_blocks_execution(self, client, auth_headers):
         """E1: If policy at execution time != decision policy_version → BLOCK, RE_EVALUATION_REQUIRED."""
         spec = _valid_spec()
-        with patch("app.api.task.get_policy_version_at_execution", return_value="2.0.0"):
+        with patch("app.services.task_submission.get_policy_version_at_execution", return_value="2.0.0"):
             with respx.mock(assert_all_called=False) as r:
                 resp = client.post("/task", json=spec, headers=auth_headers)
         assert resp.status_code == 200

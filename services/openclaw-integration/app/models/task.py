@@ -80,6 +80,8 @@ class Task(SQLModel, table=True):
     updated_at: datetime = SqlField(default_factory=datetime.utcnow)
     execution_id: Optional[str] = SqlField(default=None, index=True)
     trace_id: Optional[str] = SqlField(default=None, index=True, max_length=36)
+    approval_request_id: Optional[UUID] = SqlField(default=None, index=True)
+    blocked_stage: Optional[str] = SqlField(default=None)
 
 
 class TaskOperation(BaseModel):
@@ -183,6 +185,11 @@ class TaskSubmitResponse(BaseModel):
     artifact_owner: Optional[str] = None
     operator_identity: Optional[str] = None
     approver_identity: Optional[str] = None
+    approval_required: Optional[bool] = None
+    approval_request_id: Optional[UUID] = None
+    approval_status: Optional[str] = None
+    source_layer: Optional[str] = None
+    resume_available: Optional[bool] = None
 
 
 class TaskContinueRequest(BaseModel):

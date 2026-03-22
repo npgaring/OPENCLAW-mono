@@ -89,7 +89,7 @@ def test_gate_evaluate_returns_trace_id(client, auth_headers):
 
 
 def test_task_submit_generates_trace_id_when_omitted(client, auth_headers):
-    with patch("app.api.task.OpenClawClient") as m:
+    with patch("app.services.task_submission.OpenClawClient") as m:
         m.return_value.execute = AsyncMock(
             return_value={"execution_id": "x", "status": "success", "message": "ok"}
         )

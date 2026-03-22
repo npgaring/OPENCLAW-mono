@@ -63,6 +63,10 @@ class Settings(BaseSettings):
         default=1,
         description="Retry attempts for transient OpenAI vessel upstream failures.",
     )
+    approval_request_ttl_hours: int = Field(
+        default=72,
+        description="Default lifetime for PENDING approval requests (expiry enforced on approve/resume).",
+    )
     # P0 governance: bypass surfaces (see docs/governance-backend.md)
     # TEST_EXECUTE_ENABLED: unset = allowed in non-production, blocked in production unless "true"
     # TASK_CONTINUE_ENABLED: unset = true; set "false" to disable POST /task/{id}/continue entirely

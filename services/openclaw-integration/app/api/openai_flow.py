@@ -278,6 +278,29 @@ async def _adapt_candidate_to_substrate(
     # SoD are owned by GateEngine on POST /task (see app/gate/engine.py). Reason code is distinct from gate.
     if candidate_plan.metadata.requiresApproval and not (approval_reference or approver_id):
         reason_codes = ["ADAPTER_METADATA_REQUIRES_APPROVAL"]
+        from app.services.approvals_service import create_adapter_approval_request
+
+        checkpoint: dict[str, Any] = {
+            "v": 1,
+            "kind": "adapter_resume",
+            "trace_id": trace_id,
+            "ocgg_identity": ocgg_identity,
+            "intent": intent,
+            "candidate_plan": candidate_plan.model_dump(mode="python"),
+            "deployment_target": deployment_target,
+            "objective": objective,
+            "context": context,
+            "acceptance_criteria": acceptance_criteria,
+            "constraints": constraints,
+        }
+        ar = await create_adapter_approval_request(
+            session,
+            trace_id=trace_id,
+            reason_code="ADAPTER_METADATA_REQUIRES_APPROVAL",
+            resume_from_stage="ADAPTER_SUBSTRATE",
+            approval_scope="adapter_metadata",
+            checkpoint=checkpoint,
+        )
         session.add(
             SubstrateAdapterEvent(
                 trace_id=trace_id,
@@ -287,13 +310,21 @@ async def _adapt_candidate_to_substrate(
                 integration_plan_hash=None,
                 outcome="BLOCK",
                 reason_codes=reason_codes,
-                payload={},
+                payload={"approval_request_id": str(ar.id), "event_type": "approval_requested"},
             )
         )
         await session.commit()
         raise HTTPException(
             status_code=422,
-            detail={"code": "METADATA_APPROVAL_REQUIRED", "reason_codes": reason_codes, "trace_id": trace_id},
+            detail={
+                "code": "METADATA_APPROVAL_REQUIRED",
+                "reason_codes": reason_codes,
+                "trace_id": trace_id,
+                "approval_request_id": str(ar.id),
+                "approval_status": "PENDING",
+                "source_layer": "ADAPTER",
+                "resume_available": True,
+            },
         )
 
     operations = [
@@ -350,6 +381,31 @@ async def _adapt_candidate_to_substrate(
     )
     await session.commit()
     return response
+
+
+async def resume_adapter_from_approval(
+    session: AsyncSession,
+    approval: Any,
+    *,
+    actor: str,
+) -> AdapterToSubstrateResponse:
+    """Backend-controlled resume: rerun adapter substrate conversion after approval (Invariant-C + structural checks)."""
+    cp = approval.checkpoint_payload_json
+    candidate_plan = CandidatePlan.model_validate(cp["candidate_plan"])
+    return await _adapt_candidate_to_substrate(
+        session=session,
+        trace_id=cp["trace_id"],
+        ocgg_identity=cp["ocgg_identity"],
+        intent=cp["intent"],
+        candidate_plan=candidate_plan,
+        deployment_target=cp.get("deployment_target"),
+        objective=cp.get("objective"),
+        context=cp.get("context"),
+        acceptance_criteria=cp.get("acceptance_criteria"),
+        constraints=cp.get("constraints"),
+        approval_reference=str(approval.id),
+        approver_id=approval.approved_by or actor,
+    )
 
 
 async def _persist_vessel_block(

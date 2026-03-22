@@ -14,7 +14,7 @@ from contextlib import asynccontextmanager
 from fastapi import Depends, FastAPI
 from fastapi.openapi.utils import get_openapi
 
-from app.api import audit, gate, health, public, status, task
+from app.api import approvals, audit, gate, health, public, status, task
 from app.api import openai_flow
 from app.core.config import settings
 from app.core.auth import require_integration_auth
@@ -111,6 +111,7 @@ if OPENCLAW_ROOT_PATH:
 
 # Protected routes (Bearer)
 app.include_router(task.router, tags=["task"], dependencies=[Depends(require_integration_auth)])
+app.include_router(approvals.router, tags=["approvals"], dependencies=[Depends(require_integration_auth)])
 app.include_router(audit.router, tags=["audit"], dependencies=[Depends(require_integration_auth)])
 app.include_router(gate.router, prefix="/gate", tags=["gate"], dependencies=[Depends(require_integration_auth)])
 app.include_router(status.router, tags=["status"], dependencies=[Depends(require_integration_auth)])

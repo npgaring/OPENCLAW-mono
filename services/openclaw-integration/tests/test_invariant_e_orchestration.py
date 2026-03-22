@@ -31,10 +31,10 @@ def _valid_spec():
 
 @pytest.mark.asyncio
 async def test_openclaw_not_called_when_invariant_e_denies(monkeypatch):
-    from app.api import task as task_module
+    from app.services import task_submission as task_submission_module
 
     monkeypatch.setattr(
-        task_module,
+        task_submission_module,
         "evaluate_invariant_e",
         lambda env: result_denied(env.trace_id, (ie_rc.IE_DENIED_CAPABILITY_NOT_ALLOWED,)),
     )
