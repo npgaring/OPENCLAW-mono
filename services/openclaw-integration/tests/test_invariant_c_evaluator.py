@@ -6,7 +6,13 @@ from app.models.openai_flow import CandidatePlan, CandidatePlanMetadata, Candida
 def _base_plan() -> CandidatePlan:
     return CandidatePlan(
         steps=[
-            CandidatePlanStep(id="s1", type="write_config", action="write_config", target="web/app", inputs={}),
+            CandidatePlanStep(
+                id="s1",
+                type="write_config",
+                action="write_config",
+                target="web/app",
+                inputs={"path": "app/a.json", "content": "{}"},
+            ),
             CandidatePlanStep(
                 id="s2",
                 type="build",
@@ -22,7 +28,13 @@ def _base_plan() -> CandidatePlan:
 def test_meaning_blocks_duplicate_step_ids():
     plan = CandidatePlan(
         steps=[
-            CandidatePlanStep(id="same", type="write_config", action="write_config", target="web/app", inputs={}),
+            CandidatePlanStep(
+                id="same",
+                type="write_config",
+                action="write_config",
+                target="web/app",
+                inputs={"path": "p1.json", "content": "a"},
+            ),
             CandidatePlanStep(id="same", type="build", action="build", target="web/app", inputs={}),
         ],
         metadata=CandidatePlanMetadata(requiresApproval=False, riskLevel="low"),
@@ -34,7 +46,15 @@ def test_meaning_blocks_duplicate_step_ids():
 
 def test_constraint_compliance_blocks_identity_forbidden_operation():
     plan = CandidatePlan(
-        steps=[CandidatePlanStep(id="s1", type="deploy", action="deploy", target="recruiting/db", inputs={})],
+        steps=[
+            CandidatePlanStep(
+                id="s1",
+                type="deploy",
+                action="deploy",
+                target="recruiting/db",
+                inputs={"provider": "vercel", "project": "x"},
+            )
+        ],
         metadata=CandidatePlanMetadata(requiresApproval=False, riskLevel="low"),
     )
     result = evaluate_invariant_c(candidate_plan=plan, ocgg_identity="R-OCGG", intent="recruiting-update", objective="Update recruiting content")
@@ -45,7 +65,13 @@ def test_constraint_compliance_blocks_identity_forbidden_operation():
 def test_temporal_consistency_blocks_backward_dependency():
     plan = CandidatePlan(
         steps=[
-            CandidatePlanStep(id="s1", type="write_config", action="write_config", target="web/app", inputs={"depends_on": ["s2"]}),
+            CandidatePlanStep(
+                id="s1",
+                type="write_config",
+                action="write_config",
+                target="web/app",
+                inputs={"path": "a.json", "content": "{}", "depends_on": ["s2"]},
+            ),
             CandidatePlanStep(id="s2", type="build", action="build", target="web/app", inputs={}),
         ],
         metadata=CandidatePlanMetadata(requiresApproval=False, riskLevel="low"),
@@ -64,8 +90,20 @@ def test_goal_coherence_blocks_identity_intent_mismatch():
 def test_convergence_blocks_adjacent_repeated_step():
     plan = CandidatePlan(
         steps=[
-            CandidatePlanStep(id="s1", type="write_config", action="write_config", target="web/app", inputs={"path": "a"}),
-            CandidatePlanStep(id="s2", type="write_config", action="write_config", target="web/app", inputs={"path": "a"}),
+            CandidatePlanStep(
+                id="s1",
+                type="write_config",
+                action="write_config",
+                target="web/app",
+                inputs={"path": "a", "content": "same"},
+            ),
+            CandidatePlanStep(
+                id="s2",
+                type="write_config",
+                action="write_config",
+                target="web/app",
+                inputs={"path": "a", "content": "same"},
+            ),
         ],
         metadata=CandidatePlanMetadata(requiresApproval=False, riskLevel="low"),
     )

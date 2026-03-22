@@ -23,5 +23,6 @@ async def get_task_status(
         task_id=task.task_id,
         status=task.status.value if hasattr(task.status, "value") else str(task.status),
         execution_id=task.execution_id,
+        governance_outcome=task.governance_outcome,
         audit_history=task.audit_history or [],
     )

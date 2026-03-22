@@ -35,6 +35,14 @@ class Settings(BaseSettings):
         default="HIGH",
         description="UATO authority level when request omits uato hints (HIGH|LOW). Default HIGH preserves legacy admissibility.",
     )
+    invariant_e_require_budget_limit: bool = Field(
+        default=False,
+        description="If true, Invariant-E denies dispatch when spec has no non-empty budget_limit (extra field on integration spec).",
+    )
+    invariant_e_allowed_capabilities_extra: Optional[str] = Field(
+        default=None,
+        description="Comma-separated extra execution capabilities (op:deploy or deploy) beyond IDENTITY_ALLOWED_OPERATIONS for Invariant-E.",
+    )
     openai_flow_enabled: bool = Field(
         default=False,
         description="Enable opt-in OpenAI Vessel + Invariant-C + Substrate Adapter routes.",

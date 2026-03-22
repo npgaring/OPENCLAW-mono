@@ -32,7 +32,7 @@ def _candidate_plan(requires_approval: bool = False):
                 "type": "write_config",
                 "action": "write_config",
                 "target": "web/app",
-                "inputs": {"path": "app/config.json"},
+                "inputs": {"path": "app/config.json", "content": "{}"},
             },
             {
                 "id": "s2",
@@ -118,8 +118,10 @@ def test_openai_plan_to_substrate_runs_full_chain(client, auth_headers):
         )
     assert resp.status_code == 200, resp.text
     payload = resp.json()
-    assert payload["integration_plan_hash"]
-    assert payload["plan_hash"]
+    assert payload["governance_plan_hash"]
+    assert payload["integration_plan_hash"] == payload["governance_plan_hash"]
+    assert payload["substrate_envelope_hash"]
+    assert payload["plan_hash"] == payload["substrate_envelope_hash"]
     assert payload["goal"] == "Build and verify a web release candidate"
     assert payload["trace_id"]
     assert payload["operations"]
@@ -143,8 +145,10 @@ def test_adapter_to_substrate_success_hash_matches_governance_canonical(client, 
     assert resp.status_code == 200, resp.text
     data = resp.json()
     expected = hash_payload({"domain": data["domain"], "operations": data["operations"]})
+    assert data["governance_plan_hash"] == expected
     assert data["integration_plan_hash"] == expected
-    assert data["plan_hash"] != expected
+    assert data["substrate_envelope_hash"] != expected
+    assert data["plan_hash"] == data["substrate_envelope_hash"]
     assert data["goal"] == "Build and verify a web release candidate"
     inv_rows = _fetch_rows(InvariantCDecisionRecord)
     adapter_rows = _fetch_rows(SubstrateAdapterEvent)
@@ -163,9 +167,9 @@ def test_adapter_blocks_when_requires_approval_without_reference(client, auth_he
     resp = client.post("/adapter/to-substrate", json=body, headers=auth_headers)
     assert resp.status_code == 422, resp.text
     data = resp.json()
-    assert data["detail"]["code"] == "APPROVAL_REQUIRED"
+    assert data["detail"]["code"] == "METADATA_APPROVAL_REQUIRED"
     adapter_rows = _fetch_rows(SubstrateAdapterEvent)
-    assert any(r.outcome == "BLOCK" and "PROD_DEPLOY_NO_APPROVAL" in (r.reason_codes or []) for r in adapter_rows)
+    assert any(r.outcome == "BLOCK" and "ADAPTER_METADATA_REQUIRES_APPROVAL" in (r.reason_codes or []) for r in adapter_rows)
 
 
 def test_adapter_blocks_on_invariant_c_failure(client, auth_headers):
@@ -181,7 +185,7 @@ def test_adapter_blocks_on_invariant_c_failure(client, auth_headers):
                     "type": "write_config",
                     "action": "write_config",
                     "target": "web/app",
-                    "inputs": {"depends_on": ["s2"]},
+                    "inputs": {"path": "app/x.json", "content": "{}", "depends_on": ["s2"]},
                 },
                 {
                     "id": "s2",
@@ -197,7 +201,10 @@ def test_adapter_blocks_on_invariant_c_failure(client, auth_headers):
     resp = client.post("/adapter/to-substrate", json=body, headers=auth_headers)
     assert resp.status_code == 422, resp.text
     data = resp.json()
-    assert data["detail"]["code"] == "INVARIANT_C_BLOCK"
+    detail = data["detail"]
+    if isinstance(detail, list):
+        detail = detail[0] if detail else {}
+    assert detail.get("code") == "INVARIANT_C_BLOCK"
     inv_rows = _fetch_rows(InvariantCDecisionRecord)
     assert any(r.decision == "BLOCK" for r in inv_rows)
 
@@ -213,10 +220,27 @@ def test_adapter_response_is_directly_compatible_with_task_and_gate_models(clien
     resp = client.post("/adapter/to-substrate", json=body, headers=auth_headers)
     assert resp.status_code == 200, resp.text
     payload = resp.json()
-    task_req = TaskSubmitRequest.model_validate(payload)
-    gate_req = GateEvaluateRequest.model_validate(payload)
-    assert task_req.plan_hash == payload["integration_plan_hash"]
-    assert gate_req.plan_hash == payload["integration_plan_hash"]
+    task_req = TaskSubmitRequest.model_validate(
+        {
+            "ocgg_identity": payload["ocgg_identity"],
+            "plan_hash": payload["governance_plan_hash"],
+            "operations": payload["operations"],
+            "deployment_target": payload.get("deployment_target"),
+            "goal": payload.get("goal"),
+            "context": payload.get("context"),
+            "trace_id": payload.get("trace_id"),
+        }
+    )
+    gate_req = GateEvaluateRequest.model_validate(
+        {
+            "ocgg_identity": payload["ocgg_identity"],
+            "plan_hash": payload["governance_plan_hash"],
+            "operations": payload["operations"],
+            "trace_id": payload.get("trace_id"),
+        }
+    )
+    assert task_req.plan_hash == payload["governance_plan_hash"]
+    assert gate_req.plan_hash == payload["governance_plan_hash"]
 
 
 def test_adapter_can_hydrate_objective_from_vessel_trace(client, auth_headers):

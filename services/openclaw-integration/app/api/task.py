@@ -22,6 +22,7 @@ from app.models import GateDecisionRecord, Task, TaskContinueRequest, TaskStatus
 from app.uato import build_uato_input_from_spec, evaluate_uato, to_trace_record
 from app.uato.plan_bridge import integration_plan_preview
 from app.uato.types import UATO_DECISION_VERSION
+from app.invariant_e import build_execution_envelope, evaluate_invariant_e, to_trace_record as ie_to_trace
 from app.services.execution_client import OpenClawClient, OpenClawError
 
 logger = logging.getLogger(__name__)
@@ -35,6 +36,10 @@ def _task_submit_response(
     trace_id: Optional[str] = None,
     uato_decision: Optional[str] = None,
     uato_reason_codes: Optional[list[str]] = None,
+    governance_outcome: Optional[str] = None,
+    invariant_e_decision: Optional[str] = None,
+    invariant_e_reason_codes: Optional[list[str]] = None,
+    dispatch_blocked: Optional[bool] = None,
     **kwargs: Any,
 ) -> TaskSubmitResponse:
     if trace_id:
@@ -44,7 +49,28 @@ def _task_submit_response(
         kwargs["uato_decision"] = uato_decision
     if uato_reason_codes is not None:
         kwargs["uato_reason_codes"] = uato_reason_codes
+    if governance_outcome is not None:
+        kwargs["governance_outcome"] = governance_outcome
+    if invariant_e_decision is not None:
+        kwargs["invariant_e_decision"] = invariant_e_decision
+    if invariant_e_reason_codes is not None:
+        kwargs["invariant_e_reason_codes"] = invariant_e_reason_codes
+    if dispatch_blocked is not None:
+        kwargs["dispatch_blocked"] = dispatch_blocked
     return TaskSubmitResponse(task_id=task_id, status=status, **kwargs)
+
+
+def _effective_gate_outcome_for_response(
+    *,
+    governance_outcome: Optional[str],
+    execution_denied: bool,
+) -> str:
+    """Backward-compatible gate_outcome: BLOCK if governance blocked or execution could not proceed."""
+    if governance_outcome == "BLOCK":
+        return "BLOCK"
+    if execution_denied:
+        return "BLOCK"
+    return "PASS"
 
 
 @router.post("/task", response_model=TaskSubmitResponse)
@@ -153,6 +179,7 @@ async def submit_task(
         spec_hash=spec_hash,
         policy_version=decision.policy_version,
         gate_outcome=decision.outcome.value,
+        governance_outcome=decision.outcome.value,
         reason_codes=decision.reason_codes,
         plan_json=plan_json,
         audit_history=[
@@ -206,10 +233,81 @@ async def submit_task(
             status=task.status.value,
             trace_id=trace_id,
             gate_outcome=decision.outcome.value,
+            governance_outcome=decision.outcome.value,
             reason_codes=decision.reason_codes,
             uato_decision=uato_res.decision,
             uato_reason_codes=list(uato_res.reason_codes),
         )
+
+    inv_env = build_execution_envelope(
+        spec=spec,
+        ocgg_identity=body.ocgg_identity,
+        trace_id=trace_id,
+        task_id=task.task_id,
+        governance_outcome=decision.outcome.value,
+        plan_hash=plan_hash,
+        spec_hash=spec_hash,
+    )
+    ie_res = evaluate_invariant_e(inv_env)
+    ie_evaluated_at = datetime.utcnow()
+    ie_trace = ie_to_trace(inv_env, ie_res)
+    ie_hash = ie_trace["invariant_e_input_hash"]
+
+    task.invariant_e_decision = ie_res.decision
+    task.invariant_e_reason_codes = list(ie_res.reason_codes)
+    task.invariant_e_decision_version = ie_res.decision_version
+    task.invariant_e_input_hash = ie_hash
+    task.invariant_e_evaluated_at = ie_evaluated_at
+    task.execution_envelope_hash = ie_hash
+    task.requested_capabilities_json = list(inv_env.requested_capabilities)
+    task.allowed_capabilities_json = list(inv_env.allowed_capabilities)
+    task.budget_limit_json = inv_env.budget_limit
+    task.dispatch_blocked = ie_res.dispatch_blocked
+
+    gate_record.invariant_e_decision = ie_res.decision
+    gate_record.invariant_e_reason_codes = list(ie_res.reason_codes)
+    gate_record.invariant_e_decision_version = ie_res.decision_version
+    gate_record.invariant_e_input_hash = ie_hash
+    gate_record.invariant_e_evaluated_at = ie_evaluated_at
+    gate_record.execution_envelope_hash = ie_hash
+    gate_record.requested_capabilities_json = list(inv_env.requested_capabilities)
+    gate_record.allowed_capabilities_json = list(inv_env.allowed_capabilities)
+    gate_record.budget_limit_json = inv_env.budget_limit
+    gate_record.dispatch_blocked = ie_res.dispatch_blocked
+
+    task.audit_history = task.audit_history or []
+    task.audit_history.append(
+        {
+            "event_type": "invariant_e_decision",
+            "payload": {**ie_trace, "upstream_gate": "INVARIANT_E", "admissibility_source": "INVARIANT_E"},
+        }
+    )
+    flag_modified(task, "audit_history")
+
+    if ie_res.decision != "EXECUTION_ALLOWED":
+        # governance_outcome / gate_outcome on Task remain GateEngine PASS; execution denial is invariant_e + dispatch_blocked.
+        task.reason_codes = [c for c in ie_res.reason_codes if c != "IE_ALLOWED"]
+        task.status = TaskStatus.invariant_e_denied
+        await session.commit()
+        await session.refresh(task)
+        return _task_submit_response(
+            task_id=task.task_id,
+            status=task.status.value,
+            trace_id=trace_id,
+            gate_outcome=_effective_gate_outcome_for_response(
+                governance_outcome=decision.outcome.value,
+                execution_denied=True,
+            ),
+            governance_outcome=decision.outcome.value,
+            reason_codes=task.reason_codes,
+            uato_decision=uato_res.decision,
+            uato_reason_codes=list(uato_res.reason_codes),
+            invariant_e_decision=ie_res.decision,
+            invariant_e_reason_codes=list(ie_res.reason_codes),
+            dispatch_blocked=True,
+        )
+
+    await session.commit()
 
     execution_token = generate_execution_token({
         "spec_hash": spec_hash,
@@ -227,9 +325,13 @@ async def submit_task(
             status=TaskStatus.submitted.value,
             trace_id=trace_id,
             gate_outcome="BLOCK",
+            governance_outcome="PASS",
             reason_codes=["EXECUTION_TOKEN_INVALID"],
             uato_decision=uato_res.decision,
             uato_reason_codes=list(uato_res.reason_codes),
+            invariant_e_decision=ie_res.decision,
+            invariant_e_reason_codes=list(ie_res.reason_codes),
+            dispatch_blocked=False,
         )
     if get_policy_version_at_execution() != decision.policy_version:
         return _task_submit_response(
@@ -237,9 +339,13 @@ async def submit_task(
             status=TaskStatus.submitted.value,
             trace_id=trace_id,
             gate_outcome="BLOCK",
+            governance_outcome="PASS",
             reason_codes=["RE_EVALUATION_REQUIRED"],
             uato_decision=uato_res.decision,
             uato_reason_codes=list(uato_res.reason_codes),
+            invariant_e_decision=ie_res.decision,
+            invariant_e_reason_codes=list(ie_res.reason_codes),
+            dispatch_blocked=False,
         )
     existing = await session.get(UsedExecutionToken, token_hash)
     if existing:
@@ -248,9 +354,13 @@ async def submit_task(
             status=TaskStatus.submitted.value,
             trace_id=trace_id,
             gate_outcome="BLOCK",
+            governance_outcome="PASS",
             reason_codes=["TOKEN_ALREADY_USED"],
             uato_decision=uato_res.decision,
             uato_reason_codes=list(uato_res.reason_codes),
+            invariant_e_decision=ie_res.decision,
+            invariant_e_reason_codes=list(ie_res.reason_codes),
+            dispatch_blocked=False,
         )
     used = UsedExecutionToken(token_hash=token_hash, task_id=task.task_id)
     session.add(used)
@@ -263,9 +373,13 @@ async def submit_task(
             status=TaskStatus.submitted.value,
             trace_id=trace_id,
             gate_outcome="BLOCK",
+            governance_outcome="PASS",
             reason_codes=["TOKEN_ALREADY_USED"],
             uato_decision=uato_res.decision,
             uato_reason_codes=list(uato_res.reason_codes),
+            invariant_e_decision=ie_res.decision,
+            invariant_e_reason_codes=list(ie_res.reason_codes),
+            dispatch_blocked=False,
         )
     gate_record.execution_token_hash = token_hash
     task.execution_token_hash = token_hash
@@ -290,9 +404,13 @@ async def submit_task(
             trace_id=trace_id,
             execution_response=e.response,
             gate_outcome="PASS",
+            governance_outcome="PASS",
             reason_codes=reason_codes,
             uato_decision=uato_res.decision,
             uato_reason_codes=list(uato_res.reason_codes),
+            invariant_e_decision=ie_res.decision,
+            invariant_e_reason_codes=list(ie_res.reason_codes),
+            dispatch_blocked=False,
         )
     task.execution_id = result.get("execution_id")
     s = result.get("status")
@@ -311,9 +429,13 @@ async def submit_task(
         trace_id=trace_id,
         execution_response=result,
         gate_outcome="PASS",
+        governance_outcome="PASS",
         reason_codes=[],
         uato_decision=uato_res.decision,
         uato_reason_codes=list(uato_res.reason_codes),
+        invariant_e_decision=ie_res.decision,
+        invariant_e_reason_codes=list(ie_res.reason_codes),
+        dispatch_blocked=False,
     )
 
 

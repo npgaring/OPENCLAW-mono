@@ -29,6 +29,8 @@ _MIGRATION_FILES = [
     "006_uato_columns.sql",
     "007_openai_invariant_adapter.sql",
     "008_uato_task_statuses.sql",
+    "009_invariant_e_columns.sql",
+    "010_governance_outcome_column.sql",
 ]
 
 _init_lock = asyncio.Lock()

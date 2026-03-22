@@ -180,6 +180,16 @@ class SubstrateOperation(BaseModel):
 
 
 class AdapterToSubstrateResponse(BaseModel):
+    """
+    Substrate payload for POST /task and /gate/evaluate.
+
+    **governance_plan_hash** is the only hash that matches ``GateEngine`` / ``hash_payload({domain, operations})``.
+    Use it as ``plan_hash`` (or ``integration_plan_hash``) on task/gate requests.
+
+    **substrate_envelope_hash** (and deprecated **plan_hash**) fingerprint the full envelope document including
+    ``plan_version`` and ``rollback`` — they must **not** be used as the governance ``plan_hash``.
+    """
+
     model_config = ConfigDict(extra="forbid")
 
     plan_version: Literal["1.0"] = "1.0"
@@ -189,8 +199,20 @@ class AdapterToSubstrateResponse(BaseModel):
     deployment_target: Optional[str] = None
     operations: list[SubstrateOperation]
     rollback: dict[str, Any] = Field(default_factory=dict)
-    plan_hash: str
-    integration_plan_hash: str
+    governance_plan_hash: str = Field(
+        description="Canonical GateEngine plan hash; use as plan_hash for POST /task and POST /gate/evaluate.",
+    )
+    substrate_envelope_hash: str = Field(
+        description="SHA256 of the full substrate envelope (plan_version, identity, domain, operations, rollback). Not valid for GateEngine plan_hash.",
+    )
+    integration_plan_hash: str = Field(
+        deprecated=True,
+        description="Deprecated alias of governance_plan_hash; identical value. Prefer governance_plan_hash.",
+    )
+    plan_hash: str = Field(
+        deprecated=True,
+        description="Deprecated alias of substrate_envelope_hash. Do not use as GateEngine plan_hash on /task.",
+    )
     goal: Optional[str] = None
     context: Optional[str] = None
     acceptance_criteria: Optional[list[str]] = None

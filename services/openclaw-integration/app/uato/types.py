@@ -5,9 +5,9 @@ Plan shape: integration gate spec (POST /task, POST /gate/evaluate) — see Task
 The canonical runtime contract is the integration spec dict consumed by ``GateEngine.evaluate`` (``plan_hash``,
 ``operations``, optional ``goal`` / ``context`` / ``deployment_target`` / approvals, etc.).
 
-TODO (contract naming): DUDE-X / compile outputs may label the hash ``integration_plan_hash``; API models alias that
-field to ``plan_hash`` before the gate. The gate hashes only ``{ domain, operations }`` for ``plan_hash`` verification.
-Keep UATO aligned with the integration-side dict; do not assume a separate parallel plan DTO.
+OpenAI adapter: use ``governance_plan_hash`` (or deprecated ``integration_plan_hash``) as ``plan_hash`` for POST /task.
+Do not use ``substrate_envelope_hash`` / deprecated ``plan_hash`` from ``AdapterToSubstrateResponse`` as the gate hash.
+The gate verifies ``hash_payload({ domain, operations })`` only.
 """
 from __future__ import annotations
 

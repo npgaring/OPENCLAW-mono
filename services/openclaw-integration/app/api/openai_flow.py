@@ -274,8 +274,10 @@ async def _adapt_candidate_to_substrate(
             },
         )
 
+    # Candidate metadata approval flag: enforced here as structural pre-check only. Production deploy and
+    # SoD are owned by GateEngine on POST /task (see app/gate/engine.py). Reason code is distinct from gate.
     if candidate_plan.metadata.requiresApproval and not (approval_reference or approver_id):
-        reason_codes = ["PROD_DEPLOY_NO_APPROVAL"]
+        reason_codes = ["ADAPTER_METADATA_REQUIRES_APPROVAL"]
         session.add(
             SubstrateAdapterEvent(
                 trace_id=trace_id,
@@ -291,7 +293,7 @@ async def _adapt_candidate_to_substrate(
         await session.commit()
         raise HTTPException(
             status_code=422,
-            detail={"code": "APPROVAL_REQUIRED", "reason_codes": reason_codes, "trace_id": trace_id},
+            detail={"code": "METADATA_APPROVAL_REQUIRED", "reason_codes": reason_codes, "trace_id": trace_id},
         )
 
     operations = [
@@ -306,8 +308,8 @@ async def _adapt_candidate_to_substrate(
     ]
     domain = "web" if ocgg_identity == "W-OCGG" else "recruiting"
     rollback: dict[str, Any] = {}
-    integration_plan_hash = hash_payload({"domain": domain, "operations": operations})
-    plan_hash = _dudex_style_plan_hash(
+    governance_plan_hash = hash_payload({"domain": domain, "operations": operations})
+    substrate_envelope_hash = _substrate_envelope_hash(
         {
             "plan_version": "1.0",
             "identity": ocgg_identity,
@@ -323,8 +325,10 @@ async def _adapt_candidate_to_substrate(
         deployment_target=deployment_target,
         operations=operations,
         rollback=rollback,
-        plan_hash=plan_hash,
-        integration_plan_hash=integration_plan_hash,
+        governance_plan_hash=governance_plan_hash,
+        substrate_envelope_hash=substrate_envelope_hash,
+        integration_plan_hash=governance_plan_hash,
+        plan_hash=substrate_envelope_hash,
         goal=objective,
         context=context,
         acceptance_criteria=acceptance_criteria,
@@ -338,7 +342,7 @@ async def _adapt_candidate_to_substrate(
             ocgg_identity=ocgg_identity,
             intent=intent,
             candidate_plan_hash=candidate_plan_hash,
-            integration_plan_hash=integration_plan_hash,
+            integration_plan_hash=governance_plan_hash,
             outcome="PASS",
             reason_codes=[],
             payload=response.model_dump(mode="python"),
@@ -419,7 +423,7 @@ def _first_non_empty_list(*values: Any) -> list[str] | None:
     return None
 
 
-def _dudex_style_plan_hash(value: dict[str, Any]) -> str:
+def _substrate_envelope_hash(value: dict[str, Any]) -> str:
     def _normalize_numbers(data: Any) -> Any:
         if isinstance(data, dict):
             return {k: _normalize_numbers(v) for k, v in data.items()}

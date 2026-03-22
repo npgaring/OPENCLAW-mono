@@ -35,6 +35,7 @@ class TaskStatus(str, Enum):
     execution_aborted = "execution_aborted"  # F4: CPU/memory exhaustion or resource limit
     pending_approval = "pending_approval"  # UATO REQUIRE_APPROVAL: admissibility holds pending human approval
     uato_blocked = "uato_blocked"  # UATO BLOCK: fail-closed admissibility (not governance policy)
+    invariant_e_denied = "invariant_e_denied"  # Invariant-E denied execution dispatch (governance may still be PASS)
 
 
 class Task(SQLModel, table=True):
@@ -46,7 +47,9 @@ class Task(SQLModel, table=True):
     plan_hash: str = SqlField()
     spec_hash: Optional[str] = SqlField(default=None, index=True)
     policy_version: Optional[str] = SqlField(default=None)
+    # GateEngine outcome only (PASS/BLOCK). Not overwritten when Invariant-E denies dispatch; see dispatch_blocked.
     gate_outcome: Optional[str] = SqlField(default=None)
+    governance_outcome: Optional[str] = SqlField(default=None)
     reason_codes: List[str] = SqlField(default_factory=list, sa_column=Column(JSON, nullable=False))
     uato_decision: Optional[str] = SqlField(default=None)
     uato_reason_codes: List[str] = SqlField(default_factory=list, sa_column=Column(JSON, nullable=False))
@@ -55,6 +58,16 @@ class Task(SQLModel, table=True):
     uato_decision_version: Optional[str] = SqlField(default=None)
     uato_input_hash: Optional[str] = SqlField(default=None, index=True)
     uato_evaluated_at: Optional[datetime] = SqlField(default=None)
+    invariant_e_decision: Optional[str] = SqlField(default=None)
+    invariant_e_reason_codes: List[str] = SqlField(default_factory=list, sa_column=Column(JSON, nullable=False))
+    invariant_e_decision_version: Optional[str] = SqlField(default=None)
+    invariant_e_input_hash: Optional[str] = SqlField(default=None, index=True)
+    invariant_e_evaluated_at: Optional[datetime] = SqlField(default=None)
+    execution_envelope_hash: Optional[str] = SqlField(default=None, index=True)
+    requested_capabilities_json: List[Any] = SqlField(default_factory=list, sa_column=Column(JSON, nullable=False))
+    allowed_capabilities_json: List[Any] = SqlField(default_factory=list, sa_column=Column(JSON, nullable=False))
+    budget_limit_json: Optional[dict] = SqlField(default=None, sa_column=Column(JSON, nullable=True))
+    dispatch_blocked: bool = SqlField(default=False)
     execution_token_hash: Optional[str] = SqlField(default=None)
     approval_reference: Optional[str] = SqlField(default=None)
     plan_json: dict = SqlField(default_factory=dict, sa_column=Column(JSON, nullable=False))
@@ -117,7 +130,10 @@ class TaskSubmitRequest(BaseModel):
     )
 
     ocgg_identity: str  # W-OCGG | R-OCGG
-    plan_hash: str
+    plan_hash: str = Field(
+        ...,
+        description="Must equal hash_payload({domain, operations}) — the governance_plan_hash (or integration_plan_hash) from POST /adapter/to-substrate. Do not use substrate_envelope_hash or deprecated plan_hash from that response.",
+    )
     integration_plan_hash: Optional[str] = None
     operations: list[TaskOperation]
     # Optional: richer plan for OpenClaw (not part of plan_hash)
@@ -150,10 +166,16 @@ class TaskSubmitResponse(BaseModel):
     execution_id: Optional[str] = None
     status: str
     execution_response: Optional[dict] = None
+    # gate_outcome: effective "may dispatch" signal for backward compatibility (BLOCK if governance blocked, UATO blocked, or execution denied).
     gate_outcome: Optional[str] = None
+    # governance_outcome: GateEngine PASS/BLOCK only when gate evaluated (None if stopped at UATO only).
+    governance_outcome: Optional[str] = None
     reason_codes: List[str] = Field(default_factory=list)
     uato_decision: Optional[str] = None
     uato_reason_codes: List[str] = Field(default_factory=list)
+    invariant_e_decision: Optional[str] = None
+    invariant_e_reason_codes: List[str] = Field(default_factory=list)
+    dispatch_blocked: Optional[bool] = None
     trace_id: Optional[str] = None
     audit_trace_id: Optional[str] = None  # deprecated alias; same as trace_id when set
     tenant_id: Optional[str] = None
@@ -178,4 +200,8 @@ class TaskStatusResponse(BaseModel):
     task_id: UUID
     status: str
     execution_id: Optional[str] = None
+    governance_outcome: Optional[str] = Field(
+        default=None,
+        description="GateEngine PASS/BLOCK when the gate ran; null if stopped before governance (e.g. UATO-only path).",
+    )
     audit_history: List[Any] = Field(default_factory=list)

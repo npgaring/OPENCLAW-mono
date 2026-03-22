@@ -209,7 +209,10 @@ def _check_goal_coherence(
     if not text:
         reasons.append("INVARIANT_C_GOAL_MISSING_OBJECTIVE")
     else:
-        if intent.startswith("web") and any(k in text for k in ("candidate", "hiring", "recruit", "resume", "job posting")):
+        # Avoid substring false positives (e.g. "release candidate" for a web build).
+        if intent.startswith("web") and any(
+            k in text for k in ("hiring", "recruit", "resume", "job posting", "job board", "applicant")
+        ):
             reasons.append("INVARIANT_C_GOAL_OBJECTIVE_MISMATCH")
         if intent == "recruiting-update" and any(k in text for k in ("deploy", "build pipeline", "website release", "frontend")):
             reasons.append("INVARIANT_C_GOAL_OBJECTIVE_MISMATCH")
