@@ -78,6 +78,33 @@ def test_openai_plan_success_and_event_persisted(client, auth_headers):
     assert any(r.outcome == "PASS" and r.schema_valid is True for r in rows)
 
 
+def test_openai_plan_upstream_error_includes_upstream_summary(client, auth_headers):
+    from app.services.openai_vessel import OpenAIVesselUpstreamError
+
+    raw = {"error": {"message": "upstream failed", "type": "server_error"}}
+    with patch(
+        "app.api.openai_flow.OpenAIVesselClient.generate_candidate_plan",
+        new=AsyncMock(
+            side_effect=OpenAIVesselUpstreamError(reason_codes=["OPENAI_UPSTREAM_HTTP_ERROR"], raw_response=raw)
+        ),
+    ):
+        resp = client.post(
+            "/openai/plan",
+            json={
+                "ocgg_identity": "W-OCGG",
+                "intent": "web-build",
+                "deployment_target": "preview",
+                "objective": "Generate a deployment plan",
+            },
+            headers=auth_headers,
+        )
+    assert resp.status_code == 502, resp.text
+    detail = resp.json()["detail"]
+    assert detail["code"] == "OPENAI_UPSTREAM_ERROR"
+    assert detail["upstream"]["message"] == "upstream failed"
+    assert detail["upstream"]["type"] == "server_error"
+
+
 def test_openai_plan_schema_violation_is_blocked_and_persisted(client, auth_headers):
     from app.services.openai_vessel import OpenAIVesselSchemaError
 

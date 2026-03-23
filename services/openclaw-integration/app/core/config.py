@@ -60,8 +60,12 @@ class Settings(BaseSettings):
         description="HTTP timeout (seconds) for OpenAI plan generation.",
     )
     openai_plan_max_retries: int = Field(
-        default=1,
-        description="Retry attempts for transient OpenAI vessel upstream failures.",
+        default=3,
+        description="Retry attempts for transient OpenAI vessel upstream failures (429, 5xx, transport errors).",
+    )
+    openai_plan_retry_backoff_seconds: float = Field(
+        default=1.0,
+        description="Base delay (seconds) before retry; exponential backoff: base * 2^attempt.",
     )
     approval_request_ttl_hours: int = Field(
         default=72,

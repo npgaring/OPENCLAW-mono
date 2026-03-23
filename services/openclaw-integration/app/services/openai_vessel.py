@@ -1,6 +1,7 @@
 """Bounded OpenAI vessel for strict candidate plan generation."""
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from typing import Any
@@ -12,6 +13,25 @@ from app.models.openai_flow import OpenAIPlanOutput, OpenAIPlanRequest
 
 OPENAI_API_URL = "https://api.openai.com/v1/chat/completions"
 logger = logging.getLogger(__name__)
+
+# Transient conditions: rate limits and server-side / proxy failures
+RETRYABLE_HTTP_STATUSES = frozenset({429, 500, 502, 503, 504})
+_MAX_UPSTREAM_SNIPPET = 800
+
+
+def summarize_openai_upstream_error(raw: dict[str, Any]) -> dict[str, Any]:
+    """Safe subset of OpenAI error JSON for API clients (no secrets)."""
+    out: dict[str, Any] = {}
+    err = raw.get("error")
+    if isinstance(err, dict):
+        for key in ("message", "type", "code", "param"):
+            val = err.get(key)
+            if val is not None and val != "":
+                s = str(val)[:_MAX_UPSTREAM_SNIPPET]
+                out[key] = s
+    if not out and raw.get("raw_text"):
+        out["raw_text"] = str(raw["raw_text"])[:_MAX_UPSTREAM_SNIPPET]
+    return out
 
 STEP_ENUM = ["create_file", "write_config", "build", "deploy", "test", "rollback_prep"]
 RISK_ENUM = ["low", "medium", "high"]
@@ -193,7 +213,11 @@ def build_openai_payload(body: OpenAIPlanRequest) -> dict[str, Any]:
                     "Return strict JSON only with the required schema. "
                     "No prose, no explanations, no optional fields, no reasoning text. "
                     "action must exactly match type. "
-                    "Only use bounded inputs allowed for each step type."
+                    "Only use bounded inputs allowed for each step type. "
+                    "Executor workspace is often empty or has no Node project: do not use npm, yarn, pnpm, npx, or node "
+                    "in build/test step commands unless an earlier step creates package.json (e.g. via create_file or write_config) "
+                    "or context/constraints clearly state a Node repo. Prefer create_file/write_config for static deliverables; "
+                    "use null for build or test command when verification is file-only."
                 ),
             },
             {"role": "user", "content": json.dumps(prompt_context, separators=(",", ":"), ensure_ascii=True)},
@@ -216,6 +240,7 @@ class OpenAIVesselClient:
         payload = build_openai_payload(body)
         raw: dict[str, Any] = {}
         attempts = max(1, settings.openai_plan_max_retries)
+        base_backoff = max(0.0, float(settings.openai_plan_retry_backoff_seconds))
         for attempt in range(attempts):
             try:
                 timeout = httpx.Timeout(timeout=float(settings.openai_plan_timeout_seconds))
@@ -236,23 +261,61 @@ class OpenAIVesselClient:
                 raise
             except httpx.HTTPStatusError as e:
                 raw = _safe_json_response(e.response)
+                status = e.response.status_code if e.response is not None else 0
                 logger.error(
                     "OpenAI vessel upstream HTTP error status=%s body=%s",
-                    e.response.status_code if e.response is not None else "unknown",
+                    status,
                     raw,
                 )
-                if attempt + 1 >= attempts:
-                    raise OpenAIVesselUpstreamError(
-                        reason_codes=["OPENAI_UPSTREAM_HTTP_ERROR"],
-                        raw_response=raw,
-                    ) from e
+                retryable = status in RETRYABLE_HTTP_STATUSES
+                last_attempt = attempt + 1 >= attempts
+                if retryable and not last_attempt:
+                    delay = base_backoff * (2**attempt)
+                    if delay > 0:
+                        logger.warning(
+                            "OpenAI vessel retrying after HTTP %s (attempt %s/%s, sleep %.2fs)",
+                            status,
+                            attempt + 1,
+                            attempts,
+                            delay,
+                        )
+                        await asyncio.sleep(delay)
+                    else:
+                        logger.warning(
+                            "OpenAI vessel retrying after HTTP %s (attempt %s/%s)",
+                            status,
+                            attempt + 1,
+                            attempts,
+                        )
+                    continue
+                raise OpenAIVesselUpstreamError(
+                    reason_codes=["OPENAI_UPSTREAM_HTTP_ERROR"],
+                    raw_response=raw,
+                ) from e
             except httpx.HTTPError as e:
                 logger.error("OpenAI vessel upstream transport error: %s", str(e))
-                if attempt + 1 >= attempts:
-                    raise OpenAIVesselUpstreamError(
-                        reason_codes=["OPENAI_UPSTREAM_UNAVAILABLE"],
-                        raw_response=raw,
-                    ) from e
+                last_attempt = attempt + 1 >= attempts
+                if not last_attempt:
+                    delay = base_backoff * (2**attempt)
+                    if delay > 0:
+                        logger.warning(
+                            "OpenAI vessel retrying after transport error (attempt %s/%s, sleep %.2fs)",
+                            attempt + 1,
+                            attempts,
+                            delay,
+                        )
+                        await asyncio.sleep(delay)
+                    else:
+                        logger.warning(
+                            "OpenAI vessel retrying after transport error (attempt %s/%s)",
+                            attempt + 1,
+                            attempts,
+                        )
+                    continue
+                raise OpenAIVesselUpstreamError(
+                    reason_codes=["OPENAI_UPSTREAM_UNAVAILABLE"],
+                    raw_response=raw,
+                ) from e
         raise OpenAIVesselUpstreamError(reason_codes=["OPENAI_UPSTREAM_UNAVAILABLE"], raw_response=raw)
 
 

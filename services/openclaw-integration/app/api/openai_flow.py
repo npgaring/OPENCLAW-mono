@@ -30,6 +30,7 @@ from app.services.openai_vessel import (
     OpenAIVesselConfigError,
     OpenAIVesselSchemaError,
     OpenAIVesselUpstreamError,
+    summarize_openai_upstream_error,
 )
 
 router = APIRouter()
@@ -437,10 +438,12 @@ async def _persist_vessel_block(
         )
     )
     await session.commit()
-    raise HTTPException(
-        status_code=status_code,
-        detail={"code": code, "reason_codes": reason_codes, "trace_id": trace_id},
-    )
+    detail: dict[str, Any] = {"code": code, "reason_codes": reason_codes, "trace_id": trace_id}
+    if code == "OPENAI_UPSTREAM_ERROR":
+        summary = summarize_openai_upstream_error(raw_response if isinstance(raw_response, dict) else {})
+        if summary:
+            detail["upstream"] = summary
+    raise HTTPException(status_code=status_code, detail=detail)
 
 
 async def _load_vessel_context(*, session: AsyncSession, trace_id: str) -> dict[str, Any]:

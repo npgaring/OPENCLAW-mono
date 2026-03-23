@@ -84,7 +84,10 @@ DOMAIN_INSTRUCTIONS: dict[str, str] = {
     "web": (
         "You are implementing front-end deliverables for the web. "
         "Prefer semantic HTML, accessibility, and clear structure. "
-        "Output artifacts (path, type, summary) when you create or modify files."
+        "Output artifacts (path, type, summary) when you create or modify files. "
+        "The executor workspace may be empty or lack Node/npm: do not run npm, yarn, pnpm, or npx "
+        "unless package.json (and any lockfile) already exists or you create them in this session first. "
+        "If a plan step asks for a command that cannot run, set status to partial or needs_review and explain why."
     ),
     "recruiting": (
         "You are generating or editing job descriptions and screening criteria. "
