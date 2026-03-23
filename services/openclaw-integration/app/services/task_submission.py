@@ -14,11 +14,16 @@ from sqlmodel import select
 from app.core.errors import ErrorCodes
 from app.core.identity import IDENTITY_DOMAIN_MAP
 from app.gate.engine import GateEngine
+from app.gate.models import GateDecision, GateEvaluation
 from app.gate.policy import get_policy_version_at_execution
 from app.gate.token import generate_execution_token, hash_token, verify_execution_token
 from app.models import GateDecisionRecord, Task, TaskStatus, TaskSubmitRequest, TaskSubmitResponse, UsedExecutionToken
 from app.models.approval_request import ApprovalSourceLayer
-from app.services.approvals_service import create_approval_request_for_stop
+from app.services.approvals_service import (
+    create_approval_request_for_stop,
+    find_pending_governance_prod_approval,
+    prod_governance_resume_snapshot_hash,
+)
 from app.services.execution_client import OpenClawClient, OpenClawError
 from app.uato import build_uato_input_from_spec, evaluate_uato, to_trace_record
 from app.uato.plan_bridge import integration_plan_preview
@@ -77,6 +82,201 @@ async def _latest_gate_record(session: AsyncSession, task_id: UUID) -> Optional[
         .limit(1)
     )
     return (await session.execute(stmt)).scalar_one_or_none()
+
+
+async def _sync_existing_prod_governance_materialization(
+    session: AsyncSession,
+    task: Task,
+    gate_record: GateDecisionRecord,
+    body: TaskSubmitRequest,
+    trace_id: str,
+    *,
+    domain: str,
+    uato_in: Any,
+    uato_res: Any,
+    uato_evaluated_at: datetime,
+    uato_trace: dict[str, Any],
+    decision: GateDecision,
+    plan_json: dict[str, Any],
+    spec_hash: str,
+    plan_hash: str,
+) -> None:
+    task.ocgg_identity = body.ocgg_identity
+    task.domain = domain
+    task.plan_hash = plan_hash
+    task.spec_hash = spec_hash
+    task.policy_version = decision.policy_version
+    task.gate_outcome = decision.outcome.value
+    task.governance_outcome = decision.outcome.value
+    task.reason_codes = decision.reason_codes
+    task.plan_json = plan_json
+    task.uato_decision = uato_res.decision
+    task.uato_reason_codes = list(uato_res.reason_codes)
+    task.uato_trust_level = uato_in.trust_state.level
+    task.uato_authority_level = uato_in.authority_state.level
+    task.uato_decision_version = uato_res.decision_version
+    task.uato_input_hash = uato_trace["uato_input_hash"]
+    task.uato_evaluated_at = uato_evaluated_at
+    task.status = TaskStatus.pending_approval
+    task.blocked_stage = "GOVERNANCE"
+    gate_record.ocgg_identity = body.ocgg_identity
+    gate_record.outcome = decision.outcome.value
+    gate_record.reason_codes = decision.reason_codes
+    gate_record.defect_list = [{"code": d.code, "field": d.field, "message": d.message} for d in decision.defect_list]
+    gate_record.policy_version = decision.policy_version
+    gate_record.spec_hash = spec_hash
+    gate_record.plan_hash = plan_hash
+    gate_record.approver_id = decision.approver_id
+    gate_record.trace_id = trace_id
+    gate_record.uato_decision = uato_res.decision
+    gate_record.uato_reason_codes = list(uato_res.reason_codes)
+    gate_record.uato_trust_level = uato_in.trust_state.level
+    gate_record.uato_authority_level = uato_in.authority_state.level
+    gate_record.uato_decision_version = uato_res.decision_version
+    gate_record.uato_input_hash = uato_trace["uato_input_hash"]
+    gate_record.uato_evaluated_at = uato_evaluated_at
+    await session.flush()
+
+
+async def materialize_governance_prod_deploy_stop(
+    session: AsyncSession,
+    body: TaskSubmitRequest,
+    trace_id: str,
+    *,
+    uato_in: Any,
+    uato_res: Any,
+    uato_evaluated_at: datetime,
+    uato_trace: dict[str, Any],
+    evaluation: GateEvaluation,
+) -> tuple[Task, Any]:  # second: ApprovalRequest
+    """
+    Persist task + gate_decisions + PENDING GOVERNANCE approval for PROD_DEPLOY_NO_APPROVAL.
+    Idempotent on (trace_id, resume checkpoint snapshot): reused by POST /gate/evaluate and POST /task.
+    """
+    decision = evaluation.decision
+    plan_json = evaluation.plan_json
+    spec_hash = evaluation.spec_hash
+    plan_hash = evaluation.plan_hash
+    domain = IDENTITY_DOMAIN_MAP[body.ocgg_identity]
+
+    snap = prod_governance_resume_snapshot_hash(body, trace_id)
+    existing_ar = await find_pending_governance_prod_approval(session, trace_id=trace_id, snapshot_hash=snap)
+    if existing_ar:
+        task = await session.get(Task, existing_ar.task_id)
+        gate_record = await _latest_gate_record(session, task.task_id) if task else None
+        if task and gate_record and (task.trace_id or "") == (trace_id or ""):
+            await _sync_existing_prod_governance_materialization(
+                session,
+                task,
+                gate_record,
+                body,
+                trace_id,
+                domain=domain,
+                uato_in=uato_in,
+                uato_res=uato_res,
+                uato_evaluated_at=uato_evaluated_at,
+                uato_trace=uato_trace,
+                decision=decision,
+                plan_json=plan_json,
+                spec_hash=spec_hash,
+                plan_hash=plan_hash,
+            )
+            task.audit_history = task.audit_history or []
+            task.audit_history.append(
+                {
+                    "event_type": "gate_decision",
+                    "payload": {"outcome": decision.outcome.value, "reason_codes": decision.reason_codes},
+                },
+            )
+            flag_modified(task, "audit_history")
+            await session.commit()
+            await session.refresh(task)
+            return task, existing_ar
+
+    task = Task(
+        ocgg_identity=body.ocgg_identity,
+        domain=domain,
+        plan_hash=plan_hash,
+        spec_hash=spec_hash,
+        policy_version=decision.policy_version,
+        gate_outcome=decision.outcome.value,
+        governance_outcome=decision.outcome.value,
+        reason_codes=decision.reason_codes,
+        plan_json=plan_json,
+        audit_history=[
+            {
+                "event_type": "uato_decision",
+                "payload": {**uato_trace, "upstream_gate": "UATO", "admissibility_source": "UATO"},
+            }
+        ],
+        status=TaskStatus.submitted,
+        trace_id=trace_id,
+        uato_decision=uato_res.decision,
+        uato_reason_codes=list(uato_res.reason_codes),
+        uato_trust_level=uato_in.trust_state.level,
+        uato_authority_level=uato_in.authority_state.level,
+        uato_decision_version=uato_res.decision_version,
+        uato_input_hash=uato_trace["uato_input_hash"],
+        uato_evaluated_at=uato_evaluated_at,
+    )
+    session.add(task)
+    await session.flush()
+    gate_record = GateDecisionRecord(
+        task_id=task.task_id,
+        ocgg_identity=body.ocgg_identity,
+        outcome=decision.outcome.value,
+        reason_codes=decision.reason_codes,
+        defect_list=[{"code": d.code, "field": d.field, "message": d.message} for d in decision.defect_list],
+        policy_version=decision.policy_version,
+        spec_hash=spec_hash,
+        plan_hash=plan_hash,
+        approver_id=decision.approver_id,
+        trace_id=trace_id,
+        uato_decision=uato_res.decision,
+        uato_reason_codes=list(uato_res.reason_codes),
+        uato_trust_level=uato_in.trust_state.level,
+        uato_authority_level=uato_in.authority_state.level,
+        uato_decision_version=uato_res.decision_version,
+        uato_input_hash=uato_trace["uato_input_hash"],
+        uato_evaluated_at=uato_evaluated_at,
+    )
+    session.add(gate_record)
+    await session.commit()
+    await session.refresh(task)
+    task.audit_history = task.audit_history or []
+    task.audit_history.append({"event_type": "gate_decision", "payload": {"outcome": decision.outcome.value, "reason_codes": decision.reason_codes}})
+    flag_modified(task, "audit_history")
+    await session.commit()
+
+    ar = await create_approval_request_for_stop(
+        session,
+        trace_id=trace_id,
+        task_id=task.task_id,
+        source_layer=ApprovalSourceLayer.GOVERNANCE,
+        reason_code="PROD_DEPLOY_NO_APPROVAL",
+        resume_from_stage="RERUN_GOVERNANCE",
+        task_submit_body=body,
+        trace_id_for_body=trace_id,
+        approval_scope="prod_deploy",
+    )
+    task.status = TaskStatus.pending_approval
+    task.approval_request_id = ar.id
+    task.blocked_stage = "GOVERNANCE"
+    task.audit_history = task.audit_history or []
+    task.audit_history.append(
+        {
+            "event_type": "approval_requested",
+            "payload": {
+                "approval_request_id": str(ar.id),
+                "source_layer": "GOVERNANCE",
+                "trace_id": trace_id,
+            },
+        },
+    )
+    flag_modified(task, "audit_history")
+    await session.commit()
+    await session.refresh(task)
+    return task, ar
 
 
 async def run_task_submission(
@@ -229,6 +429,37 @@ async def run_task_submission(
     spec_hash = evaluation.spec_hash
     plan_hash = evaluation.plan_hash
 
+    if (
+        not reuse_task_id
+        and decision.outcome.value != "PASS"
+        and "PROD_DEPLOY_NO_APPROVAL" in decision.reason_codes
+    ):
+        task, ar = await materialize_governance_prod_deploy_stop(
+            session,
+            body,
+            trace_id,
+            uato_in=uato_in,
+            uato_res=uato_res,
+            uato_evaluated_at=uato_evaluated_at,
+            uato_trace=uato_trace,
+            evaluation=evaluation,
+        )
+        return _task_submit_response(
+            task_id=task.task_id,
+            status=task.status.value,
+            trace_id=trace_id,
+            gate_outcome=decision.outcome.value,
+            governance_outcome=decision.outcome.value,
+            reason_codes=decision.reason_codes,
+            uato_decision=uato_res.decision,
+            uato_reason_codes=list(uato_res.reason_codes),
+            approval_required=True,
+            approval_request_id=ar.id,
+            approval_status="PENDING",
+            source_layer="GOVERNANCE",
+            resume_available=True,
+        )
+
     if reuse_task_id:
         task = await session.get(Task, reuse_task_id)
         if not task or (task.trace_id or "") != (trace_id or ""):
@@ -333,50 +564,6 @@ async def run_task_submission(
     await session.commit()
 
     if decision.outcome.value != "PASS":
-        if "PROD_DEPLOY_NO_APPROVAL" in decision.reason_codes and not reuse_task_id:
-            ar = await create_approval_request_for_stop(
-                session,
-                trace_id=trace_id,
-                task_id=task.task_id,
-                source_layer=ApprovalSourceLayer.GOVERNANCE,
-                reason_code="PROD_DEPLOY_NO_APPROVAL",
-                resume_from_stage="RERUN_GOVERNANCE",
-                task_submit_body=body,
-                trace_id_for_body=trace_id,
-                approval_scope="prod_deploy",
-            )
-            task.status = TaskStatus.pending_approval
-            task.approval_request_id = ar.id
-            task.blocked_stage = "GOVERNANCE"
-            task.audit_history = task.audit_history or []
-            task.audit_history.append(
-                {
-                    "event_type": "approval_requested",
-                    "payload": {
-                        "approval_request_id": str(ar.id),
-                        "source_layer": "GOVERNANCE",
-                        "trace_id": trace_id,
-                    },
-                }
-            )
-            flag_modified(task, "audit_history")
-            await session.commit()
-            await session.refresh(task)
-            return _task_submit_response(
-                task_id=task.task_id,
-                status=task.status.value,
-                trace_id=trace_id,
-                gate_outcome=decision.outcome.value,
-                governance_outcome=decision.outcome.value,
-                reason_codes=decision.reason_codes,
-                uato_decision=uato_res.decision,
-                uato_reason_codes=list(uato_res.reason_codes),
-                approval_required=True,
-                approval_request_id=ar.id,
-                approval_status="PENDING",
-                source_layer="GOVERNANCE",
-                resume_available=True,
-            )
         return _task_submit_response(
             task_id=task.task_id,
             status=task.status.value,

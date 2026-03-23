@@ -93,6 +93,54 @@ def test_prod_without_approval_creates_governance_approval(client, auth_headers)
     assert data["status"] == "pending_approval"
 
 
+def test_gate_evaluate_prod_materializes_approval_listable_by_trace(client, auth_headers):
+    tid = "550e8400-e29b-41d4-a716-446655440101"
+    spec = {**_prod_spec(), "trace_id": tid}
+    r = client.post("/gate/evaluate", json=spec, headers=auth_headers)
+    assert r.status_code == 200
+    data = r.json()
+    assert data["outcome"] == "BLOCK"
+    assert "PROD_DEPLOY_NO_APPROVAL" in (data.get("reason_codes") or [])
+    assert data.get("trace_id") == tid
+    assert data.get("approval_request_id")
+    assert data.get("approval_status") == "PENDING"
+    assert data.get("task_id")
+    assert data.get("source_layer") == "GOVERNANCE"
+    lg = client.get("/approvals/", params={"trace_id": tid}, headers=auth_headers)
+    assert lg.status_code == 200
+    rows = lg.json()
+    assert isinstance(rows, list) and len(rows) >= 1
+    match = [x for x in rows if x.get("trace_id") == tid and x.get("status") == "PENDING"]
+    assert match, rows
+
+
+def test_gate_then_task_same_trace_reuses_single_approval(client, auth_headers):
+    tid = "550e8400-e29b-41d4-a716-446655440102"
+    spec = {**_prod_spec(), "trace_id": tid}
+    g = client.post("/gate/evaluate", json=spec, headers=auth_headers)
+    assert g.status_code == 200
+    aid = g.json()["approval_request_id"]
+    t = client.post("/task", json=spec, headers=auth_headers)
+    assert t.status_code == 200
+    assert t.json()["approval_request_id"] == aid
+    assert t.json()["status"] == "pending_approval"
+
+
+def test_gate_created_governance_approval_approve_resume_passes_gate(client, auth_headers):
+    tid = "550e8400-e29b-41d4-a716-446655440103"
+    spec = {**_prod_spec(), "trace_id": tid}
+    g = client.post("/gate/evaluate", json=spec, headers=auth_headers)
+    assert g.status_code == 200
+    aid = g.json()["approval_request_id"]
+    client.post(f"/approvals/{aid}/approve", json={"approver_id": "alice"}, headers=auth_headers)
+    mock_response = {"execution_id": "ex-gate-apr", "status": "completed", "message": "ok"}
+    with patch("app.services.task_submission.OpenClawClient") as m:
+        m.return_value.execute = AsyncMock(return_value=mock_response)
+        rs = client.post(f"/approvals/{aid}/resume", json={}, headers=auth_headers)
+    assert rs.status_code == 200
+    assert rs.json().get("gate_outcome") == "PASS"
+
+
 def test_approve_and_reject_validate_pending(client, auth_headers):
     r0 = client.post("/task", json=_prod_spec(), headers=auth_headers)
     aid = r0.json()["approval_request_id"]

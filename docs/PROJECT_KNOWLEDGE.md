@@ -113,7 +113,7 @@ From `services/openclaw-integration/README.md` and `services/openclaw-integratio
 - `POST /test/execute` — non-governed proxy (off in production unless enabled).
 - `POST /audit` — callback to append audit events.
 - `GET /audit/reconstruct` — rebuild JSON snapshot for replay.
-- `POST /gate/evaluate` — evaluate spec only (no DB, no execution).
+- `POST /gate/evaluate` — UATO + gate evaluate (no executor). May persist task + GOVERNANCE approval when blocking with **PROD_DEPLOY_NO_APPROVAL** (same behavior as `POST /task` for that stop); other outcomes are read-only regarding approvals.
 - `POST /gate/verify-token` — verify token in tenant context.
 - `GET /status/{task_id}` — status, execution_id, audit_history.
 - `GET /health` — health check.

@@ -2,8 +2,9 @@
 from dataclasses import dataclass
 from enum import Enum
 from typing import Any, List, Optional
+from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class GateOutcome(str, Enum):
@@ -59,3 +60,28 @@ class GateDecisionResponse(BaseModel):
     uato_decision: Optional[str] = None
     uato_reason_codes: List[str] = []
     uato_skipped_gate: bool = False
+    # PROD_DEPLOY_NO_APPROVAL: same durable materialization as POST /task (task + GOVERNANCE approval_requests).
+    task_id: Optional[UUID] = Field(
+        default=None,
+        description="Integration task row created or updated for this trace when PROD_DEPLOY_NO_APPROVAL is materialized.",
+    )
+    approval_request_id: Optional[UUID] = Field(
+        default=None,
+        description="PENDING GOVERNANCE approval when outcome is BLOCK for PROD_DEPLOY_NO_APPROVAL; use with POST /approvals/{id}/approve then resume.",
+    )
+    approval_status: Optional[str] = Field(
+        default=None,
+        description="e.g. PENDING when approval_request_id is set; null when no durable approval row for this response.",
+    )
+    approval_required: Optional[bool] = Field(
+        default=None,
+        description="True when a GOVERNANCE prod-deploy approval row exists for this evaluation.",
+    )
+    resume_available: Optional[bool] = Field(
+        default=None,
+        description="True when approval can be resumed via POST /approvals/{id}/resume after approve.",
+    )
+    source_layer: Optional[str] = Field(
+        default=None,
+        description="GOVERNANCE when approval_request_id refers to prod deploy governance stop.",
+    )

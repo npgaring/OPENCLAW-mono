@@ -17,5 +17,5 @@ Authoritative test names: `services/openclaw-integration/tests/test_gate_mutatio
 **Notes**
 
 - **422 vs 200+BLOCK**: Both are valid “deny” behaviors; 422 means the payload never reached `GateEngine`. Tests assert 422 for the three rows above and gate BLOCK for the rest.
-- **Gate-only evaluate**: `POST /gate/evaluate` accepts a looser body (`operations` optional in schema); task submit is stricter.
+- **Gate-only evaluate**: `POST /gate/evaluate` accepts a looser body (`operations` optional in schema); task submit is stricter. For **production deploy without approval**, evaluate may **write** `tasks` + `approval_requests` (same as task submit for that stop); other evaluate outcomes do not create approval rows.
 - Regenerate or extend this table when adding rows to `test_gate_mutation_matrix.py`.

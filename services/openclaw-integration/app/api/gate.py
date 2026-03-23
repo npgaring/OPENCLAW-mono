@@ -1,27 +1,58 @@
 """POST /gate/evaluate, POST /gate/verify-token."""
+from datetime import datetime
+
 from app.core.trace_id import normalize_trace_id
 from app.gate.engine import GateEngine
 from app.gate.models import GateDecisionResponse
 from app.gate.token import verify_execution_token
-from app.models import GateEvaluateRequest, VerifyTokenRequest, VerifyTokenResponse
-from app.uato import build_uato_input_from_spec, evaluate_uato
+from app.models import GateEvaluateRequest, TaskSubmitRequest, VerifyTokenRequest, VerifyTokenResponse
+from app.services.task_submission import materialize_governance_prod_deploy_stop
+from app.uato import build_uato_input_from_spec, evaluate_uato, to_trace_record
 from app.uato.plan_bridge import integration_plan_preview
 from app.uato.types import UATO_DECISION_VERSION
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.errors import ErrorCodes, invalid_payload
+from app.core.errors import ErrorCodes
 from app.core.identity import IDENTITY_DOMAIN_MAP
 from app.db.session import get_session
 
 router = APIRouter()
 
 
-@router.post("/evaluate", response_model=GateDecisionResponse)
+@router.post(
+    "/evaluate",
+    response_model=GateDecisionResponse,
+    summary="UATO + GateEngine evaluation; durable prod-deploy approval when applicable",
+    openapi_extra={
+        "responses": {
+            "200": {
+                "description": (
+                    "Gate decision. After UATO PASS, if the engine blocks with PROD_DEPLOY_NO_APPROVAL, the service "
+                    "persists the same task + gate_decisions + PENDING GOVERNANCE approval_requests row as POST /task "
+                    "(same trace_id, idempotent on trace + checkpoint snapshot). Response includes task_id, "
+                    "approval_request_id, approval_status. Other BLOCK outcomes do not create approval rows here; "
+                    "clients must not assume GET /approvals?trace_id= is populated until POST /task for those cases."
+                ),
+            },
+        },
+    },
+)
 async def evaluate_gate(
     body: GateEvaluateRequest,
     session: AsyncSession = Depends(get_session),
 ):
+    """
+    Dry-run governance + UATO for a plan-shaped payload.
+
+    ADR: docs/adr/001-gate-evaluate-prod-deploy-approval.md
+
+    PROD_DEPLOY_NO_APPROVAL: this endpoint is *not* a pure no-side-effect dry-run for that outcome.
+    We persist the same Task + gate_decisions + approval_requests (GOVERNANCE, PENDING) as POST /task,
+    keyed by (trace_id, resume checkpoint hash) so GET /approvals?trace_id= works before POST /task and
+    POST /task with the same body+trace is idempotent (no second approval row).
+    Other BLOCK reasons do not create approval rows unless/until POST /task runs.
+    """
     if not body.ocgg_identity or body.ocgg_identity not in IDENTITY_DOMAIN_MAP:
         raise HTTPException(status_code=422, detail={"code": ErrorCodes.INVALID_PAYLOAD, "message": "ocgg_identity must be W-OCGG or R-OCGG"})
     spec = body.to_payload()
@@ -55,6 +86,31 @@ async def evaluate_gate(
 
     evaluation = GateEngine().evaluate(spec, body.ocgg_identity)
     d = evaluation.decision
+    approval_extras: dict = {}
+    if d.outcome.value == "BLOCK" and "PROD_DEPLOY_NO_APPROVAL" in d.reason_codes:
+        uato_evaluated_at = datetime.utcnow()
+        uato_trace = to_trace_record(uato_in, uato_res)
+        gate_payload = body.model_dump(exclude_none=True)
+        gate_payload["trace_id"] = trace_id
+        task_body = TaskSubmitRequest.model_validate(gate_payload)
+        task, ar = await materialize_governance_prod_deploy_stop(
+            session,
+            task_body,
+            trace_id,
+            uato_in=uato_in,
+            uato_res=uato_res,
+            uato_evaluated_at=uato_evaluated_at,
+            uato_trace=uato_trace,
+            evaluation=evaluation,
+        )
+        approval_extras = {
+            "task_id": task.task_id,
+            "approval_request_id": ar.id,
+            "approval_status": "PENDING",
+            "approval_required": True,
+            "resume_available": True,
+            "source_layer": "GOVERNANCE",
+        }
     return GateDecisionResponse(
         outcome=d.outcome.value,
         reason_codes=d.reason_codes,
@@ -68,6 +124,7 @@ async def evaluate_gate(
         uato_decision="PASS",
         uato_reason_codes=list(uato_res.reason_codes),
         uato_skipped_gate=False,
+        **approval_extras,
     )
 
 

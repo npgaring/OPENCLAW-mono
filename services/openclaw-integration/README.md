@@ -20,7 +20,7 @@ Governance-gated layer between callers (e.g. Builder System) and the runtime exe
 - `POST /test/execute` — **Non-governed** OpenResponses proxy. **Off in production** unless `TEST_EXECUTE_ENABLED=true`. Prefer `POST /task` for demos.
 - `POST /audit` — Callback: update task status and append audit event.
 - `GET /audit/reconstruct` — `task_id` and/or `trace_id`: JSON snapshot for replay (task + latest gate row). See [Governance backend](../../docs/governance-backend.md).
-- `POST /gate/evaluate` — Evaluate spec only; return GateDecision (no DB, no execution). Optional **trace_id** echoed in response.
+- `POST /gate/evaluate` — UATO + GateEngine dry-run; **no executor**. For **PROD_DEPLOY_NO_APPROVAL** (after UATO PASS), persists the same **task** + **GOVERNANCE** `approval_requests` row as `POST /task` (same **trace_id**; idempotent with `/task`). Other BLOCK reasons do not create approval rows here. Optional **trace_id** echoed; use **approval_request_id** + `GET /approvals?trace_id=` for the operator flow.
 - `POST /gate/verify-token` — Verify token in tenant context.
 - `GET /status/{task_id}` — Task status, execution_id, audit_history.
 - `POST /openai/plan` — **Opt-in** (`OPENAI_FLOW_ENABLED=true`): bounded OpenAI vessel returning locked candidate-plan JSON only.

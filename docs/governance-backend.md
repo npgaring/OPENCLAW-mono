@@ -6,7 +6,7 @@ This document ties together **hashing**, **gate behavior**, **correlation IDs**,
 
 - **Optional on input**, UUID-shaped string (version 4 recommended). Invalid values are replaced server-side; omission causes generation.
 - **DUDE-X `POST /compile`**: Accepts optional `trace_id` on the request body (stripped before `SpecIn` validation). Returned on the plan payload and stored on compile events metadata when applicable.
-- **Integration `POST /gate/evaluate`**: Optional `trace_id`; echoed on the response when provided or normalized.
+- **Integration `POST /gate/evaluate`**: Optional `trace_id`; echoed on the response when provided or normalized. When the outcome is **BLOCK** with **PROD_DEPLOY_NO_APPROVAL** (and UATO has **PASS**), the integration persists the same **task** + **approval_requests** (GOVERNANCE, PENDING) as **`POST /task`** for that checkpoint, so **`GET /approvals?trace_id=`** is populated without a prior **`POST /task`**. Idempotent on `(trace_id, resume snapshot)` with **`POST /task`**.
 - **Integration `POST /task`**: Optional `trace_id`; persisted on `tasks` and `gate_decisions`, included in the signed execution token payload, returned as `trace_id` / `audit_trace_id` on `TaskSubmitResponse`.
 - **Integration `POST /task/{id}/continue`**: If the task has `trace_id` set, the body **must** include the same `trace_id` (otherwise 422 / `TRACE_ID_MISMATCH`). The task must already have **`execution_token_hash`** from a successful gated `POST /task` (no hash → 422 `CONTINUE_REQUIRES_PRIOR_EXECUTION`).
 

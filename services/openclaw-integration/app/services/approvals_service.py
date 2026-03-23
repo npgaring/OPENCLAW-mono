@@ -26,8 +26,36 @@ def canonical_snapshot_hash(payload: dict[str, Any]) -> str:
     return hashlib.sha256(canonical.encode()).hexdigest()
 
 
+def prod_governance_resume_snapshot_hash(body: TaskSubmitRequest, trace_id_for_body: str) -> str:
+    """Snapshot for idempotent GOVERNANCE prod-deploy stops (POST /gate/evaluate + POST /task)."""
+    cp = _task_checkpoint(body.model_dump(mode="json"), trace_id_for_body)
+    return canonical_snapshot_hash(cp)
+
+
 def _task_checkpoint(task_submit: dict[str, Any], trace_id: str) -> dict[str, Any]:
     return {"v": 1, "kind": "task_resume", "trace_id": trace_id, "task_submit": task_submit}
+
+
+async def find_pending_governance_prod_approval(
+    session: AsyncSession,
+    *,
+    trace_id: str,
+    snapshot_hash: str,
+) -> Optional[ApprovalRequest]:
+    """Return an existing PENDING GOVERNANCE prod-deploy approval for the same trace + checkpoint snapshot."""
+    stmt = (
+        select(ApprovalRequest)
+        .where(
+            ApprovalRequest.trace_id == trace_id,
+            ApprovalRequest.snapshot_hash == snapshot_hash,
+            ApprovalRequest.status == ApprovalStatus.PENDING.value,
+            ApprovalRequest.source_layer == ApprovalSourceLayer.GOVERNANCE.value,
+            ApprovalRequest.reason_code == "PROD_DEPLOY_NO_APPROVAL",
+        )
+        .limit(1)
+    )
+    r = await session.execute(stmt)
+    return r.scalar_one_or_none()
 
 
 async def create_approval_request_for_stop(

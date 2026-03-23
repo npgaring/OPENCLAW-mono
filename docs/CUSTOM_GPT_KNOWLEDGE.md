@@ -89,7 +89,7 @@ Examples (for decisions.operations): write_config with path/content; build with 
 2. User adds **approval_reference** (or valid **approver_id**) and resubmits **POST /task** → **gate_outcome: PASS**, **task_id**, **execution_id** / **execution_response** when execution succeeds.
 3. **Receipt:** **GET /status/{task_id}** shows **audit_history** with events like `gate_decision` and `execution_response`.
 
-**Optional dry run:** **POST /gate/evaluate** with `plan_hash: ""` (or `integration_plan_hash`) and the compiled `operations` returns **outcome**, **reason_codes**, **defect_list** — useful to explain *why* the gate would block before **POST /task**.
+**Optional dry run:** **POST /gate/evaluate** with `plan_hash: ""` (or `integration_plan_hash`) and the compiled `operations` returns **outcome**, **reason_codes**, **defect_list** — useful before **POST /task**. For **PROD_DEPLOY_NO_APPROVAL** (after UATO PASS), the integration also persists a **PENDING** **GOVERNANCE** **approval_requests** row (same **trace_id**) and returns **approval_request_id**; operators can use **GET /approvals?trace_id=** without submitting **POST /task** first solely to create that row.
 
 **Developer verification (automated tests):** In the repo, `services/openclaw-integration/tests/test_demo_governance_59s.py` prints each scenario in narrative form when run with **`pytest … -s`**:
 

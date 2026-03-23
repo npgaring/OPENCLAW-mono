@@ -66,8 +66,12 @@ class PrefixMiddleware:
 
 app = FastAPI(
     title="OpenClaw Integration",
-    description="Governance-gated layer between callers and runtime executor",
-    version="1.0.0",
+    description=(
+        "Governance-gated layer between callers and runtime executor. "
+        "POST /gate/evaluate may persist task + approval_requests when blocking with PROD_DEPLOY_NO_APPROVAL "
+        "(see operation docs on that path)."
+    ),
+    version="1.1.0",
     docs_url="/docs",
     redoc_url="/redoc",
     root_path=OPENCLAW_ROOT_PATH or "",
