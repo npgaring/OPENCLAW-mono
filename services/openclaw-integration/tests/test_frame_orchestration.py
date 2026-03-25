@@ -57,6 +57,10 @@ async def test_gate_engine_not_called_when_frame_invariant_e_denies(monkeypatch)
     assert data.get("gate_outcome") == "BLOCK"
     assert called == []
     assert data.get("invariant_e_decision") == "EXECUTION_DENIED"
+    ef = data.get("evaluation_frame") or {}
+    assert ef.get("frame_status") == "BLOCKED"
+    assert ef.get("governance_reached") is False
+    assert ef.get("dispatch_reached") is False
 
 
 @pytest.mark.asyncio

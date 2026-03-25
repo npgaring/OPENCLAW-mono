@@ -55,6 +55,10 @@ async def test_gate_skipped_when_uato_blocks(monkeypatch):
     data = r.json()
     assert data.get("uato_skipped_gate") is True
     assert "PLAN_HASH_MISMATCH" not in (data.get("reason_codes") or [])
+    ef = data.get("evaluation_frame") or {}
+    assert ef.get("governance_reached") is False
+    assert ef.get("dispatch_reached") is False
+    assert (ef.get("uato_result") or {}).get("decision") == data.get("uato_decision")
     assert called == []
 
 
@@ -87,6 +91,10 @@ async def test_gate_runs_when_uato_passes(monkeypatch):
     data = r.json()
     assert data.get("uato_skipped_gate") is False
     assert data.get("uato_decision") == "PASS"
+    ef = data.get("evaluation_frame") or {}
+    assert ef.get("frame_status") == "PASS"
+    assert ef.get("governance_reached") is True
+    assert ef.get("dispatch_reached") is False
 
 
 @pytest.mark.asyncio
@@ -116,4 +124,10 @@ async def test_task_uato_require_approval_status_and_skips_gate(monkeypatch):
     data = r.json()
     assert data.get("status") == "pending_approval"
     assert data.get("uato_decision") == "REQUIRE_APPROVAL"
+    ef = data.get("evaluation_frame") or {}
+    assert ef.get("frame_status") == "APPROVAL_REQUIRED"
+    assert ef.get("approval_required") is True
+    assert ef.get("approval_request_id")
+    assert ef.get("governance_reached") is False
+    assert ef.get("dispatch_reached") is False
     assert called == []

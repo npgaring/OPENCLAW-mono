@@ -7,6 +7,7 @@ import math
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Response
+from fastapi.encoders import jsonable_encoder
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -14,6 +15,7 @@ from app.core.config import settings
 from app.core.security import hash_payload
 from app.core.trace_id import normalize_trace_id
 from app.db.session import get_session
+from app.evaluation_frame.response_mapper import to_evaluation_frame_response
 from app.evaluation_frame import run_evaluation_frame
 from app.evaluation_frame.build import build_shared_governable_state_from_adapter_candidate
 from app.evaluation_frame.state import FrameStatus
@@ -248,6 +250,11 @@ async def _adapt_candidate_to_substrate(
         approver_id=approver_id,
     )
     frame = run_evaluation_frame(shared)
+    frame_response = to_evaluation_frame_response(
+        frame,
+        governance_reached=False,
+        dispatch_reached=False,
+    )
     ic_res = frame.invariant_c_result
     session.add(
         InvariantCDecisionRecord(
@@ -281,6 +288,7 @@ async def _adapt_candidate_to_substrate(
                 "code": "INVARIANT_C_BLOCK",
                 "reason_codes": list(ic_res.reason_codes),
                 "trace_id": trace_id,
+                "evaluation_frame": jsonable_encoder(frame_response),
             },
         )
 
@@ -310,6 +318,7 @@ async def _adapt_candidate_to_substrate(
                 "reason_codes": list(frame.reason_codes),
                 "trace_id": trace_id,
                 "frame_status": frame.frame_status.value,
+                "evaluation_frame": jsonable_encoder(frame_response),
             },
         )
 
@@ -363,6 +372,7 @@ async def _adapt_candidate_to_substrate(
                 "approval_status": "PENDING",
                 "source_layer": "ADAPTER",
                 "resume_available": True,
+                "evaluation_frame": jsonable_encoder(frame_response),
             },
         )
 
@@ -396,6 +406,7 @@ async def _adapt_candidate_to_substrate(
         approval_reference=approval_reference,
         approver_id=approver_id,
         trace_id=trace_id,
+        evaluation_frame=frame_response,
     )
     session.add(
         SubstrateAdapterEvent(

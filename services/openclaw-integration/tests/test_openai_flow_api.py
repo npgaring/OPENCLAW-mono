@@ -152,6 +152,10 @@ def test_openai_plan_to_substrate_runs_full_chain(client, auth_headers):
     assert payload["goal"] == "Build and verify a web release candidate"
     assert payload["trace_id"]
     assert payload["operations"]
+    ef = payload.get("evaluation_frame") or {}
+    assert ef.get("frame_status") == "PASS"
+    assert ef.get("governance_reached") is False
+    assert ef.get("dispatch_reached") is False
     assert resp.headers.get("X-Trace-Id")
     assert resp.headers.get("X-Candidate-Plan-Hash")
     inv_rows = _fetch_rows(InvariantCDecisionRecord)

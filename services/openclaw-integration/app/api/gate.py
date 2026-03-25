@@ -3,6 +3,7 @@ from datetime import datetime
 
 from app.core.trace_id import normalize_trace_id
 from app.evaluation_frame import build_shared_governable_state_for_gate_payload, run_evaluation_frame
+from app.evaluation_frame.response_mapper import to_evaluation_frame_response
 from app.evaluation_frame.state import FrameStatus
 from app.gate.engine import GateEngine
 from app.gate.models import GateDecisionResponse
@@ -20,6 +21,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.errors import ErrorCodes
 from app.core.identity import IDENTITY_DOMAIN_MAP
 from app.db.session import get_session
+from app.models.evaluation_frame import EvaluationFrameResponse, UatoFrameResult
 
 router = APIRouter()
 
@@ -89,6 +91,18 @@ async def evaluate_gate(
             uato_decision=uato_res_pf.decision,
             uato_reason_codes=list(uato_res_pf.reason_codes),
             uato_skipped_gate=True,
+            evaluation_frame=EvaluationFrameResponse(
+                frame_status=None,
+                reason_codes=list(uato_res_pf.reason_codes),
+                uato_result=UatoFrameResult(
+                    decision=uato_res_pf.decision,
+                    reason_codes=list(uato_res_pf.reason_codes),
+                    approval_required=uato_res_pf.decision == "REQUIRE_APPROVAL",
+                ),
+                approval_required=uato_res_pf.decision == "REQUIRE_APPROVAL",
+                governance_reached=False,
+                dispatch_reached=False,
+            ),
         )
 
     try:
@@ -118,6 +132,11 @@ async def evaluate_gate(
             uato_decision=uato_res.decision,
             uato_reason_codes=list(uato_res.reason_codes),
             uato_skipped_gate=True,
+            evaluation_frame=to_evaluation_frame_response(
+                frame,
+                governance_reached=False,
+                dispatch_reached=False,
+            ),
         )
 
     evaluation = GateEngine().evaluate(spec, body.ocgg_identity)
@@ -173,6 +192,11 @@ async def evaluate_gate(
         uato_decision="PASS",
         uato_reason_codes=list(uato_res.reason_codes),
         uato_skipped_gate=False,
+        evaluation_frame=to_evaluation_frame_response(
+            frame,
+            governance_reached=True,
+            dispatch_reached=False,
+        ),
         **approval_extras,
     )
 

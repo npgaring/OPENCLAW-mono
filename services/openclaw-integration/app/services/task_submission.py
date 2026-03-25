@@ -14,6 +14,7 @@ from sqlmodel import select
 from app.core.errors import ErrorCodes
 from app.core.identity import IDENTITY_DOMAIN_MAP
 from app.evaluation_frame import build_shared_governable_state_for_task, run_evaluation_frame
+from app.evaluation_frame.response_mapper import to_evaluation_frame_response
 from app.evaluation_frame.state import FrameStatus
 from app.gate.engine import GateEngine
 from app.gate.models import GateDecision, GateEvaluation
@@ -45,6 +46,7 @@ def _task_submit_response(
     invariant_e_decision: Optional[str] = None,
     invariant_e_reason_codes: Optional[list[str]] = None,
     dispatch_blocked: Optional[bool] = None,
+    evaluation_frame: Optional[Any] = None,
     **kwargs: Any,
 ) -> TaskSubmitResponse:
     if trace_id:
@@ -62,6 +64,8 @@ def _task_submit_response(
         kwargs["invariant_e_reason_codes"] = invariant_e_reason_codes
     if dispatch_blocked is not None:
         kwargs["dispatch_blocked"] = dispatch_blocked
+    if evaluation_frame is not None:
+        kwargs["evaluation_frame"] = evaluation_frame
     return TaskSubmitResponse(task_id=task_id, status=status, **kwargs)
 
 
@@ -454,6 +458,11 @@ async def run_task_submission(
     plan_json, plan_hash, spec_hash = shared.plan_json, shared.plan_hash, shared.spec_hash
     ic_res = frame.invariant_c_result
     ie_res_frame = frame.invariant_e_result
+    frame_response = to_evaluation_frame_response(
+        frame,
+        governance_reached=False,
+        dispatch_reached=False,
+    )
 
     if reuse_task_id and frame.frame_status != FrameStatus.PASS:
         raise HTTPException(
@@ -624,6 +633,12 @@ async def run_task_submission(
                 "source_layer": "UATO",
                 "resume_available": True,
             }
+            frame_response = to_evaluation_frame_response(
+                frame,
+                approval_request_id=str(ar.id),
+                governance_reached=False,
+                dispatch_reached=False,
+            )
 
         return _task_submit_response(
             task_id=task.task_id,
@@ -636,6 +651,7 @@ async def run_task_submission(
             invariant_e_decision=ie_res_frame.decision,
             invariant_e_reason_codes=list(ie_res_frame.reason_codes),
             dispatch_blocked=ie_res_frame.dispatch_blocked,
+            evaluation_frame=frame_response,
             **extra,
         )
 
@@ -678,6 +694,12 @@ async def run_task_submission(
             approval_status="PENDING",
             source_layer="GOVERNANCE",
             resume_available=True,
+            evaluation_frame=to_evaluation_frame_response(
+                frame,
+                approval_request_id=str(ar.id),
+                governance_reached=True,
+                dispatch_reached=False,
+            ),
         )
 
     if reuse_task_id:
@@ -802,6 +824,11 @@ async def run_task_submission(
             reason_codes=decision.reason_codes,
             uato_decision=uato_res.decision,
             uato_reason_codes=list(uato_res.reason_codes),
+            evaluation_frame=to_evaluation_frame_response(
+                frame,
+                governance_reached=True,
+                dispatch_reached=False,
+            ),
         )
 
     inv_env = build_execution_envelope(
@@ -869,6 +896,11 @@ async def run_task_submission(
             invariant_e_decision=ie_res.decision,
             invariant_e_reason_codes=list(ie_res.reason_codes),
             dispatch_blocked=True,
+            evaluation_frame=to_evaluation_frame_response(
+                frame,
+                governance_reached=True,
+                dispatch_reached=True,
+            ),
         )
 
     await session.commit()
@@ -896,6 +928,11 @@ async def run_task_submission(
             invariant_e_decision=ie_res.decision,
             invariant_e_reason_codes=list(ie_res.reason_codes),
             dispatch_blocked=False,
+            evaluation_frame=to_evaluation_frame_response(
+                frame,
+                governance_reached=True,
+                dispatch_reached=True,
+            ),
         )
     if get_policy_version_at_execution() != decision.policy_version:
         return _task_submit_response(
@@ -910,6 +947,11 @@ async def run_task_submission(
             invariant_e_decision=ie_res.decision,
             invariant_e_reason_codes=list(ie_res.reason_codes),
             dispatch_blocked=False,
+            evaluation_frame=to_evaluation_frame_response(
+                frame,
+                governance_reached=True,
+                dispatch_reached=True,
+            ),
         )
     existing = await session.get(UsedExecutionToken, token_hash)
     if existing:
@@ -925,6 +967,11 @@ async def run_task_submission(
             invariant_e_decision=ie_res.decision,
             invariant_e_reason_codes=list(ie_res.reason_codes),
             dispatch_blocked=False,
+            evaluation_frame=to_evaluation_frame_response(
+                frame,
+                governance_reached=True,
+                dispatch_reached=True,
+            ),
         )
     used = UsedExecutionToken(token_hash=token_hash, task_id=task.task_id)
     session.add(used)
@@ -944,6 +991,11 @@ async def run_task_submission(
             invariant_e_decision=ie_res.decision,
             invariant_e_reason_codes=list(ie_res.reason_codes),
             dispatch_blocked=False,
+            evaluation_frame=to_evaluation_frame_response(
+                frame,
+                governance_reached=True,
+                dispatch_reached=True,
+            ),
         )
     gate_record.execution_token_hash = token_hash
     task.execution_token_hash = token_hash
@@ -1000,4 +1052,9 @@ async def run_task_submission(
         invariant_e_decision=ie_res.decision,
         invariant_e_reason_codes=list(ie_res.reason_codes),
         dispatch_blocked=False,
+        evaluation_frame=to_evaluation_frame_response(
+            frame,
+            governance_reached=True,
+            dispatch_reached=True,
+        ),
     )

@@ -6,6 +6,8 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from app.models.evaluation_frame import EvaluationFrameResponse
+
 
 class GateOutcome(str, Enum):
     PASS = "PASS"
@@ -84,4 +86,8 @@ class GateDecisionResponse(BaseModel):
     source_layer: Optional[str] = Field(
         default=None,
         description="GOVERNANCE when approval_request_id refers to prod deploy governance stop.",
+    )
+    evaluation_frame: Optional[EvaluationFrameResponse] = Field(
+        default=None,
+        description="Authoritative grouped frame-level admissibility result available before governance evaluation.",
     )

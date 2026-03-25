@@ -91,6 +91,10 @@ def test_prod_without_approval_creates_governance_approval(client, auth_headers)
     assert data.get("source_layer") == "GOVERNANCE"
     assert data.get("approval_request_id")
     assert data["status"] == "pending_approval"
+    ef = data.get("evaluation_frame") or {}
+    assert ef.get("frame_status") == "PASS"
+    assert ef.get("governance_reached") is True
+    assert ef.get("dispatch_reached") is False
 
 
 def test_gate_evaluate_prod_materializes_approval_listable_by_trace(client, auth_headers):

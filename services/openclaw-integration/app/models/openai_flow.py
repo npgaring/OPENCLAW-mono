@@ -6,6 +6,8 @@ from typing import Annotated, Any, Literal, Optional, Union
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from app.models.evaluation_frame import EvaluationFrameResponse
+
 
 class StepType(str, Enum):
     create_file = "create_file"
@@ -219,3 +221,7 @@ class AdapterToSubstrateResponse(BaseModel):
     approval_reference: Optional[str] = None
     approver_id: Optional[str] = None
     trace_id: str
+    evaluation_frame: Optional[EvaluationFrameResponse] = Field(
+        default=None,
+        description="Authoritative grouped frame-level admissibility result for adapter conversion.",
+    )

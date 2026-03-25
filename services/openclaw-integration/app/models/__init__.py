@@ -10,6 +10,7 @@ from app.models.api import (
 )
 from app.models.approval_request import ApprovalRequest
 from app.models.audit_event import AuditEvent
+from app.models.evaluation_frame import EvaluationFrameResponse
 from app.models.gate_decision import GateDecisionRecord
 from app.models.openai_flow import (
     AdapterToSubstrateRequest,
@@ -51,6 +52,7 @@ __all__ = [
     "CandidatePlanMetadata",
     "CandidatePlanStep",
     "ErrorResponse",
+    "EvaluationFrameResponse",
     "GateDecisionRecord",
     "GateEvaluateRequest",
     "HealthResponse",

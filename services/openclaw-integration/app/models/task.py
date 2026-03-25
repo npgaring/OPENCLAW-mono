@@ -8,6 +8,8 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 from sqlalchemy import Column, Enum as SaEnum, JSON, Text
 from sqlmodel import Field as SqlField, SQLModel
 
+from app.models.evaluation_frame import EvaluationFrameResponse
+
 
 class UatoHints(BaseModel):
     """Optional UATO admissibility overrides (trust × authority). Omitted fields use server defaults."""
@@ -190,6 +192,10 @@ class TaskSubmitResponse(BaseModel):
     approval_status: Optional[str] = None
     source_layer: Optional[str] = None
     resume_available: Optional[bool] = None
+    evaluation_frame: Optional[EvaluationFrameResponse] = Field(
+        default=None,
+        description="Authoritative grouped frame-level admissibility result (Invariant-C + UATO + Invariant-E).",
+    )
 
 
 class TaskContinueRequest(BaseModel):
