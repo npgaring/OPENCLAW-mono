@@ -14,7 +14,9 @@ from app.core.config import settings
 from app.core.security import hash_payload
 from app.core.trace_id import normalize_trace_id
 from app.db.session import get_session
-from app.invariant_c import evaluate_invariant_c
+from app.evaluation_frame import run_evaluation_frame
+from app.evaluation_frame.build import build_shared_governable_state_from_adapter_candidate
+from app.evaluation_frame.state import FrameStatus
 from app.models import (
     AdapterToSubstrateRequest,
     AdapterToSubstrateResponse,
@@ -232,27 +234,34 @@ async def _adapt_candidate_to_substrate(
     candidate_payload = candidate_plan.model_dump(mode="python")
     candidate_plan_hash = hash_payload(candidate_payload)
 
-    invariant_result = evaluate_invariant_c(
-        candidate_plan=candidate_plan,
+    shared = build_shared_governable_state_from_adapter_candidate(
+        trace_id=trace_id,
         ocgg_identity=ocgg_identity,
         intent=intent,
+        candidate_plan=candidate_plan,
+        deployment_target=deployment_target,
         objective=objective,
         context=context,
+        acceptance_criteria=acceptance_criteria,
         constraints=constraints,
+        approval_reference=approval_reference,
+        approver_id=approver_id,
     )
+    frame = run_evaluation_frame(shared)
+    ic_res = frame.invariant_c_result
     session.add(
         InvariantCDecisionRecord(
             trace_id=trace_id,
             ocgg_identity=ocgg_identity,
             intent=intent,
             candidate_plan_hash=candidate_plan_hash,
-            decision=invariant_result.decision,
-            reason_codes=list(invariant_result.reason_codes),
-            check_results=invariant_result.to_persisted_checks(),
-            decision_version=invariant_result.decision_version,
+            decision=ic_res.decision,
+            reason_codes=list(ic_res.reason_codes),
+            check_results=ic_res.to_persisted_checks(),
+            decision_version=ic_res.decision_version,
         )
     )
-    if invariant_result.decision != "PASS":
+    if ic_res.decision != "PASS":
         session.add(
             SubstrateAdapterEvent(
                 trace_id=trace_id,
@@ -261,8 +270,8 @@ async def _adapt_candidate_to_substrate(
                 candidate_plan_hash=candidate_plan_hash,
                 integration_plan_hash=None,
                 outcome="BLOCK",
-                reason_codes=list(invariant_result.reason_codes),
-                payload={},
+                reason_codes=list(ic_res.reason_codes),
+                payload={"evaluation_phase": "frame"},
             )
         )
         await session.commit()
@@ -270,8 +279,37 @@ async def _adapt_candidate_to_substrate(
             status_code=422,
             detail={
                 "code": "INVARIANT_C_BLOCK",
-                "reason_codes": list(invariant_result.reason_codes),
+                "reason_codes": list(ic_res.reason_codes),
                 "trace_id": trace_id,
+            },
+        )
+
+    if frame.frame_status != FrameStatus.PASS:
+        session.add(
+            SubstrateAdapterEvent(
+                trace_id=trace_id,
+                ocgg_identity=ocgg_identity,
+                intent=intent,
+                candidate_plan_hash=candidate_plan_hash,
+                integration_plan_hash=None,
+                outcome="BLOCK",
+                reason_codes=list(frame.reason_codes),
+                payload={
+                    "frame_status": frame.frame_status.value,
+                    "shared_state_hash": frame.shared_state_hash,
+                    "uato_decision": frame.uato_result.decision,
+                    "invariant_e_decision": frame.invariant_e_result.decision,
+                },
+            )
+        )
+        await session.commit()
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "code": "EVALUATION_FRAME_BLOCK",
+                "reason_codes": list(frame.reason_codes),
+                "trace_id": trace_id,
+                "frame_status": frame.frame_status.value,
             },
         )
 
@@ -328,19 +366,10 @@ async def _adapt_candidate_to_substrate(
             },
         )
 
-    operations = [
-        {
-            "op_id": step.id,
-            "type": step.type.value,
-            "target": step.target,
-            "inputs": step.inputs.model_dump(mode="python"),
-            "outputs": {},
-        }
-        for step in candidate_plan.steps
-    ]
-    domain = "web" if ocgg_identity == "W-OCGG" else "recruiting"
+    operations = list(shared.spec_for_gate.get("operations") or [])
+    domain = shared.domain
     rollback: dict[str, Any] = {}
-    governance_plan_hash = hash_payload({"domain": domain, "operations": operations})
+    governance_plan_hash = shared.plan_hash
     substrate_envelope_hash = _substrate_envelope_hash(
         {
             "plan_version": "1.0",

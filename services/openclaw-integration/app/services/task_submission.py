@@ -1,4 +1,4 @@
-"""Core POST /task pipeline: UATO → GateEngine → Invariant-E → token → OpenClaw."""
+"""Core POST /task pipeline: evaluation frame (Invariant-C + UATO + Invariant-E) → GateEngine → Invariant-E dispatch → token → OpenClaw."""
 from __future__ import annotations
 
 from datetime import datetime
@@ -13,6 +13,8 @@ from sqlmodel import select
 
 from app.core.errors import ErrorCodes
 from app.core.identity import IDENTITY_DOMAIN_MAP
+from app.evaluation_frame import build_shared_governable_state_for_task, run_evaluation_frame
+from app.evaluation_frame.state import FrameStatus
 from app.gate.engine import GateEngine
 from app.gate.models import GateDecision, GateEvaluation
 from app.gate.policy import get_policy_version_at_execution
@@ -26,6 +28,7 @@ from app.services.approvals_service import (
 )
 from app.services.execution_client import OpenClawClient, OpenClawError
 from app.uato import build_uato_input_from_spec, evaluate_uato, to_trace_record
+from app.uato.normalize import minimal_plan_admissibility_issues
 from app.uato.plan_bridge import integration_plan_preview
 from app.uato.types import UATO_DECISION_VERSION
 from app.invariant_e import build_execution_envelope, evaluate_invariant_e, to_trace_record as ie_to_trace
@@ -72,6 +75,38 @@ def _effective_gate_outcome_for_response(
     if execution_denied:
         return "BLOCK"
     return "PASS"
+
+
+def _frame_pass_audit_entries(
+    *,
+    trace_id: str,
+    shared_state_hash: str,
+    ic_res: Any,
+    uato_trace: dict[str, Any],
+    ie_frame_trace: dict[str, Any],
+) -> list[dict[str, Any]]:
+    return [
+        {"event_type": "shared_state_built", "payload": {"trace_id": trace_id, "shared_state_hash": shared_state_hash}},
+        {
+            "event_type": "invariant_c_decision",
+            "payload": {
+                "decision": ic_res.decision,
+                "reason_codes": list(ic_res.reason_codes),
+                "decision_version": ic_res.decision_version,
+                "admissibility_source": "INVARIANT_C",
+                "evaluation_phase": "frame",
+            },
+        },
+        {
+            "event_type": "uato_decision",
+            "payload": {**uato_trace, "upstream_gate": "UATO", "admissibility_source": "UATO", "evaluation_phase": "frame"},
+        },
+        {
+            "event_type": "invariant_e_decision",
+            "payload": {**ie_frame_trace, "upstream_gate": "INVARIANT_E", "admissibility_source": "INVARIANT_E", "evaluation_phase": "frame"},
+        },
+        {"event_type": "evaluation_frame_completed", "payload": {"frame_status": "PASS", "shared_state_hash": shared_state_hash}},
+    ]
 
 
 async def _latest_gate_record(session: AsyncSession, task_id: UUID) -> Optional[GateDecisionRecord]:
@@ -148,6 +183,9 @@ async def materialize_governance_prod_deploy_stop(
     uato_evaluated_at: datetime,
     uato_trace: dict[str, Any],
     evaluation: GateEvaluation,
+    frame_shared_state_hash: Optional[str] = None,
+    ic_res: Any = None,
+    ie_frame_trace: Optional[dict[str, Any]] = None,
 ) -> tuple[Task, Any]:  # second: ApprovalRequest
     """
     Persist task + gate_decisions + PENDING GOVERNANCE approval for PROD_DEPLOY_NO_APPROVAL.
@@ -193,6 +231,22 @@ async def materialize_governance_prod_deploy_stop(
             await session.refresh(task)
             return task, existing_ar
 
+    if frame_shared_state_hash and ic_res is not None and ie_frame_trace is not None:
+        initial_audit = _frame_pass_audit_entries(
+            trace_id=trace_id,
+            shared_state_hash=frame_shared_state_hash,
+            ic_res=ic_res,
+            uato_trace=uato_trace,
+            ie_frame_trace=ie_frame_trace,
+        )
+    else:
+        initial_audit = [
+            {
+                "event_type": "uato_decision",
+                "payload": {**uato_trace, "upstream_gate": "UATO", "admissibility_source": "UATO"},
+            }
+        ]
+
     task = Task(
         ocgg_identity=body.ocgg_identity,
         domain=domain,
@@ -203,12 +257,7 @@ async def materialize_governance_prod_deploy_stop(
         governance_outcome=decision.outcome.value,
         reason_codes=decision.reason_codes,
         plan_json=plan_json,
-        audit_history=[
-            {
-                "event_type": "uato_decision",
-                "payload": {**uato_trace, "upstream_gate": "UATO", "admissibility_source": "UATO"},
-            }
-        ],
+        audit_history=initial_audit,
         status=TaskStatus.submitted,
         trace_id=trace_id,
         uato_decision=uato_res.decision,
@@ -290,40 +339,172 @@ async def run_task_submission(
     if body.ocgg_identity not in IDENTITY_DOMAIN_MAP:
         raise HTTPException(status_code=422, detail={"code": ErrorCodes.INVALID_PAYLOAD, "message": "Unknown ocgg_identity"})
     domain = IDENTITY_DOMAIN_MAP[body.ocgg_identity]
-    spec = body.model_dump()
-    spec.pop("trace_id", None)
-    spec.pop("uato", None)
+    spec_pre = body.model_dump(mode="python")
+    spec_pre.pop("trace_id", None)
+    spec_pre.pop("uato", None)
+    if minimal_plan_admissibility_issues(spec_pre):
+        if reuse_task_id:
+            raise HTTPException(
+                status_code=422,
+                detail={
+                    "code": "FRAME_RESUME_FAILED",
+                    "message": "Checkpoint spec failed integration shape preflight; cannot rebuild shared state.",
+                    "reason_codes": list(minimal_plan_admissibility_issues(spec_pre)),
+                },
+            )
+        uato_in_pf = build_uato_input_from_spec(
+            spec_pre,
+            ocgg_identity=body.ocgg_identity,
+            trace_id=trace_id,
+            uato_hints=body.uato,
+        )
+        uato_res_pf = evaluate_uato(uato_in_pf)
+        uato_eval_pf = datetime.utcnow()
+        uato_trace_pf = to_trace_record(uato_in_pf, uato_res_pf)
+        plan_json_pf, plan_hash_pf, spec_hash_pf = integration_plan_preview(spec_pre, body.ocgg_identity)
+        task_pf = Task(
+            ocgg_identity=body.ocgg_identity,
+            domain=domain,
+            plan_hash=plan_hash_pf,
+            spec_hash=spec_hash_pf,
+            policy_version=UATO_DECISION_VERSION,
+            gate_outcome="BLOCK",
+            reason_codes=list(uato_res_pf.reason_codes),
+            plan_json=plan_json_pf,
+            audit_history=[
+                {
+                    "event_type": "uato_decision",
+                    "payload": {**uato_trace_pf, "upstream_gate": "UATO", "admissibility_source": "UATO", "preflight": True},
+                }
+            ],
+            status=TaskStatus.uato_blocked,
+            trace_id=trace_id,
+            uato_decision=uato_res_pf.decision,
+            uato_reason_codes=list(uato_res_pf.reason_codes),
+            uato_trust_level=uato_in_pf.trust_state.level,
+            uato_authority_level=uato_in_pf.authority_state.level,
+            uato_decision_version=uato_res_pf.decision_version,
+            uato_input_hash=uato_trace_pf["uato_input_hash"],
+            uato_evaluated_at=uato_eval_pf,
+        )
+        session.add(task_pf)
+        await session.flush()
+        gate_pf = GateDecisionRecord(
+            task_id=task_pf.task_id,
+            ocgg_identity=body.ocgg_identity,
+            outcome="BLOCK",
+            reason_codes=list(uato_res_pf.reason_codes),
+            defect_list=[],
+            policy_version=UATO_DECISION_VERSION,
+            spec_hash=spec_hash_pf,
+            plan_hash=plan_hash_pf,
+            approver_id=None,
+            trace_id=trace_id,
+            uato_decision=uato_res_pf.decision,
+            uato_reason_codes=list(uato_res_pf.reason_codes),
+            uato_trust_level=uato_in_pf.trust_state.level,
+            uato_authority_level=uato_in_pf.authority_state.level,
+            uato_decision_version=uato_res_pf.decision_version,
+            uato_input_hash=uato_trace_pf["uato_input_hash"],
+            uato_evaluated_at=uato_eval_pf,
+        )
+        session.add(gate_pf)
+        await session.commit()
+        await session.refresh(task_pf)
+        return _task_submit_response(
+            task_id=task_pf.task_id,
+            status=task_pf.status.value,
+            trace_id=trace_id,
+            gate_outcome="BLOCK",
+            reason_codes=list(uato_res_pf.reason_codes),
+            uato_decision=uato_res_pf.decision,
+            uato_reason_codes=list(uato_res_pf.reason_codes),
+        )
 
+    try:
+        shared = build_shared_governable_state_for_task(body, trace_id, for_resume=bool(reuse_task_id))
+    except ValueError as e:
+        raise HTTPException(
+            status_code=422,
+            detail={"code": ErrorCodes.INVALID_PAYLOAD, "message": str(e)},
+        )
+
+    frame = run_evaluation_frame(shared)
+    spec = dict(shared.spec_for_gate)
     uato_in = build_uato_input_from_spec(
         spec,
         ocgg_identity=body.ocgg_identity,
         trace_id=trace_id,
         uato_hints=body.uato,
     )
-    uato_res = evaluate_uato(uato_in)
+    uato_res = frame.uato_result
     uato_evaluated_at = datetime.utcnow()
     uato_trace = to_trace_record(uato_in, uato_res)
+    ie_env_frame = build_execution_envelope(
+        spec=spec,
+        ocgg_identity=body.ocgg_identity,
+        trace_id=trace_id,
+        task_id=None,
+        governance_outcome="PENDING",
+        plan_hash=shared.plan_hash,
+        spec_hash=shared.spec_hash,
+    )
+    ie_frame_evaluated_at = datetime.utcnow()
+    ie_frame_trace = ie_to_trace(ie_env_frame, frame.invariant_e_result)
+    plan_json, plan_hash, spec_hash = shared.plan_json, shared.plan_hash, shared.spec_hash
+    ic_res = frame.invariant_c_result
+    ie_res_frame = frame.invariant_e_result
 
-    if uato_res.decision != "PASS":
-        if reuse_task_id:
-            raise HTTPException(
-                status_code=422,
-                detail={
-                    "code": "UATO_RESUME_FAILED",
-                    "message": "Resume requires UATO PASS; admissibility still blocked.",
-                    "uato_decision": uato_res.decision,
-                    "reason_codes": list(uato_res.reason_codes),
-                },
-            )
-        plan_json, plan_hash, spec_hash = integration_plan_preview(spec, body.ocgg_identity)
-        if uato_res.decision == "ESCALATE":
+    if reuse_task_id and frame.frame_status != FrameStatus.PASS:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "code": "FRAME_RESUME_FAILED",
+                "message": "Approval resume re-evaluated the admissibility frame; request remains non-admissible.",
+                "frame_status": frame.frame_status.value,
+                "uato_decision": uato_res.decision,
+                "invariant_c_decision": ic_res.decision,
+                "invariant_e_decision": ie_res_frame.decision,
+                "reason_codes": list(frame.reason_codes),
+            },
+        )
+
+    if frame.frame_status != FrameStatus.PASS:
+        if frame.frame_status == FrameStatus.ESCALATED:
             short_status = TaskStatus.needs_review
-        elif uato_res.decision == "REQUIRE_APPROVAL":
+        elif frame.frame_status == FrameStatus.APPROVAL_REQUIRED:
             short_status = TaskStatus.pending_approval
         elif uato_res.decision == "BLOCK":
             short_status = TaskStatus.uato_blocked
+        elif ic_res.decision != "PASS":
+            short_status = TaskStatus.invalid_plan
+        elif ie_res_frame.decision != "EXECUTION_ALLOWED":
+            short_status = TaskStatus.invariant_e_denied
         else:
             short_status = TaskStatus.uato_blocked
+        frame_audit = {
+            "event_type": "evaluation_frame_completed",
+            "payload": {
+                "frame_status": frame.frame_status.value,
+                "shared_state_hash": frame.shared_state_hash,
+                "invariant_c_decision": ic_res.decision,
+                "invariant_c_reason_codes": list(ic_res.reason_codes),
+                "uato_decision": uato_res.decision,
+                "uato_reason_codes": list(uato_res.reason_codes),
+                "invariant_e_decision": ie_res_frame.decision,
+                "invariant_e_reason_codes": list(ie_res_frame.reason_codes),
+            },
+        }
+        paused_evt = None
+        if frame.frame_status == FrameStatus.APPROVAL_REQUIRED:
+            paused_evt = {
+                "event_type": "evaluation_frame_paused_for_approval",
+                "payload": {"shared_state_hash": frame.shared_state_hash, "uato_decision": uato_res.decision},
+            }
+        elif frame.frame_status == FrameStatus.BLOCKED:
+            paused_evt = {"event_type": "evaluation_frame_blocked", "payload": {"shared_state_hash": frame.shared_state_hash}}
+        elif frame.frame_status == FrameStatus.ESCALATED:
+            paused_evt = {"event_type": "evaluation_frame_blocked", "payload": {"frame_status": "ESCALATED", "shared_state_hash": frame.shared_state_hash}}
         task = Task(
             ocgg_identity=body.ocgg_identity,
             domain=domain,
@@ -331,14 +512,34 @@ async def run_task_submission(
             spec_hash=spec_hash,
             policy_version=UATO_DECISION_VERSION,
             gate_outcome="BLOCK",
-            reason_codes=list(uato_res.reason_codes),
+            reason_codes=list(frame.reason_codes),
             plan_json=plan_json,
             audit_history=[
                 {
+                    "event_type": "shared_state_built",
+                    "payload": {"trace_id": trace_id, "shared_state_hash": frame.shared_state_hash},
+                },
+                {
+                    "event_type": "invariant_c_decision",
+                    "payload": {
+                        "decision": ic_res.decision,
+                        "reason_codes": list(ic_res.reason_codes),
+                        "decision_version": ic_res.decision_version,
+                        "admissibility_source": "INVARIANT_C",
+                        "evaluation_phase": "frame",
+                    },
+                },
+                {
                     "event_type": "uato_decision",
-                    "payload": {**uato_trace, "upstream_gate": "UATO", "admissibility_source": "UATO"},
-                }
-            ],
+                    "payload": {**uato_trace, "upstream_gate": "UATO", "admissibility_source": "UATO", "evaluation_phase": "frame"},
+                },
+                {
+                    "event_type": "invariant_e_decision",
+                    "payload": {**ie_frame_trace, "upstream_gate": "INVARIANT_E", "admissibility_source": "INVARIANT_E", "evaluation_phase": "frame"},
+                },
+                frame_audit,
+            ]
+            + ([paused_evt] if paused_evt else []),
             status=short_status,
             trace_id=trace_id,
             uato_decision=uato_res.decision,
@@ -348,6 +549,12 @@ async def run_task_submission(
             uato_decision_version=uato_res.decision_version,
             uato_input_hash=uato_trace["uato_input_hash"],
             uato_evaluated_at=uato_evaluated_at,
+            invariant_e_decision=ie_res_frame.decision,
+            invariant_e_reason_codes=list(ie_res_frame.reason_codes),
+            invariant_e_decision_version=ie_res_frame.decision_version,
+            invariant_e_input_hash=ie_frame_trace["invariant_e_input_hash"],
+            invariant_e_evaluated_at=ie_frame_evaluated_at,
+            dispatch_blocked=ie_res_frame.dispatch_blocked,
         )
         session.add(task)
         await session.flush()
@@ -355,7 +562,7 @@ async def run_task_submission(
             task_id=task.task_id,
             ocgg_identity=body.ocgg_identity,
             outcome="BLOCK",
-            reason_codes=list(uato_res.reason_codes),
+            reason_codes=list(frame.reason_codes),
             defect_list=[],
             policy_version=UATO_DECISION_VERSION,
             spec_hash=spec_hash,
@@ -369,26 +576,32 @@ async def run_task_submission(
             uato_decision_version=uato_res.decision_version,
             uato_input_hash=uato_trace["uato_input_hash"],
             uato_evaluated_at=uato_evaluated_at,
+            invariant_e_decision=ie_res_frame.decision,
+            invariant_e_reason_codes=list(ie_res_frame.reason_codes),
+            invariant_e_decision_version=ie_res_frame.decision_version,
+            invariant_e_input_hash=ie_frame_trace["invariant_e_input_hash"],
+            invariant_e_evaluated_at=ie_frame_evaluated_at,
+            dispatch_blocked=ie_res_frame.dispatch_blocked,
         )
         session.add(gate_record)
         await session.commit()
         await session.refresh(task)
 
         extra: dict[str, Any] = {}
-        if uato_res.decision == "REQUIRE_APPROVAL":
+        if frame.frame_status == FrameStatus.APPROVAL_REQUIRED and frame.approvable_via_uato:
             ar = await create_approval_request_for_stop(
                 session,
                 trace_id=trace_id,
                 task_id=task.task_id,
                 source_layer=ApprovalSourceLayer.UATO,
                 reason_code=uato_res.reason_codes[0] if uato_res.reason_codes else "REQUIRE_APPROVAL",
-                resume_from_stage="POST_UATO_RESUME",
+                resume_from_stage="FRAME_REEVALUATION",
                 task_submit_body=body,
                 trace_id_for_body=trace_id,
                 approval_scope="uato_require_approval",
             )
             task.approval_request_id = ar.id
-            task.blocked_stage = "UATO"
+            task.blocked_stage = "EVAL_FRAME"
             task.audit_history = task.audit_history or []
             task.audit_history.append(
                 {
@@ -397,6 +610,7 @@ async def run_task_submission(
                         "approval_request_id": str(ar.id),
                         "source_layer": "UATO",
                         "trace_id": trace_id,
+                        "frame_snapshot_hash": frame.shared_state_hash,
                     },
                 }
             )
@@ -416,9 +630,12 @@ async def run_task_submission(
             status=task.status.value,
             trace_id=trace_id,
             gate_outcome="BLOCK",
-            reason_codes=list(uato_res.reason_codes),
+            reason_codes=list(frame.reason_codes),
             uato_decision=uato_res.decision,
             uato_reason_codes=list(uato_res.reason_codes),
+            invariant_e_decision=ie_res_frame.decision,
+            invariant_e_reason_codes=list(ie_res_frame.reason_codes),
+            dispatch_blocked=ie_res_frame.dispatch_blocked,
             **extra,
         )
 
@@ -443,6 +660,9 @@ async def run_task_submission(
             uato_evaluated_at=uato_evaluated_at,
             uato_trace=uato_trace,
             evaluation=evaluation,
+            frame_shared_state_hash=frame.shared_state_hash,
+            ic_res=ic_res,
+            ie_frame_trace=ie_frame_trace,
         )
         return _task_submit_response(
             task_id=task.task_id,
@@ -507,6 +727,14 @@ async def run_task_submission(
         gate_record.uato_input_hash = uato_trace["uato_input_hash"]
         gate_record.uato_evaluated_at = uato_evaluated_at
         await session.flush()
+        task.audit_history = task.audit_history or []
+        task.audit_history.append(
+            {
+                "event_type": "evaluation_frame_resumed",
+                "payload": {"shared_state_hash": frame.shared_state_hash, "frame_status": "PASS"},
+            },
+        )
+        flag_modified(task, "audit_history")
     else:
         task = Task(
             ocgg_identity=body.ocgg_identity,
@@ -518,12 +746,13 @@ async def run_task_submission(
             governance_outcome=decision.outcome.value,
             reason_codes=decision.reason_codes,
             plan_json=plan_json,
-            audit_history=[
-                {
-                    "event_type": "uato_decision",
-                    "payload": {**uato_trace, "upstream_gate": "UATO", "admissibility_source": "UATO"},
-                }
-            ],
+            audit_history=_frame_pass_audit_entries(
+                trace_id=trace_id,
+                shared_state_hash=frame.shared_state_hash,
+                ic_res=ic_res,
+                uato_trace=uato_trace,
+                ie_frame_trace=ie_frame_trace,
+            ),
             status=TaskStatus.submitted,
             trace_id=trace_id,
             uato_decision=uato_res.decision,

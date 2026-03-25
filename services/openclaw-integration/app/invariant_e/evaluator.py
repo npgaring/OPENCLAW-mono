@@ -8,18 +8,13 @@ from app.invariant_e.normalize import normalize_envelope
 from app.invariant_e.types import ExecutionEnvelope, InvariantEResult, result_allowed, result_denied
 
 
-def evaluate_invariant_e(envelope: ExecutionEnvelope) -> InvariantEResult:
-    """
-    Phase 1: returns EXECUTION_ALLOWED or EXECUTION_DENIED only.
-
-    EXECUTION_TERMINATED is reserved for downstream signals (see types module TODO).
-    """
-    e = normalize_envelope(envelope)
-    trace_id = e.trace_id
-
-    if e.governance_outcome != "PASS":
-        return result_denied(trace_id, (rc.IE_DENIED_GOVERNANCE_NOT_PASS,))
-
+def _invariant_e_admission_core(
+    e: ExecutionEnvelope,
+    trace_id: str,
+    *,
+    enforce_prod_deploy_approver: bool = True,
+) -> InvariantEResult:
+    """Structural execution-admission checks (shared by frame and dispatch evaluations)."""
     if not trace_id:
         return result_denied(trace_id, (rc.IE_DENIED_MISSING_TRACE,))
 
@@ -39,7 +34,7 @@ def evaluate_invariant_e(envelope: ExecutionEnvelope) -> InvariantEResult:
         return result_denied(trace_id, (rc.IE_DENIED_EMPTY_OPERATIONS,))
 
     deployment_target = (e.deployment_target or "").lower()
-    if deployment_target in PROD_DEPLOYMENT_TARGETS:
+    if enforce_prod_deploy_approver and deployment_target in PROD_DEPLOYMENT_TARGETS:
         if not (e.approver_id or e.approval_reference):
             return result_denied(trace_id, (rc.IE_DENIED_PROD_APPROVAL_REQUIRED,))
 
@@ -61,3 +56,33 @@ def evaluate_invariant_e(envelope: ExecutionEnvelope) -> InvariantEResult:
             return result_denied(trace_id, (rc.IE_DENIED_FORBIDDEN_OPERATION,))
 
     return result_allowed(trace_id)
+
+
+def evaluate_invariant_e_for_frame(envelope: ExecutionEnvelope) -> InvariantEResult:
+    """
+    Pre-governance frame evaluation: same admission rules as dispatch, except governance need not be PASS.
+
+    Production deploy human approval is enforced by GateEngine (PROD_DEPLOY_NO_APPROVAL) and again at dispatch;
+    the frame omits prod approver fields so governance can still evaluate and materialize approvals.
+
+    Use governance_outcome=\"PENDING\" (or any non-PASS sentinel) on the envelope; this entrypoint ignores it.
+    """
+    e = normalize_envelope(envelope)
+    return _invariant_e_admission_core(e, e.trace_id, enforce_prod_deploy_approver=False)
+
+
+def evaluate_invariant_e(envelope: ExecutionEnvelope) -> InvariantEResult:
+    """
+    Post-governance dispatch boundary: requires governance_outcome PASS, then runs the same admission core as the frame.
+
+    Phase 1: returns EXECUTION_ALLOWED or EXECUTION_DENIED only.
+
+    EXECUTION_TERMINATED is reserved for downstream signals (see types module TODO).
+    """
+    e = normalize_envelope(envelope)
+    trace_id = e.trace_id
+
+    if e.governance_outcome != "PASS":
+        return result_denied(trace_id, (rc.IE_DENIED_GOVERNANCE_NOT_PASS,))
+
+    return _invariant_e_admission_core(e, trace_id, enforce_prod_deploy_approver=True)

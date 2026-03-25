@@ -2,12 +2,16 @@
 from datetime import datetime
 
 from app.core.trace_id import normalize_trace_id
+from app.evaluation_frame import build_shared_governable_state_for_gate_payload, run_evaluation_frame
+from app.evaluation_frame.state import FrameStatus
 from app.gate.engine import GateEngine
 from app.gate.models import GateDecisionResponse
 from app.gate.token import verify_execution_token
+from app.invariant_e import build_execution_envelope, to_trace_record as ie_to_trace
 from app.models import GateEvaluateRequest, TaskSubmitRequest, VerifyTokenRequest, VerifyTokenResponse
 from app.services.task_submission import materialize_governance_prod_deploy_stop
 from app.uato import build_uato_input_from_spec, evaluate_uato, to_trace_record
+from app.uato.normalize import minimal_plan_admissibility_issues
 from app.uato.plan_bridge import integration_plan_preview
 from app.uato.types import UATO_DECISION_VERSION
 from fastapi import APIRouter, Depends, HTTPException
@@ -60,22 +64,54 @@ async def evaluate_gate(
     if isinstance(spec, dict):
         spec.pop("uato", None)
 
+    if not isinstance(spec, dict):
+        raise HTTPException(status_code=422, detail={"code": ErrorCodes.INVALID_PAYLOAD, "message": "Invalid gate payload"})
+
+    if minimal_plan_admissibility_issues(spec):
+        uato_in_pf = build_uato_input_from_spec(
+            spec,
+            ocgg_identity=body.ocgg_identity,
+            trace_id=trace_id,
+            uato_hints=body.uato,
+        )
+        uato_res_pf = evaluate_uato(uato_in_pf)
+        _, plan_hash_pf, spec_hash_pf = integration_plan_preview(spec, body.ocgg_identity)
+        return GateDecisionResponse(
+            outcome="BLOCK",
+            reason_codes=list(uato_res_pf.reason_codes),
+            defect_list=[],
+            policy_version=UATO_DECISION_VERSION,
+            spec_hash=spec_hash_pf,
+            plan_hash=plan_hash_pf,
+            approver_id=None,
+            execution_token=None,
+            trace_id=trace_id,
+            uato_decision=uato_res_pf.decision,
+            uato_reason_codes=list(uato_res_pf.reason_codes),
+            uato_skipped_gate=True,
+        )
+
+    try:
+        shared = build_shared_governable_state_for_gate_payload(spec, body.ocgg_identity, trace_id, body.uato)
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail={"code": ErrorCodes.INVALID_PAYLOAD, "message": str(e)})
+
+    frame = run_evaluation_frame(shared)
     uato_in = build_uato_input_from_spec(
-        spec if isinstance(spec, dict) else {},
+        shared.spec_for_gate,
         ocgg_identity=body.ocgg_identity,
         trace_id=trace_id,
         uato_hints=body.uato,
     )
-    uato_res = evaluate_uato(uato_in)
-    if uato_res.decision != "PASS":
-        _, plan_hash, spec_hash = integration_plan_preview(spec if isinstance(spec, dict) else {}, body.ocgg_identity)
+    uato_res = frame.uato_result
+    if frame.frame_status != FrameStatus.PASS:
         return GateDecisionResponse(
             outcome="BLOCK",
-            reason_codes=list(uato_res.reason_codes),
+            reason_codes=list(frame.reason_codes),
             defect_list=[],
             policy_version=UATO_DECISION_VERSION,
-            spec_hash=spec_hash,
-            plan_hash=plan_hash,
+            spec_hash=shared.spec_hash,
+            plan_hash=shared.plan_hash,
             approver_id=None,
             execution_token=None,
             trace_id=trace_id,
@@ -90,6 +126,16 @@ async def evaluate_gate(
     if d.outcome.value == "BLOCK" and "PROD_DEPLOY_NO_APPROVAL" in d.reason_codes:
         uato_evaluated_at = datetime.utcnow()
         uato_trace = to_trace_record(uato_in, uato_res)
+        ie_env_frame = build_execution_envelope(
+            spec=shared.spec_for_gate,
+            ocgg_identity=body.ocgg_identity,
+            trace_id=trace_id,
+            task_id=None,
+            governance_outcome="PENDING",
+            plan_hash=shared.plan_hash,
+            spec_hash=shared.spec_hash,
+        )
+        ie_frame_trace = ie_to_trace(ie_env_frame, frame.invariant_e_result)
         gate_payload = body.model_dump(exclude_none=True)
         gate_payload["trace_id"] = trace_id
         task_body = TaskSubmitRequest.model_validate(gate_payload)
@@ -102,6 +148,9 @@ async def evaluate_gate(
             uato_evaluated_at=uato_evaluated_at,
             uato_trace=uato_trace,
             evaluation=evaluation,
+            frame_shared_state_hash=frame.shared_state_hash,
+            ic_res=frame.invariant_c_result,
+            ie_frame_trace=ie_frame_trace,
         )
         approval_extras = {
             "task_id": task.task_id,

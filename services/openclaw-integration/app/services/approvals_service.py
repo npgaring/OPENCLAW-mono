@@ -33,7 +33,13 @@ def prod_governance_resume_snapshot_hash(body: TaskSubmitRequest, trace_id_for_b
 
 
 def _task_checkpoint(task_submit: dict[str, Any], trace_id: str) -> dict[str, Any]:
-    return {"v": 1, "kind": "task_resume", "trace_id": trace_id, "task_submit": task_submit}
+    return {
+        "v": 2,
+        "kind": "task_resume",
+        "trace_id": trace_id,
+        "task_submit": task_submit,
+        "reevaluate_frame_on_resume": True,
+    }
 
 
 async def find_pending_governance_prod_approval(
@@ -251,7 +257,7 @@ async def resume_approved_request(
     *,
     actor: str,
 ) -> Any:
-    """Backend-controlled resume: reload checkpoint, validate, run the correct downstream stage."""
+    """Backend-controlled resume: validate checkpoint, then rerun adapter conversion or full POST /task (shared-state frame + governance)."""
     from app.services.task_submission import run_task_submission
 
     ar = await session.get(ApprovalRequest, approval_id)
@@ -301,6 +307,12 @@ async def resume_approved_request(
         logger.exception("approval_resume_failed approval_id=%s", approval_id)
         if task:
             task.audit_history = task.audit_history or []
+            task.audit_history.append(
+                {
+                    "event_type": "evaluation_frame_resume_failed",
+                    "payload": {"approval_request_id": str(approval_id), "error": str(e), "actor": actor},
+                }
+            )
             task.audit_history.append(
                 {
                     "event_type": "approval_resume_failed",
