@@ -50,6 +50,7 @@ class SharedGovernableState:
     spec_hash: str
     candidate_plan: CandidatePlan
     uato_hints: Any
+    validation_controls: Any
     approval_context: Optional[ApprovalFrameContext]
     shared_state_hash: str
 

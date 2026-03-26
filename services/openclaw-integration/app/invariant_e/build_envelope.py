@@ -40,6 +40,7 @@ def build_execution_envelope(
     governance_outcome: str,
     plan_hash: str,
     spec_hash: str,
+    validation_controls: Any = None,
 ) -> ExecutionEnvelope:
     """
     Canonical envelope for post-governance execution admission.
@@ -53,6 +54,13 @@ def build_execution_envelope(
     ops: tuple[dict[str, Any], ...] = tuple(o for o in ops_list if isinstance(o, dict))
     req_caps = normalize_requested_capabilities(ops)
     allow_caps = _allowed_capabilities_for_identity(ocgg_identity)
+    dispatch_scenario = getattr(validation_controls, "dispatch_boundary_scenario", None)
+    if isinstance(validation_controls, dict):
+        dispatch_scenario = validation_controls.get("dispatch_boundary_scenario", dispatch_scenario)
+    if governance_outcome == "PASS" and dispatch_scenario == "PASS_GOV_FAIL_INVARIANT_E_CAPABILITY":
+        # Bounded deterministic scenario for dispatch-boundary validation:
+        # keep requested capabilities from real operations, but no allowed capabilities at dispatch.
+        allow_caps = tuple()
 
     dep = spec.get("deployment_target")
     dep_s = str(dep).strip().lower() if dep is not None else None

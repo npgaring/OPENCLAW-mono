@@ -31,6 +31,7 @@ def build_uato_input_from_spec(
     ocgg_identity: str,
     trace_id: Optional[str],
     uato_hints: Optional[Any] = None,
+    validation_controls: Optional[Any] = None,
 ) -> UatoInput:
     """
     Integration spec: same dict passed to GateEngine.evaluate (post trace_id pop optional).
@@ -44,8 +45,13 @@ def build_uato_input_from_spec(
         tid_raw = uato_hints.get("tenant_id")
     tenant_id = (tid_raw or ocgg_identity or "").strip()
 
-    tl = _get_hint_str(uato_hints, "trust_level") or settings.uato_default_trust_level
-    al = _get_hint_str(uato_hints, "authority_level") or settings.uato_default_authority_level
+    scenario = _get_hint_str(validation_controls, "uato_scenario")
+    if scenario == "PASS_C_FAIL_UATO_BLOCK":
+        tl = "LOW"
+        al = "LOW"
+    else:
+        tl = _get_hint_str(uato_hints, "trust_level") or settings.uato_default_trust_level
+        al = _get_hint_str(uato_hints, "authority_level") or settings.uato_default_authority_level
     trust_level: TrustLevel = "HIGH" if str(tl).upper() == "HIGH" else "LOW"
     authority_level: AuthorityLevel = "HIGH" if str(al).upper() == "HIGH" else "LOW"
 

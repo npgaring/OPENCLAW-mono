@@ -24,6 +24,15 @@ class UatoHints(BaseModel):
     evidence: Optional[List[str]] = None
 
 
+class ValidationControls(BaseModel):
+    """Narrow deterministic controls for required validation scenarios."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    uato_scenario: Optional[Literal["PASS_C_FAIL_UATO_BLOCK"]] = None
+    dispatch_boundary_scenario: Optional[Literal["PASS_GOV_FAIL_INVARIANT_E_CAPABILITY"]] = None
+
+
 class TaskStatus(str, Enum):
     submitted = "submitted"
     completed = "completed"
@@ -160,6 +169,10 @@ class TaskSubmitRequest(BaseModel):
         ),
     )
     uato: Optional[UatoHints] = Field(default=None, description="Optional UATO trust/authority hints for admissibility.")
+    validation: Optional[ValidationControls] = Field(
+        default=None,
+        description="Optional bounded controls for deterministic validation scenarios.",
+    )
 
     @model_validator(mode="before")
     @classmethod

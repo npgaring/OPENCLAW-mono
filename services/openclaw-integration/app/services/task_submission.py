@@ -368,6 +368,7 @@ async def run_task_submission(
     spec_pre = body.model_dump(mode="python")
     spec_pre.pop("trace_id", None)
     spec_pre.pop("uato", None)
+    spec_pre.pop("validation", None)
     spec_pre.pop("governance_evaluation_id", None)
     if minimal_plan_admissibility_issues(spec_pre):
         if reuse_task_id:
@@ -384,6 +385,7 @@ async def run_task_submission(
             ocgg_identity=body.ocgg_identity,
             trace_id=trace_id,
             uato_hints=body.uato,
+            validation_controls=body.validation,
         )
         uato_res_pf = evaluate_uato(uato_in_pf)
         uato_eval_pf = datetime.utcnow()
@@ -463,6 +465,7 @@ async def run_task_submission(
         ocgg_identity=body.ocgg_identity,
         trace_id=trace_id,
         uato_hints=body.uato,
+        validation_controls=body.validation,
     )
     uato_res = frame.uato_result
     uato_evaluated_at = datetime.utcnow()
@@ -475,6 +478,7 @@ async def run_task_submission(
         governance_outcome="PENDING",
         plan_hash=shared.plan_hash,
         spec_hash=shared.spec_hash,
+        validation_controls=body.validation,
     )
     ie_frame_evaluated_at = datetime.utcnow()
     ie_frame_trace = ie_to_trace(ie_env_frame, frame.invariant_e_result)
@@ -885,6 +889,7 @@ async def run_task_submission(
         governance_outcome=decision.outcome.value,
         plan_hash=plan_hash,
         spec_hash=spec_hash,
+        validation_controls=body.validation,
     )
     ie_res = evaluate_invariant_e(inv_env)
     ie_evaluated_at = datetime.utcnow()

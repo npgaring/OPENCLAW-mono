@@ -41,6 +41,7 @@ def run_evaluation_frame(state: SharedGovernableState) -> CompositeFrameResult:
         ocgg_identity=state.ocgg_identity,
         trace_id=state.trace_id,
         uato_hints=state.uato_hints,
+        validation_controls=state.validation_controls,
     )
     uato_res = evaluate_uato(uato_in)
 
@@ -52,6 +53,7 @@ def run_evaluation_frame(state: SharedGovernableState) -> CompositeFrameResult:
         governance_outcome="PENDING",
         plan_hash=state.plan_hash,
         spec_hash=state.spec_hash,
+        validation_controls=state.validation_controls,
     )
     ie_res = evaluate_invariant_e_for_frame(ie_env)
 

@@ -72,6 +72,7 @@ def build_shared_governable_state_for_task(
     spec = body.model_dump(mode="python")
     spec.pop("trace_id", None)
     spec.pop("uato", None)
+    spec.pop("validation", None)
     spec.pop("governance_evaluation_id", None)
     spec.setdefault("ocgg_identity", body.ocgg_identity)
 
@@ -116,6 +117,7 @@ def build_shared_governable_state_for_task(
         spec_hash=spec_hash,
         candidate_plan=candidate_plan,
         uato_hints=body.uato,
+        validation_controls=body.validation,
         approval_context=approval_ctx,
         shared_state_hash=sh,
     )
@@ -126,10 +128,12 @@ def build_shared_governable_state_for_gate_payload(
     ocgg_identity: str,
     trace_id: str,
     uato_hints: Any,
+    validation_controls: Any = None,
 ) -> SharedGovernableState:
     if not isinstance(spec, dict):
         raise ValueError("spec must be a dict")
     domain_spec = dict(spec)
+    domain_spec.pop("validation", None)
     domain_spec.setdefault("ocgg_identity", ocgg_identity)
     plan_json, plan_hash, spec_hash = integration_plan_preview(domain_spec, ocgg_identity)
 
@@ -163,6 +167,7 @@ def build_shared_governable_state_for_gate_payload(
         spec_hash=spec_hash,
         candidate_plan=candidate_plan,
         uato_hints=uato_hints,
+        validation_controls=validation_controls,
         approval_context=None,
         shared_state_hash=sh,
     )
@@ -225,6 +230,7 @@ def build_shared_governable_state_from_adapter_candidate(
         spec_hash=spec_hash,
         candidate_plan=candidate_plan,
         uato_hints=None,
+        validation_controls=None,
         approval_context=approval_ctx,
         shared_state_hash=sh,
     )

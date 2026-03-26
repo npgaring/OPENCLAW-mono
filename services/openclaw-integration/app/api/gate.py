@@ -65,6 +65,7 @@ async def evaluate_gate(
     trace_id = normalize_trace_id(spec.pop("trace_id", None) if isinstance(spec, dict) else None)
     if isinstance(spec, dict):
         spec.pop("uato", None)
+        spec.pop("validation", None)
 
     if not isinstance(spec, dict):
         raise HTTPException(status_code=422, detail={"code": ErrorCodes.INVALID_PAYLOAD, "message": "Invalid gate payload"})
@@ -75,6 +76,7 @@ async def evaluate_gate(
             ocgg_identity=body.ocgg_identity,
             trace_id=trace_id,
             uato_hints=body.uato,
+            validation_controls=body.validation,
         )
         uato_res_pf = evaluate_uato(uato_in_pf)
         _, plan_hash_pf, spec_hash_pf = integration_plan_preview(spec, body.ocgg_identity)
@@ -106,7 +108,13 @@ async def evaluate_gate(
         )
 
     try:
-        shared = build_shared_governable_state_for_gate_payload(spec, body.ocgg_identity, trace_id, body.uato)
+        shared = build_shared_governable_state_for_gate_payload(
+            spec,
+            body.ocgg_identity,
+            trace_id,
+            body.uato,
+            body.validation,
+        )
     except ValueError as e:
         raise HTTPException(status_code=422, detail={"code": ErrorCodes.INVALID_PAYLOAD, "message": str(e)})
 
@@ -116,6 +124,7 @@ async def evaluate_gate(
         ocgg_identity=body.ocgg_identity,
         trace_id=trace_id,
         uato_hints=body.uato,
+        validation_controls=body.validation,
     )
     uato_res = frame.uato_result
     if frame.frame_status != FrameStatus.PASS:
@@ -161,6 +170,7 @@ async def evaluate_gate(
             governance_outcome="PENDING",
             plan_hash=shared.plan_hash,
             spec_hash=shared.spec_hash,
+            validation_controls=body.validation,
         )
         ie_frame_trace = ie_to_trace(ie_env_frame, frame.invariant_e_result)
         gate_payload = body.model_dump(exclude_none=True)

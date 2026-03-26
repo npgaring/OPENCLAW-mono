@@ -42,6 +42,7 @@ async def evaluate_frame(
     trace_id = normalize_trace_id(spec.pop("trace_id", None) if isinstance(spec, dict) else None)
     if isinstance(spec, dict):
         spec.pop("uato", None)
+        spec.pop("validation", None)
     if not isinstance(spec, dict):
         raise HTTPException(
             status_code=422,
@@ -57,7 +58,13 @@ async def evaluate_frame(
             },
         )
     try:
-        shared = build_shared_governable_state_for_gate_payload(spec, body.ocgg_identity, trace_id, body.uato)
+        shared = build_shared_governable_state_for_gate_payload(
+            spec,
+            body.ocgg_identity,
+            trace_id,
+            body.uato,
+            body.validation,
+        )
     except ValueError as e:
         raise HTTPException(status_code=422, detail={"code": ErrorCodes.INVALID_PAYLOAD, "message": str(e)})
     frame = run_evaluation_frame(shared)
