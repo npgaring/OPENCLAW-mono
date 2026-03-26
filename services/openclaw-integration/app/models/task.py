@@ -31,6 +31,7 @@ class ValidationControls(BaseModel):
 
     uato_scenario: Optional[Literal["PASS_C_FAIL_UATO_BLOCK"]] = None
     dispatch_boundary_scenario: Optional[Literal["PASS_GOV_FAIL_INVARIANT_E_CAPABILITY"]] = None
+    approval_required_scenario: Optional[Literal["GOVERNANCE_PROD_NO_APPROVAL_DEMO"]] = None
 
 
 class TaskStatus(str, Enum):

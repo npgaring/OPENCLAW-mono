@@ -97,6 +97,49 @@ def test_prod_without_approval_creates_governance_approval(client, auth_headers)
     assert ef.get("dispatch_reached") is False
 
 
+def test_dedicated_approval_demo_scenario_avoids_invariant_c_goal_mismatch(client, auth_headers):
+    r = client.post(
+        "/task",
+        json={
+            **_prod_spec(),
+            "goal": "Deploy production build for recruiting applicant workflow rollout",
+            "context": "This preset intentionally includes recruiting context for demo parity",
+            "validation": {"approval_required_scenario": "GOVERNANCE_PROD_NO_APPROVAL_DEMO"},
+        },
+        headers=auth_headers,
+    )
+    assert r.status_code == 200, r.text
+    data = r.json()
+    assert data["status"] == "pending_approval"
+    assert data["gate_outcome"] == "BLOCK"
+    assert "PROD_DEPLOY_NO_APPROVAL" in (data.get("reason_codes") or [])
+    ef = data.get("evaluation_frame") or {}
+    assert ef.get("frame_status") == "PASS"
+    assert (ef.get("invariant_c_result") or {}).get("decision") == "PASS"
+    assert "INVARIANT_C_GOAL_OBJECTIVE_MISMATCH" not in (ef.get("reason_codes") or [])
+    assert ef.get("governance_reached") is True
+    assert ef.get("dispatch_reached") is False
+
+
+def test_prod_without_demo_scenario_can_fail_early_at_invariant_c_goal_mismatch(client, auth_headers):
+    r = client.post(
+        "/task",
+        json={
+            **_prod_spec(),
+            "goal": "Deploy production build for recruiting applicant workflow rollout",
+            "context": "This preset intentionally includes recruiting context for demo parity",
+        },
+        headers=auth_headers,
+    )
+    assert r.status_code == 200, r.text
+    data = r.json()
+    ef = data.get("evaluation_frame") or {}
+    assert ef.get("frame_status") == "BLOCKED"
+    assert (ef.get("invariant_c_result") or {}).get("decision") == "BLOCK"
+    assert "INVARIANT_C_GOAL_OBJECTIVE_MISMATCH" in (ef.get("reason_codes") or [])
+    assert "PROD_DEPLOY_NO_APPROVAL" not in (data.get("reason_codes") or [])
+
+
 def test_gate_evaluate_prod_materializes_approval_listable_by_trace(client, auth_headers):
     tid = "550e8400-e29b-41d4-a716-446655440101"
     spec = {**_prod_spec(), "trace_id": tid}
