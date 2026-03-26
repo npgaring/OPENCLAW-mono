@@ -72,6 +72,7 @@ def build_shared_governable_state_for_task(
     spec = body.model_dump(mode="python")
     spec.pop("trace_id", None)
     spec.pop("uato", None)
+    spec.pop("governance_evaluation_id", None)
     spec.setdefault("ocgg_identity", body.ocgg_identity)
 
     domain_spec = dict(spec)

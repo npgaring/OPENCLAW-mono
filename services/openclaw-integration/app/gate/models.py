@@ -59,6 +59,13 @@ class GateDecisionResponse(BaseModel):
     approver_id: Optional[str] = None
     execution_token: Optional[str] = None
     trace_id: Optional[str] = None
+    governance_evaluation_id: Optional[str] = Field(
+        default=None,
+        description=(
+            "Stable identifier for this governance evaluation over the same shared-state frame. "
+            "Clients can pass it to POST /task to prove frame->governance->task continuity."
+        ),
+    )
     uato_decision: Optional[str] = None
     uato_reason_codes: List[str] = []
     uato_skipped_gate: bool = False

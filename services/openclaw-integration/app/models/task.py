@@ -152,6 +152,13 @@ class TaskSubmitRequest(BaseModel):
         default=None,
         description="Optional UUID; omit to let server generate. Pass compile response trace_id for end-to-end correlation.",
     )
+    governance_evaluation_id: Optional[str] = Field(
+        default=None,
+        description=(
+            "Optional continuity reference returned by POST /gate/evaluate. "
+            "When provided, POST /task verifies it matches the same frame+governance evaluation before dispatch."
+        ),
+    )
     uato: Optional[UatoHints] = Field(default=None, description="Optional UATO trust/authority hints for admissibility.")
 
     @model_validator(mode="before")
@@ -182,6 +189,8 @@ class TaskSubmitResponse(BaseModel):
     dispatch_blocked: Optional[bool] = None
     trace_id: Optional[str] = None
     audit_trace_id: Optional[str] = None  # deprecated alias; same as trace_id when set
+    governance_evaluation_id: Optional[str] = None
+    governance_continuity_verified: Optional[bool] = None
     tenant_id: Optional[str] = None
     artifact_id: Optional[str] = None
     artifact_owner: Optional[str] = None

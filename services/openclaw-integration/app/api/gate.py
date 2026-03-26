@@ -10,7 +10,7 @@ from app.gate.models import GateDecisionResponse
 from app.gate.token import verify_execution_token
 from app.invariant_e import build_execution_envelope, to_trace_record as ie_to_trace
 from app.models import GateEvaluateRequest, TaskSubmitRequest, VerifyTokenRequest, VerifyTokenResponse
-from app.services.task_submission import materialize_governance_prod_deploy_stop
+from app.services.task_submission import make_governance_evaluation_id, materialize_governance_prod_deploy_stop
 from app.uato import build_uato_input_from_spec, evaluate_uato, to_trace_record
 from app.uato.normalize import minimal_plan_admissibility_issues
 from app.uato.plan_bridge import integration_plan_preview
@@ -141,6 +141,14 @@ async def evaluate_gate(
 
     evaluation = GateEngine().evaluate(spec, body.ocgg_identity)
     d = evaluation.decision
+    governance_evaluation_id = make_governance_evaluation_id(
+        trace_id=trace_id,
+        ocgg_identity=body.ocgg_identity,
+        plan_hash=body.plan_hash or shared.plan_hash,
+        policy_version=d.policy_version,
+        outcome=d.outcome.value,
+        uato_decision=uato_res.decision,
+    )
     approval_extras: dict = {}
     if d.outcome.value == "BLOCK" and "PROD_DEPLOY_NO_APPROVAL" in d.reason_codes:
         uato_evaluated_at = datetime.utcnow()
@@ -189,6 +197,7 @@ async def evaluate_gate(
         approver_id=d.approver_id,
         execution_token=d.execution_token,
         trace_id=trace_id,
+        governance_evaluation_id=governance_evaluation_id,
         uato_decision="PASS",
         uato_reason_codes=list(uato_res.reason_codes),
         uato_skipped_gate=False,

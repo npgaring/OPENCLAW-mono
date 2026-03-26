@@ -13,6 +13,7 @@ from sqlmodel import select
 
 from app.core.errors import ErrorCodes
 from app.core.identity import IDENTITY_DOMAIN_MAP
+from app.core.security import hash_payload
 from app.evaluation_frame import build_shared_governable_state_for_task, run_evaluation_frame
 from app.evaluation_frame.response_mapper import to_evaluation_frame_response
 from app.evaluation_frame.state import FrameStatus
@@ -33,6 +34,27 @@ from app.uato.normalize import minimal_plan_admissibility_issues
 from app.uato.plan_bridge import integration_plan_preview
 from app.uato.types import UATO_DECISION_VERSION
 from app.invariant_e import build_execution_envelope, evaluate_invariant_e, to_trace_record as ie_to_trace
+
+
+def make_governance_evaluation_id(
+    *,
+    trace_id: str,
+    ocgg_identity: str,
+    plan_hash: str,
+    policy_version: str,
+    outcome: str,
+    uato_decision: str,
+) -> str:
+    return hash_payload(
+        {
+            "trace_id": trace_id,
+            "ocgg_identity": ocgg_identity,
+            "plan_hash": plan_hash,
+            "policy_version": policy_version,
+            "outcome": outcome,
+            "uato_decision": uato_decision,
+        }
+    )
 
 
 def _task_submit_response(
@@ -346,6 +368,7 @@ async def run_task_submission(
     spec_pre = body.model_dump(mode="python")
     spec_pre.pop("trace_id", None)
     spec_pre.pop("uato", None)
+    spec_pre.pop("governance_evaluation_id", None)
     if minimal_plan_admissibility_issues(spec_pre):
         if reuse_task_id:
             raise HTTPException(
@@ -661,6 +684,25 @@ async def run_task_submission(
     plan_json = evaluation.plan_json
     spec_hash = evaluation.spec_hash
     plan_hash = evaluation.plan_hash
+    governance_evaluation_id = make_governance_evaluation_id(
+        trace_id=trace_id,
+        ocgg_identity=body.ocgg_identity,
+        plan_hash=body.plan_hash,
+        policy_version=decision.policy_version,
+        outcome=decision.outcome.value,
+        uato_decision=uato_res.decision,
+    )
+    governance_continuity_verified = body.governance_evaluation_id is not None
+    if body.governance_evaluation_id and body.governance_evaluation_id != governance_evaluation_id:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "code": "GOVERNANCE_CONTINUITY_MISMATCH",
+                "message": "governance_evaluation_id does not match this frame/governance evaluation.",
+                "provided": body.governance_evaluation_id,
+                "expected": governance_evaluation_id,
+            },
+        )
 
     if (
         not reuse_task_id
@@ -686,6 +728,8 @@ async def run_task_submission(
             trace_id=trace_id,
             gate_outcome=decision.outcome.value,
             governance_outcome=decision.outcome.value,
+            governance_evaluation_id=governance_evaluation_id,
+            governance_continuity_verified=governance_continuity_verified,
             reason_codes=decision.reason_codes,
             uato_decision=uato_res.decision,
             uato_reason_codes=list(uato_res.reason_codes),
@@ -821,6 +865,8 @@ async def run_task_submission(
             trace_id=trace_id,
             gate_outcome=decision.outcome.value,
             governance_outcome=decision.outcome.value,
+            governance_evaluation_id=governance_evaluation_id,
+            governance_continuity_verified=governance_continuity_verified,
             reason_codes=decision.reason_codes,
             uato_decision=uato_res.decision,
             uato_reason_codes=list(uato_res.reason_codes),
@@ -890,6 +936,8 @@ async def run_task_submission(
                 execution_denied=True,
             ),
             governance_outcome=decision.outcome.value,
+            governance_evaluation_id=governance_evaluation_id,
+            governance_continuity_verified=governance_continuity_verified,
             reason_codes=task.reason_codes,
             uato_decision=uato_res.decision,
             uato_reason_codes=list(uato_res.reason_codes),
@@ -922,6 +970,8 @@ async def run_task_submission(
             trace_id=trace_id,
             gate_outcome="BLOCK",
             governance_outcome="PASS",
+            governance_evaluation_id=governance_evaluation_id,
+            governance_continuity_verified=governance_continuity_verified,
             reason_codes=["EXECUTION_TOKEN_INVALID"],
             uato_decision=uato_res.decision,
             uato_reason_codes=list(uato_res.reason_codes),
@@ -941,6 +991,8 @@ async def run_task_submission(
             trace_id=trace_id,
             gate_outcome="BLOCK",
             governance_outcome="PASS",
+            governance_evaluation_id=governance_evaluation_id,
+            governance_continuity_verified=governance_continuity_verified,
             reason_codes=["RE_EVALUATION_REQUIRED"],
             uato_decision=uato_res.decision,
             uato_reason_codes=list(uato_res.reason_codes),
@@ -961,6 +1013,8 @@ async def run_task_submission(
             trace_id=trace_id,
             gate_outcome="BLOCK",
             governance_outcome="PASS",
+            governance_evaluation_id=governance_evaluation_id,
+            governance_continuity_verified=governance_continuity_verified,
             reason_codes=["TOKEN_ALREADY_USED"],
             uato_decision=uato_res.decision,
             uato_reason_codes=list(uato_res.reason_codes),
@@ -985,6 +1039,8 @@ async def run_task_submission(
             trace_id=trace_id,
             gate_outcome="BLOCK",
             governance_outcome="PASS",
+            governance_evaluation_id=governance_evaluation_id,
+            governance_continuity_verified=governance_continuity_verified,
             reason_codes=["TOKEN_ALREADY_USED"],
             uato_decision=uato_res.decision,
             uato_reason_codes=list(uato_res.reason_codes),
@@ -1021,6 +1077,8 @@ async def run_task_submission(
             execution_response=e.response,
             gate_outcome="PASS",
             governance_outcome="PASS",
+            governance_evaluation_id=governance_evaluation_id,
+            governance_continuity_verified=governance_continuity_verified,
             reason_codes=reason_codes,
             uato_decision=uato_res.decision,
             uato_reason_codes=list(uato_res.reason_codes),
@@ -1046,6 +1104,8 @@ async def run_task_submission(
         execution_response=result,
         gate_outcome="PASS",
         governance_outcome="PASS",
+        governance_evaluation_id=governance_evaluation_id,
+        governance_continuity_verified=governance_continuity_verified,
         reason_codes=[],
         uato_decision=uato_res.decision,
         uato_reason_codes=list(uato_res.reason_codes),
