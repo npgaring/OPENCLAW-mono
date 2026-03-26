@@ -14,7 +14,7 @@ from contextlib import asynccontextmanager
 from fastapi import Depends, FastAPI
 from fastapi.openapi.utils import get_openapi
 
-from app.api import approvals, audit, gate, health, public, status, task
+from app.api import approvals, audit, evaluation_frame, gate, health, public, status, task
 from app.api import openai_flow
 from app.core.config import settings
 from app.core.auth import require_integration_auth
@@ -117,6 +117,12 @@ if OPENCLAW_ROOT_PATH:
 app.include_router(task.router, tags=["task"], dependencies=[Depends(require_integration_auth)])
 app.include_router(approvals.router, tags=["approvals"], dependencies=[Depends(require_integration_auth)])
 app.include_router(audit.router, tags=["audit"], dependencies=[Depends(require_integration_auth)])
+app.include_router(
+    evaluation_frame.router,
+    prefix="/evaluation-frame",
+    tags=["evaluation-frame"],
+    dependencies=[Depends(require_integration_auth)],
+)
 app.include_router(gate.router, prefix="/gate", tags=["gate"], dependencies=[Depends(require_integration_auth)])
 app.include_router(status.router, tags=["status"], dependencies=[Depends(require_integration_auth)])
 if settings.openai_flow_enabled:
