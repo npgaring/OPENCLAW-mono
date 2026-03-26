@@ -9,7 +9,7 @@ from app.core.config import settings
 from app.core.identity import IDENTITY_DOMAIN_MAP
 from app.core.security import hash_payload
 from app.invariant_e.build_envelope import build_execution_envelope
-from app.invariant_e.evaluator import evaluate_invariant_e
+from app.invariant_e.evaluator import evaluate_invariant_e, evaluate_invariant_e_for_frame
 from app.invariant_e.reason_codes import (
     IE_ALLOWED,
     IE_DENIED_BUDGET_REQUIRED,
@@ -154,6 +154,44 @@ def test_build_envelope_aligns_with_gate_hashes():
     )
     r = evaluate_invariant_e(env)
     assert r.decision == "EXECUTION_ALLOWED"
+
+
+def test_pass_gov_fail_invariant_e_scenario_aligns_pending_frame_with_dispatch():
+    """validation.dispatch_boundary_scenario must shape envelopes for PENDING (frame) like PASS (task)."""
+    domain = IDENTITY_DOMAIN_MAP["W-OCGG"]
+    ops = [{"type": "build", "op_id": "1", "target": "repo", "inputs": {}, "outputs": {}}]
+    ph = hash_payload({"domain": domain, "operations": ops})
+    spec = {"ocgg_identity": "W-OCGG", "plan_hash": ph, "operations": ops}
+    sh = hash_payload(spec)
+    vc = {"dispatch_boundary_scenario": "PASS_GOV_FAIL_INVARIANT_E_CAPABILITY"}
+    trace = "550e8400-e29b-41d4-a716-446655440001"
+    env_pending = build_execution_envelope(
+        spec=spec,
+        ocgg_identity="W-OCGG",
+        trace_id=trace,
+        task_id=None,
+        governance_outcome="PENDING",
+        plan_hash=ph,
+        spec_hash=sh,
+        validation_controls=vc,
+    )
+    r_frame = evaluate_invariant_e_for_frame(env_pending)
+    assert r_frame.decision == "EXECUTION_DENIED"
+    assert IE_DENIED_CAPABILITY_NOT_ALLOWED in r_frame.reason_codes
+
+    env_pass = build_execution_envelope(
+        spec=spec,
+        ocgg_identity="W-OCGG",
+        trace_id=trace,
+        task_id=None,
+        governance_outcome="PASS",
+        plan_hash=ph,
+        spec_hash=sh,
+        validation_controls=vc,
+    )
+    r_dispatch = evaluate_invariant_e(env_pass)
+    assert r_dispatch.decision == "EXECUTION_DENIED"
+    assert r_dispatch.reason_codes == r_frame.reason_codes
 
 
 def test_no_contradictory_allowed_and_blocked():

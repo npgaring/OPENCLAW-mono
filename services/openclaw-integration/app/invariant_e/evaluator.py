@@ -65,7 +65,9 @@ def evaluate_invariant_e_for_frame(envelope: ExecutionEnvelope) -> InvariantERes
     Production deploy human approval is enforced by GateEngine (PROD_DEPLOY_NO_APPROVAL) and again at dispatch;
     the frame omits prod approver fields so governance can still evaluate and materialize approvals.
 
-    Use governance_outcome=\"PENDING\" (or any non-PASS sentinel) on the envelope; this entrypoint ignores it.
+    Use governance_outcome=\"PENDING\" (or any non-PASS sentinel) on the envelope; this entrypoint ignores it
+    for the governance check, but ``build_execution_envelope`` still applies ``validation.dispatch_boundary_scenario``
+    for PENDING so the frame matches post-PASS dispatch.
     """
     e = normalize_envelope(envelope)
     return _invariant_e_admission_core(e, e.trace_id, enforce_prod_deploy_approver=False)

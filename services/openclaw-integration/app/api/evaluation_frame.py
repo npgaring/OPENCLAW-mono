@@ -29,6 +29,9 @@ async def evaluate_frame(
     - does not call GateEngine
     - does not create tasks or approvals
     - does not mint tokens or dispatch execution
+
+    Invariant-E on this response is authoritative for the shared frame (including
+    ``validation.dispatch_boundary_scenario`` deterministic slices); see docs/adr/002-invariant-e-dispatch-boundary-scenario-authority.md.
     """
     if not body.ocgg_identity or body.ocgg_identity not in IDENTITY_DOMAIN_MAP:
         raise HTTPException(

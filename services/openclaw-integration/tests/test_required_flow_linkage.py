@@ -94,27 +94,36 @@ def test_validation_control_pass_governance_fail_dispatch_boundary(auth_headers)
         "trace_id": trace_id,
         "validation": {"dispatch_boundary_scenario": "PASS_GOV_FAIL_INVARIANT_E_CAPABILITY"},
     }
+
+    def _assert_invariant_e_denied_aligned(payload: dict):
+        assert payload.get("frame_status") == "BLOCKED"
+        ie = payload.get("invariant_e_result") or {}
+        assert ie.get("decision") == "EXECUTION_DENIED"
+        assert "IE_DENIED_CAPABILITY_NOT_ALLOWED" in (ie.get("reason_codes") or [])
+
+    preview = client.post("/evaluation-frame/evaluate", json=spec, headers=auth_headers)
+    assert preview.status_code == 200, preview.text
+    _assert_invariant_e_denied_aligned(preview.json())
+
     gate = client.post("/gate/evaluate", json=spec, headers=auth_headers)
     assert gate.status_code == 200, gate.text
     gd = gate.json()
-    assert gd.get("outcome") == "PASS"
-    assert gd.get("uato_decision") == "PASS"
-    gid = gd.get("governance_evaluation_id")
-    assert gid
+    # Frame blocks before GateEngine; governance is not evaluated for this request.
+    assert gd.get("outcome") == "BLOCK"
+    assert gd.get("uato_skipped_gate") is True
+    assert gd.get("governance_evaluation_id") is None
+    _assert_invariant_e_denied_aligned(gd.get("evaluation_frame") or {})
 
     with patch("app.services.task_submission.OpenClawClient") as mock_client_class:
         mock_client_class.return_value.execute = AsyncMock(
             return_value={"execution_id": "should-not-run", "status": "completed"}
         )
-        task = client.post(
-            "/task",
-            json={**spec, "governance_evaluation_id": gid},
-            headers=auth_headers,
-        )
+        task = client.post("/task", json=spec, headers=auth_headers)
     assert task.status_code == 200, task.text
     td = task.json()
-    assert td.get("governance_outcome") == "PASS"
+    assert td.get("gate_outcome") == "BLOCK"
     assert td.get("invariant_e_decision") == "EXECUTION_DENIED"
+    assert "IE_DENIED_CAPABILITY_NOT_ALLOWED" in (td.get("invariant_e_reason_codes") or [])
     assert td.get("dispatch_blocked") is True
     assert td.get("status") == "invariant_e_denied"
-    mock_client_class.return_value.execute.assert_not_called()
+    _assert_invariant_e_denied_aligned(td.get("evaluation_frame") or {})

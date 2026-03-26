@@ -30,7 +30,14 @@ class ValidationControls(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     uato_scenario: Optional[Literal["PASS_C_FAIL_UATO_BLOCK"]] = None
-    dispatch_boundary_scenario: Optional[Literal["PASS_GOV_FAIL_INVARIANT_E_CAPABILITY"]] = None
+    dispatch_boundary_scenario: Optional[Literal["PASS_GOV_FAIL_INVARIANT_E_CAPABILITY"]] = Field(
+        default=None,
+        description=(
+            "Deterministic slice: Invariant-E denies on capability while the rest of the frame is normal. "
+            "Authoritative outcome is on POST /evaluation-frame/evaluate (and the embedded evaluation_frame "
+            "on gate/task). See docs/adr/002-invariant-e-dispatch-boundary-scenario-authority.md."
+        ),
+    )
     approval_required_scenario: Optional[Literal["GOVERNANCE_PROD_NO_APPROVAL_DEMO"]] = None
 
 

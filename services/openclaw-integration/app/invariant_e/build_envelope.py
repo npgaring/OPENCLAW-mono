@@ -57,9 +57,14 @@ def build_execution_envelope(
     dispatch_scenario = getattr(validation_controls, "dispatch_boundary_scenario", None)
     if isinstance(validation_controls, dict):
         dispatch_scenario = validation_controls.get("dispatch_boundary_scenario", dispatch_scenario)
-    if governance_outcome == "PASS" and dispatch_scenario == "PASS_GOV_FAIL_INVARIANT_E_CAPABILITY":
-        # Bounded deterministic scenario for dispatch-boundary validation:
-        # keep requested capabilities from real operations, but no allowed capabilities at dispatch.
+    # ``PENDING`` is the governance sentinel used by the shared evaluation frame (pre–GateEngine); ``PASS`` is
+    # post-governance dispatch. The scenario name assumes governance would PASS; Invariant-E must match at both
+    # POST /evaluation-frame/evaluate and POST /task so clients get one authoritative preview.
+    if (
+        dispatch_scenario == "PASS_GOV_FAIL_INVARIANT_E_CAPABILITY"
+        and governance_outcome in ("PASS", "PENDING")
+    ):
+        # Bounded deterministic scenario: real requested capabilities, empty allowed set → capability denial.
         allow_caps = tuple()
 
     dep = spec.get("deployment_target")
