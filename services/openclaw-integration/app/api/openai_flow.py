@@ -125,6 +125,64 @@ async def openai_plan(
         )
 
 
+@router.post("/openai/plan-malformed", response_model=OpenAIPlanOutput)
+async def openai_plan_malformed(
+    body: OpenAIPlanRequest,
+    response: Response,
+    session: AsyncSession = Depends(get_session),
+):
+    """Intentional failure-test planner output: schema-valid plan that should fail adapter/substrate checks."""
+    trace_id = normalize_trace_id(body.trace_id)
+    request_payload = body.model_dump(mode="python")
+    request_payload["trace_id"] = trace_id
+    request_hash = hash_payload(request_payload)
+    output = OpenAIPlanOutput.model_validate(
+        {
+            "candidate_plan": {
+                "steps": [
+                    {
+                        "id": "s1",
+                        "type": "write_config",
+                        "action": "write_config",
+                        "target": "web/app",
+                        # Dependency on a later step is schema-valid but fails Invariant-C temporal consistency.
+                        "inputs": {"path": "app/config.json", "content": "{}", "depends_on": ["s2"]},
+                    },
+                    {
+                        "id": "s2",
+                        "type": "build",
+                        "action": "build",
+                        "target": "web/app",
+                        "inputs": {"depends_on": [], "command": None},
+                    },
+                ],
+                "metadata": {"requiresApproval": False, "riskLevel": "low"},
+            }
+        }
+    )
+    raw_response = output.model_dump(mode="python")
+    candidate_plan_hash = hash_payload(output.candidate_plan.model_dump(mode="python"))
+    session.add(
+        OpenAIVesselEvent(
+            trace_id=trace_id,
+            ocgg_identity=body.ocgg_identity,
+            intent=body.intent,
+            request_hash=request_hash,
+            candidate_plan_hash=candidate_plan_hash,
+            model=settings.openai_plan_model,
+            request_payload=request_payload,
+            raw_response=raw_response,
+            schema_valid=True,
+            outcome="PASS",
+            reason_codes=["OPENAI_ADAPTER_FAILURE_TEST_PLAN"],
+        )
+    )
+    await session.commit()
+    response.headers["X-Trace-Id"] = trace_id
+    response.headers["X-Candidate-Plan-Hash"] = candidate_plan_hash
+    return output
+
+
 @router.post("/openai/plan-to-substrate", response_model=AdapterToSubstrateResponse)
 async def openai_plan_to_substrate(
     body: OpenAIPlanRequest,

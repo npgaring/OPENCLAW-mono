@@ -78,6 +78,68 @@ def test_openai_plan_success_and_event_persisted(client, auth_headers):
     assert any(r.outcome == "PASS" and r.schema_valid is True for r in rows)
 
 
+def test_openai_plan_malformed_returns_valid_openai_plan_and_persists_failure_test_event(client, auth_headers):
+    resp = client.post(
+        "/openai/plan-malformed",
+        json={
+            "ocgg_identity": "W-OCGG",
+            "intent": "web-build",
+            "deployment_target": "preview",
+            "objective": "Generate a deployment plan",
+        },
+        headers=auth_headers,
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert list(body.keys()) == ["candidate_plan"]
+    assert resp.headers.get("X-Trace-Id")
+    assert resp.headers.get("X-Candidate-Plan-Hash")
+
+    parsed = OpenAIPlanOutput.model_validate(body)
+    assert parsed.candidate_plan.steps[0].inputs.depends_on == ["s2"]
+
+    rows = _fetch_rows(OpenAIVesselEvent)
+    assert any(
+        r.outcome == "PASS"
+        and r.schema_valid is True
+        and "OPENAI_ADAPTER_FAILURE_TEST_PLAN" in (r.reason_codes or [])
+        for r in rows
+    )
+
+
+def test_openai_plan_malformed_output_fails_adapter_substrate_chain(client, auth_headers):
+    plan_resp = client.post(
+        "/openai/plan-malformed",
+        json={
+            "ocgg_identity": "W-OCGG",
+            "intent": "web-build",
+            "deployment_target": "preview",
+            "objective": "Generate a deployment plan",
+        },
+        headers=auth_headers,
+    )
+    assert plan_resp.status_code == 200, plan_resp.text
+    candidate_plan = plan_resp.json()["candidate_plan"]
+
+    adapter_resp = client.post(
+        "/adapter/to-substrate",
+        json={
+            "ocgg_identity": "W-OCGG",
+            "intent": "web-build",
+            "deployment_target": "preview",
+            "objective": "Generate a deployment plan",
+            "candidate_plan": candidate_plan,
+        },
+        headers=auth_headers,
+    )
+    assert adapter_resp.status_code == 422, adapter_resp.text
+    detail = adapter_resp.json()["detail"]
+    if isinstance(detail, list):
+        detail = detail[0] if detail else {}
+    assert detail.get("code") == "EVALUATION_FRAME_BLOCK"
+    assert detail.get("frame_status") == "BLOCKED"
+
+
 def test_openai_plan_upstream_error_includes_upstream_summary(client, auth_headers):
     from app.services.openai_vessel import OpenAIVesselUpstreamError
 
