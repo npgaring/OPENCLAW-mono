@@ -1,4 +1,4 @@
-"""OpenAI Vessel + Invariant-C + Substrate Adapter endpoints."""
+"""OpenAI Vessel + unified evaluation frame + Substrate Adapter endpoints."""
 from __future__ import annotations
 
 import json
@@ -38,6 +38,23 @@ from app.services.openai_vessel import (
 )
 
 router = APIRouter()
+
+
+def _derive_uato_hints_from_candidate(candidate_plan: CandidatePlan) -> dict[str, str]:
+    """
+    Adapter-owned UATO defaults from planner metadata.
+
+    - low risk -> HIGH authority (normal pass path)
+    - medium/high risk or requiresApproval -> LOW authority (approval-required path)
+    """
+    risk = candidate_plan.metadata.riskLevel.value
+    authority = "LOW" if candidate_plan.metadata.requiresApproval or risk in ("medium", "high") else "HIGH"
+    return {
+        "trust_level": "HIGH",
+        "authority_level": authority,
+        "trust_source": "OPENAI_VESSEL",
+        "request_source": "OPENAI_VESSEL",
+    }
 
 
 @router.post("/openai/plan", response_model=OpenAIPlanOutput)
@@ -235,7 +252,6 @@ async def _adapt_candidate_to_substrate(
 ) -> AdapterToSubstrateResponse:
     candidate_payload = candidate_plan.model_dump(mode="python")
     candidate_plan_hash = hash_payload(candidate_payload)
-
     shared = build_shared_governable_state_from_adapter_candidate(
         trace_id=trace_id,
         ocgg_identity=ocgg_identity,
@@ -268,30 +284,6 @@ async def _adapt_candidate_to_substrate(
             decision_version=ic_res.decision_version,
         )
     )
-    if ic_res.decision != "PASS":
-        session.add(
-            SubstrateAdapterEvent(
-                trace_id=trace_id,
-                ocgg_identity=ocgg_identity,
-                intent=intent,
-                candidate_plan_hash=candidate_plan_hash,
-                integration_plan_hash=None,
-                outcome="BLOCK",
-                reason_codes=list(ic_res.reason_codes),
-                payload={"evaluation_phase": "frame"},
-            )
-        )
-        await session.commit()
-        raise HTTPException(
-            status_code=422,
-            detail={
-                "code": "INVARIANT_C_BLOCK",
-                "reason_codes": list(ic_res.reason_codes),
-                "trace_id": trace_id,
-                "evaluation_frame": jsonable_encoder(frame_response),
-            },
-        )
-
     if frame.frame_status != FrameStatus.PASS:
         session.add(
             SubstrateAdapterEvent(
@@ -405,6 +397,7 @@ async def _adapt_candidate_to_substrate(
         acceptance_criteria=acceptance_criteria,
         approval_reference=approval_reference,
         approver_id=approver_id,
+        uato=_derive_uato_hints_from_candidate(candidate_plan),
         trace_id=trace_id,
         evaluation_frame=frame_response,
     )

@@ -1,4 +1,4 @@
-"""Integration tests for OpenAI Vessel + Invariant-C + Substrate adapter routes."""
+"""Integration tests for OpenAI Vessel + evaluation frame + substrate adapter routes."""
 import asyncio
 from unittest.mock import AsyncMock, patch
 
@@ -24,7 +24,7 @@ def client():
     return TestClient(app)
 
 
-def _candidate_plan(requires_approval: bool = False):
+def _candidate_plan(requires_approval: bool = False, risk_level: str = "low"):
     return {
         "steps": [
             {
@@ -42,7 +42,7 @@ def _candidate_plan(requires_approval: bool = False):
                 "inputs": {"depends_on": ["s1"]},
             },
         ],
-        "metadata": {"requiresApproval": requires_approval, "riskLevel": "low"},
+        "metadata": {"requiresApproval": requires_approval, "riskLevel": risk_level},
     }
 
 
@@ -187,6 +187,21 @@ def test_adapter_to_substrate_success_hash_matches_governance_canonical(client, 
     assert any(r.outcome == "PASS" and r.integration_plan_hash == expected for r in adapter_rows)
 
 
+def test_adapter_response_includes_system_derived_uato_hints(client, auth_headers):
+    body = {
+        "ocgg_identity": "W-OCGG",
+        "intent": "web-build",
+        "deployment_target": "preview",
+        "objective": "Build and verify a web release candidate",
+        "candidate_plan": _candidate_plan(requires_approval=False, risk_level="medium"),
+    }
+    resp = client.post("/adapter/to-substrate", json=body, headers=auth_headers)
+    assert resp.status_code == 200, resp.text
+    data = resp.json()
+    assert (data.get("uato") or {}).get("trust_level") == "HIGH"
+    assert (data.get("uato") or {}).get("authority_level") == "LOW"
+
+
 def test_adapter_blocks_when_requires_approval_without_reference(client, auth_headers):
     body = {
         "ocgg_identity": "W-OCGG",
@@ -203,7 +218,7 @@ def test_adapter_blocks_when_requires_approval_without_reference(client, auth_he
     assert any(r.outcome == "BLOCK" and "ADAPTER_METADATA_REQUIRES_APPROVAL" in (r.reason_codes or []) for r in adapter_rows)
 
 
-def test_adapter_blocks_on_invariant_c_failure(client, auth_headers):
+def test_adapter_blocks_on_evaluation_frame_when_invariant_c_fails(client, auth_headers):
     body = {
         "ocgg_identity": "W-OCGG",
         "intent": "web-build",
@@ -235,7 +250,8 @@ def test_adapter_blocks_on_invariant_c_failure(client, auth_headers):
     detail = data["detail"]
     if isinstance(detail, list):
         detail = detail[0] if detail else {}
-    assert detail.get("code") == "INVARIANT_C_BLOCK"
+    assert detail.get("code") == "EVALUATION_FRAME_BLOCK"
+    assert detail.get("frame_status") == "BLOCKED"
     inv_rows = _fetch_rows(InvariantCDecisionRecord)
     assert any(r.decision == "BLOCK" for r in inv_rows)
 
@@ -259,6 +275,7 @@ def test_adapter_response_is_directly_compatible_with_task_and_gate_models(clien
             "deployment_target": payload.get("deployment_target"),
             "goal": payload.get("goal"),
             "context": payload.get("context"),
+            "uato": payload.get("uato"),
             "trace_id": payload.get("trace_id"),
         }
     )
@@ -267,6 +284,7 @@ def test_adapter_response_is_directly_compatible_with_task_and_gate_models(clien
             "ocgg_identity": payload["ocgg_identity"],
             "plan_hash": payload["governance_plan_hash"],
             "operations": payload["operations"],
+            "uato": payload.get("uato"),
             "trace_id": payload.get("trace_id"),
         }
     )

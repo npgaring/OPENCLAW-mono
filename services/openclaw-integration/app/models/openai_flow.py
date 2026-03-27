@@ -7,6 +7,7 @@ from typing import Annotated, Any, Literal, Optional, Union
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from app.models.evaluation_frame import EvaluationFrameResponse
+from app.models.task import UatoHints
 
 
 class StepType(str, Enum):
@@ -220,6 +221,10 @@ class AdapterToSubstrateResponse(BaseModel):
     acceptance_criteria: Optional[list[str]] = None
     approval_reference: Optional[str] = None
     approver_id: Optional[str] = None
+    uato: Optional[UatoHints] = Field(
+        default=None,
+        description="System-derived UATO trust/authority hints from planner/adapter metadata for downstream frame parity.",
+    )
     trace_id: str
     evaluation_frame: Optional[EvaluationFrameResponse] = Field(
         default=None,
