@@ -4,10 +4,10 @@ from __future__ import annotations
 import json
 import hashlib
 import math
-from typing import Any
+from typing import Any, Union
 
 from fastapi import APIRouter, Depends, HTTPException, Response
-from fastapi.encoders import jsonable_encoder
+from fastapi.responses import JSONResponse
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -308,7 +308,7 @@ async def _adapt_candidate_to_substrate(
     constraints: dict[str, Any] | None,
     approval_reference: str | None,
     approver_id: str | None,
-) -> AdapterToSubstrateResponse:
+) -> Union[AdapterToSubstrateResponse, JSONResponse]:
     candidate_payload = candidate_plan.model_dump(mode="python")
     candidate_plan_hash = hash_payload(candidate_payload)
 
@@ -399,35 +399,6 @@ async def _adapt_candidate_to_substrate(
             decision_version=ic_res.decision_version,
         )
     )
-    if frame.frame_status != FrameStatus.PASS:
-        session.add(
-            SubstrateAdapterEvent(
-                trace_id=trace_id,
-                ocgg_identity=ocgg_identity,
-                intent=intent,
-                candidate_plan_hash=candidate_plan_hash,
-                integration_plan_hash=None,
-                outcome="BLOCK",
-                reason_codes=list(frame.reason_codes),
-                payload={
-                    "frame_status": frame.frame_status.value,
-                    "shared_state_hash": frame.shared_state_hash,
-                    "uato_decision": frame.uato_result.decision,
-                    "invariant_e_decision": frame.invariant_e_result.decision,
-                },
-            )
-        )
-        await session.commit()
-        raise HTTPException(
-            status_code=422,
-            detail={
-                "code": "EVALUATION_FRAME_BLOCK",
-                "reason_codes": list(frame.reason_codes),
-                "trace_id": trace_id,
-                "frame_status": frame.frame_status.value,
-                "evaluation_frame": jsonable_encoder(frame_response),
-            },
-        )
 
     operations = list(shared.spec_for_gate.get("operations") or [])
     domain = shared.domain
@@ -442,7 +413,7 @@ async def _adapt_candidate_to_substrate(
             "rollback": rollback,
         }
     )
-    response = AdapterToSubstrateResponse(
+    substrate_response = AdapterToSubstrateResponse(
         identity=ocgg_identity,
         ocgg_identity=ocgg_identity,
         domain=domain,
@@ -462,6 +433,37 @@ async def _adapt_candidate_to_substrate(
         trace_id=trace_id,
         evaluation_frame=frame_response,
     )
+
+    if frame.frame_status != FrameStatus.PASS:
+        session.add(
+            SubstrateAdapterEvent(
+                trace_id=trace_id,
+                ocgg_identity=ocgg_identity,
+                intent=intent,
+                candidate_plan_hash=candidate_plan_hash,
+                integration_plan_hash=governance_plan_hash,
+                outcome="BLOCK",
+                reason_codes=list(frame.reason_codes),
+                payload={
+                    "frame_status": frame.frame_status.value,
+                    "shared_state_hash": frame.shared_state_hash,
+                    "uato_decision": frame.uato_result.decision,
+                    "invariant_e_decision": frame.invariant_e_result.decision,
+                    "governance_plan_hash": governance_plan_hash,
+                },
+            )
+        )
+        await session.commit()
+        detail: dict[str, Any] = substrate_response.model_dump(mode="json")
+        detail.update(
+            {
+                "code": "EVALUATION_FRAME_BLOCK",
+                "reason_codes": list(frame.reason_codes),
+                "frame_status": frame.frame_status.value,
+            }
+        )
+        return JSONResponse(status_code=422, content={"detail": detail})
+
     session.add(
         SubstrateAdapterEvent(
             trace_id=trace_id,
@@ -471,11 +473,11 @@ async def _adapt_candidate_to_substrate(
             integration_plan_hash=governance_plan_hash,
             outcome="PASS",
             reason_codes=[],
-            payload=response.model_dump(mode="python"),
+            payload=substrate_response.model_dump(mode="python"),
         )
     )
     await session.commit()
-    return response
+    return substrate_response
 
 
 async def resume_adapter_from_approval(

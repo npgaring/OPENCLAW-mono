@@ -138,6 +138,12 @@ def test_openai_plan_malformed_output_fails_adapter_substrate_chain(client, auth
         detail = detail[0] if detail else {}
     assert detail.get("code") == "EVALUATION_FRAME_BLOCK"
     assert detail.get("frame_status") == "BLOCKED"
+    assert detail.get("ocgg_identity") == "W-OCGG"
+    assert detail.get("deployment_target") == "preview"
+    assert isinstance(detail.get("operations"), list) and len(detail["operations"]) >= 1
+    expected_hash = hash_payload({"domain": detail["domain"], "operations": detail["operations"]})
+    assert detail.get("governance_plan_hash") == expected_hash
+    assert detail.get("integration_plan_hash") == expected_hash
 
 
 def test_openai_plan_upstream_error_includes_upstream_summary(client, auth_headers):
@@ -314,8 +320,50 @@ def test_adapter_blocks_on_evaluation_frame_when_invariant_c_fails(client, auth_
         detail = detail[0] if detail else {}
     assert detail.get("code") == "EVALUATION_FRAME_BLOCK"
     assert detail.get("frame_status") == "BLOCKED"
+    assert detail.get("ocgg_identity") == "W-OCGG"
+    assert isinstance(detail.get("operations"), list) and len(detail["operations"]) >= 1
+    expected_hash = hash_payload({"domain": detail["domain"], "operations": detail["operations"]})
+    assert detail.get("governance_plan_hash") == expected_hash
+    assert detail.get("integration_plan_hash") == expected_hash
     inv_rows = _fetch_rows(InvariantCDecisionRecord)
     assert any(r.decision == "BLOCK" for r in inv_rows)
+
+
+def test_adapter_prod_deploy_no_approval_block_includes_substrate_for_gate(client, auth_headers):
+    """422 APPROVAL_REQUIRED still returns full substrate so clients can POST /gate/evaluate."""
+    body = {
+        "ocgg_identity": "W-OCGG",
+        "intent": "web-build",
+        "deployment_target": "production",
+        "objective": "Deploy to production",
+        "candidate_plan": _candidate_plan(requires_approval=False),
+    }
+    resp = client.post("/adapter/to-substrate", json=body, headers=auth_headers)
+    assert resp.status_code == 422, resp.text
+    detail = resp.json()["detail"]
+    if isinstance(detail, list):
+        detail = detail[0] if detail else {}
+    assert detail["code"] == "EVALUATION_FRAME_BLOCK"
+    assert detail["frame_status"] == "APPROVAL_REQUIRED"
+    assert "PROD_DEPLOY_NO_APPROVAL" in detail["reason_codes"]
+    assert detail["ocgg_identity"] == "W-OCGG"
+    assert detail["deployment_target"] == "production"
+    assert isinstance(detail["operations"], list) and len(detail["operations"]) >= 1
+    expected = hash_payload({"domain": detail["domain"], "operations": detail["operations"]})
+    assert detail["governance_plan_hash"] == expected
+    assert detail["integration_plan_hash"] == expected
+    GateEvaluateRequest.model_validate(
+        {
+            "ocgg_identity": detail["ocgg_identity"],
+            "plan_hash": detail["governance_plan_hash"],
+            "operations": detail["operations"],
+            "deployment_target": detail.get("deployment_target"),
+            "goal": detail.get("goal"),
+            "context": detail.get("context"),
+            "uato": detail.get("uato"),
+            "trace_id": detail.get("trace_id"),
+        }
+    )
 
 
 def test_adapter_response_is_directly_compatible_with_task_and_gate_models(client, auth_headers):
