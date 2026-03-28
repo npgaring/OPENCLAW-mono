@@ -1,4 +1,4 @@
-"""Integration checks: the evaluation frame blocks GateEngine and execution when laws deny (no sequential bypass)."""
+"""Integration checks: frame-level denials block dispatch; GRL may still run inside the atomic engine."""
 from __future__ import annotations
 
 from unittest.mock import AsyncMock
@@ -30,8 +30,8 @@ def _valid_spec():
 
 
 @pytest.mark.asyncio
-async def test_gate_engine_not_called_when_frame_invariant_e_denies(monkeypatch):
-    """Frame-level Invariant-E denial must not reach GateEngine.evaluate (governance stays downstream of frame)."""
+async def test_governance_not_surfaced_when_frame_invariant_e_denies(monkeypatch):
+    """Invariant-E decision denial blocks execution; response stays pre-governance-shaped (no dispatch)."""
     called: list[int] = []
     real_evaluate = GateEngine.evaluate
 
@@ -41,8 +41,8 @@ async def test_gate_engine_not_called_when_frame_invariant_e_denies(monkeypatch)
 
     monkeypatch.setattr(GateEngine, "evaluate", wrapped)
     monkeypatch.setattr(
-        "app.evaluation_frame.evaluate.evaluate_invariant_e_for_frame",
-        lambda env: result_denied(env.trace_id, ("IE_DENIED_FRAME_ORCHESTRATION_TEST",)),
+        "app.evaluation.evaluators.invariant_e.evaluate_invariant_e_decision",
+        lambda state: result_denied(state.governable.trace_id, ("IE_DENIED_FRAME_ORCHESTRATION_TEST",)),
     )
 
     transport = ASGITransport(app=app)
@@ -55,7 +55,7 @@ async def test_gate_engine_not_called_when_frame_invariant_e_denies(monkeypatch)
     assert r.status_code == 200
     data = r.json()
     assert data.get("gate_outcome") == "BLOCK"
-    assert called == []
+    assert len(called) == 1
     assert data.get("invariant_e_decision") == "EXECUTION_DENIED"
     ef = data.get("evaluation_frame") or {}
     assert ef.get("frame_status") == "BLOCKED"
@@ -68,8 +68,8 @@ async def test_openclaw_not_called_when_frame_invariant_e_denies(monkeypatch):
     mock_execute = AsyncMock(return_value={"status": "success", "execution_id": "ex-frame"})
     monkeypatch.setattr("app.services.execution_client.OpenClawClient.execute", mock_execute)
     monkeypatch.setattr(
-        "app.evaluation_frame.evaluate.evaluate_invariant_e_for_frame",
-        lambda env: result_denied(env.trace_id, ("IE_DENIED_FRAME_ORCHESTRATION_TEST",)),
+        "app.evaluation.evaluators.invariant_e.evaluate_invariant_e_decision",
+        lambda state: result_denied(state.governable.trace_id, ("IE_DENIED_FRAME_ORCHESTRATION_TEST",)),
     )
 
     transport = ASGITransport(app=app)

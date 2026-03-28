@@ -17,6 +17,7 @@ from app.models import (
     UsedExecutionToken,
 )
 from app.models.approval_request import ApprovalRequest
+from app.models.evaluation_record import EvaluationRecord
 
 logger = logging.getLogger(__name__)
 
@@ -33,6 +34,7 @@ _MIGRATION_FILES = [
     "009_invariant_e_columns.sql",
     "010_governance_outcome_column.sql",
     "011_approval_workflow.sql",
+    "012_evaluation_records.sql",
 ]
 
 _init_lock = asyncio.Lock()

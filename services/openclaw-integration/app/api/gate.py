@@ -2,14 +2,16 @@
 from datetime import datetime
 
 from app.core.trace_id import normalize_trace_id
-from app.evaluation_frame import build_shared_governable_state_for_gate_payload, run_evaluation_frame
+from app.evaluation import build_evaluation_state_from_shared_governable, default_engine
+from app.evaluation.aggregator import composite_frame_from_atomic, defect_dicts_for_gate_stop, stop_reason_codes_for_api
+from app.evaluation.models import AtomicFinalDecision
+from app.evaluation_frame import build_shared_governable_state_for_gate_payload
 from app.evaluation_frame.response_mapper import to_evaluation_frame_response
-from app.evaluation_frame.state import FrameStatus
-from app.gate.engine import GateEngine
-from app.gate.models import GateDecisionResponse
+from app.gate.models import GateDecisionResponse, GateOutcome
 from app.gate.token import verify_execution_token
 from app.invariant_e import build_execution_envelope, to_trace_record as ie_to_trace
 from app.models import GateEvaluateRequest, TaskSubmitRequest, VerifyTokenRequest, VerifyTokenResponse
+from app.services.evaluation_persistence import persist_evaluation_record
 from app.services.task_submission import make_governance_evaluation_id, materialize_governance_prod_deploy_stop
 from app.uato import build_uato_input_from_spec, evaluate_uato, to_trace_record
 from app.uato.normalize import minimal_plan_admissibility_issues
@@ -104,6 +106,7 @@ async def evaluate_gate(
                 approval_required=uato_res_pf.decision == "REQUIRE_APPROVAL",
                 governance_reached=False,
                 dispatch_reached=False,
+                state_hash=None,
             ),
         )
 
@@ -118,7 +121,9 @@ async def evaluate_gate(
     except ValueError as e:
         raise HTTPException(status_code=422, detail={"code": ErrorCodes.INVALID_PAYLOAD, "message": str(e)})
 
-    frame = run_evaluation_frame(shared)
+    ev_state = build_evaluation_state_from_shared_governable(shared)
+    atomic = default_engine.evaluate(ev_state)
+    frame = composite_frame_from_atomic(atomic)
     uato_in = build_uato_input_from_spec(
         shared.spec_for_gate,
         ocgg_identity=body.ocgg_identity,
@@ -127,12 +132,19 @@ async def evaluate_gate(
         validation_controls=body.validation,
     )
     uato_res = frame.uato_result
-    if frame.frame_status != FrameStatus.PASS:
+    d = atomic.grl.decision
+    prod_deploy_materialize = (
+        atomic.final_decision == AtomicFinalDecision.REQUIRE_APPROVAL
+        and "GRL_PROD_DEPLOY" in atomic.approval_sources
+        and d.outcome == GateOutcome.BLOCK
+        and "PROD_DEPLOY_NO_APPROVAL" in d.reason_codes
+    )
+    if atomic.final_decision != AtomicFinalDecision.EXECUTE and not prod_deploy_materialize:
         return GateDecisionResponse(
             outcome="BLOCK",
-            reason_codes=list(frame.reason_codes),
-            defect_list=[],
-            policy_version=UATO_DECISION_VERSION,
+            reason_codes=stop_reason_codes_for_api(atomic),
+            defect_list=defect_dicts_for_gate_stop(atomic),
+            policy_version=d.policy_version,
             spec_hash=shared.spec_hash,
             plan_hash=shared.plan_hash,
             approver_id=None,
@@ -145,10 +157,13 @@ async def evaluate_gate(
                 frame,
                 governance_reached=False,
                 dispatch_reached=False,
+                state_hash=ev_state.state_hash,
+                atomic=atomic,
             ),
+            state_hash=ev_state.state_hash,
         )
 
-    evaluation = GateEngine().evaluate(spec, body.ocgg_identity)
+    evaluation = atomic.grl
     d = evaluation.decision
     governance_evaluation_id = make_governance_evaluation_id(
         trace_id=trace_id,
@@ -159,7 +174,7 @@ async def evaluate_gate(
         uato_decision=uato_res.decision,
     )
     approval_extras: dict = {}
-    if d.outcome.value == "BLOCK" and "PROD_DEPLOY_NO_APPROVAL" in d.reason_codes:
+    if prod_deploy_materialize:
         uato_evaluated_at = datetime.utcnow()
         uato_trace = to_trace_record(uato_in, uato_res)
         ie_env_frame = build_execution_envelope(
@@ -189,6 +204,8 @@ async def evaluate_gate(
             ic_res=frame.invariant_c_result,
             ie_frame_trace=ie_frame_trace,
         )
+        await persist_evaluation_record(session, atomic, task_id=task.task_id)
+        await session.commit()
         approval_extras = {
             "task_id": task.task_id,
             "approval_request_id": ar.id,
@@ -215,7 +232,10 @@ async def evaluate_gate(
             frame,
             governance_reached=True,
             dispatch_reached=False,
+            state_hash=ev_state.state_hash,
+            atomic=atomic,
         ),
+        state_hash=ev_state.state_hash,
         **approval_extras,
     )
 

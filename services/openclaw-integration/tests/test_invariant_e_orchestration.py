@@ -35,7 +35,7 @@ async def test_openclaw_not_called_when_invariant_e_denies(monkeypatch):
 
     monkeypatch.setattr(
         task_submission_module,
-        "evaluate_invariant_e",
+        "enforce_invariant_e_dispatch",
         lambda env: result_denied(env.trace_id, (ie_rc.IE_DENIED_CAPABILITY_NOT_ALLOWED,)),
     )
     mock_execute = AsyncMock(return_value={"status": "success", "execution_id": "ex1"})

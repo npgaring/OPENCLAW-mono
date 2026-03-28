@@ -1,4 +1,4 @@
-"""Core POST /task pipeline: evaluation frame (Invariant-C + UATO + Invariant-E) → GateEngine → Invariant-E dispatch → token → OpenClaw."""
+"""Core POST /task pipeline: atomic EvaluationEngine (C, UATO, GRL, Invariant-E decision) → dispatch Invariant-E enforcement → token → OpenClaw."""
 from __future__ import annotations
 
 from datetime import datetime
@@ -14,10 +14,11 @@ from sqlmodel import select
 from app.core.errors import ErrorCodes
 from app.core.identity import IDENTITY_DOMAIN_MAP
 from app.core.security import hash_payload
-from app.evaluation_frame import build_shared_governable_state_for_task, run_evaluation_frame
+from app.evaluation import build_evaluation_state_from_task_request, build_evaluation_state_with_resolved_approval, default_engine
+from app.evaluation.aggregator import composite_frame_from_atomic
+from app.evaluation.models import AtomicFinalDecision
 from app.evaluation_frame.response_mapper import to_evaluation_frame_response
 from app.evaluation_frame.state import FrameStatus
-from app.gate.engine import GateEngine
 from app.gate.models import GateDecision, GateEvaluation
 from app.gate.policy import get_policy_version_at_execution
 from app.gate.token import generate_execution_token, hash_token, verify_execution_token
@@ -33,7 +34,8 @@ from app.uato import build_uato_input_from_spec, evaluate_uato, to_trace_record
 from app.uato.normalize import minimal_plan_admissibility_issues
 from app.uato.plan_bridge import integration_plan_preview
 from app.uato.types import UATO_DECISION_VERSION
-from app.invariant_e import build_execution_envelope, evaluate_invariant_e, to_trace_record as ie_to_trace
+from app.invariant_e import build_execution_envelope, enforce_invariant_e_dispatch, to_trace_record as ie_to_trace
+from app.services.evaluation_persistence import persist_evaluation_record
 
 
 def make_governance_evaluation_id(
@@ -451,14 +453,19 @@ async def run_task_submission(
         )
 
     try:
-        shared = build_shared_governable_state_for_task(body, trace_id, for_resume=bool(reuse_task_id))
+        if reuse_task_id:
+            ev_state = build_evaluation_state_with_resolved_approval(body, trace_id)
+        else:
+            ev_state = build_evaluation_state_from_task_request(body, trace_id)
     except ValueError as e:
         raise HTTPException(
             status_code=422,
             detail={"code": ErrorCodes.INVALID_PAYLOAD, "message": str(e)},
         )
 
-    frame = run_evaluation_frame(shared)
+    shared = ev_state.governable
+    atomic = default_engine.evaluate(ev_state)
+    frame = composite_frame_from_atomic(atomic)
     spec = dict(shared.spec_for_gate)
     uato_in = build_uato_input_from_spec(
         spec,
@@ -489,9 +496,16 @@ async def run_task_submission(
         frame,
         governance_reached=False,
         dispatch_reached=False,
+        state_hash=ev_state.state_hash,
+        atomic=atomic,
     )
 
-    if reuse_task_id and frame.frame_status != FrameStatus.PASS:
+    grl_prod_deploy_approval_pending = (
+        atomic.final_decision == AtomicFinalDecision.REQUIRE_APPROVAL
+        and "GRL_PROD_DEPLOY" in atomic.approval_sources
+    )
+
+    if reuse_task_id and frame.frame_status != FrameStatus.PASS and not grl_prod_deploy_approval_pending:
         raise HTTPException(
             status_code=422,
             detail={
@@ -505,17 +519,25 @@ async def run_task_submission(
             },
         )
 
-    if frame.frame_status != FrameStatus.PASS:
-        if frame.frame_status == FrameStatus.ESCALATED:
-            short_status = TaskStatus.needs_review
-        elif frame.frame_status == FrameStatus.APPROVAL_REQUIRED:
-            short_status = TaskStatus.pending_approval
-        elif uato_res.decision == "BLOCK":
-            short_status = TaskStatus.uato_blocked
-        elif ic_res.decision != "PASS":
-            short_status = TaskStatus.invalid_plan
-        elif ie_res_frame.decision != "EXECUTION_ALLOWED":
-            short_status = TaskStatus.invariant_e_denied
+    if frame.frame_status != FrameStatus.PASS and not grl_prod_deploy_approval_pending:
+        if atomic.final_decision == AtomicFinalDecision.REQUIRE_APPROVAL:
+            short_status = (
+                TaskStatus.needs_review
+                if atomic.uato_approval_kind == "ESCALATION"
+                else TaskStatus.pending_approval
+            )
+        elif atomic.final_decision == AtomicFinalDecision.STOP:
+            fl = set(atomic.failed_laws)
+            if "INVARIANT_C" in fl:
+                short_status = TaskStatus.invalid_plan
+            elif "INVARIANT_E_DECISION" in fl:
+                short_status = TaskStatus.invariant_e_denied
+            elif "UATO" in fl:
+                short_status = TaskStatus.uato_blocked
+            elif "GRL" in fl:
+                short_status = TaskStatus.uato_blocked
+            else:
+                short_status = TaskStatus.uato_blocked
         else:
             short_status = TaskStatus.uato_blocked
         frame_audit = {
@@ -532,15 +554,18 @@ async def run_task_submission(
             },
         }
         paused_evt = None
-        if frame.frame_status == FrameStatus.APPROVAL_REQUIRED:
+        if frame.frame_status == FrameStatus.APPROVAL_REQUIRED and atomic.uato_approval_kind == "ESCALATION":
+            paused_evt = {
+                "event_type": "evaluation_frame_blocked",
+                "payload": {"frame_status": "ESCALATED", "shared_state_hash": frame.shared_state_hash},
+            }
+        elif frame.frame_status == FrameStatus.APPROVAL_REQUIRED:
             paused_evt = {
                 "event_type": "evaluation_frame_paused_for_approval",
                 "payload": {"shared_state_hash": frame.shared_state_hash, "uato_decision": uato_res.decision},
             }
         elif frame.frame_status == FrameStatus.BLOCKED:
             paused_evt = {"event_type": "evaluation_frame_blocked", "payload": {"shared_state_hash": frame.shared_state_hash}}
-        elif frame.frame_status == FrameStatus.ESCALATED:
-            paused_evt = {"event_type": "evaluation_frame_blocked", "payload": {"frame_status": "ESCALATED", "shared_state_hash": frame.shared_state_hash}}
         task = Task(
             ocgg_identity=body.ocgg_identity,
             domain=domain,
@@ -622,6 +647,8 @@ async def run_task_submission(
         session.add(gate_record)
         await session.commit()
         await session.refresh(task)
+        await persist_evaluation_record(session, atomic, task_id=task.task_id)
+        await session.commit()
 
         extra: dict[str, Any] = {}
         if frame.frame_status == FrameStatus.APPROVAL_REQUIRED and frame.approvable_via_uato:
@@ -665,6 +692,8 @@ async def run_task_submission(
                 approval_request_id=str(ar.id),
                 governance_reached=False,
                 dispatch_reached=False,
+                state_hash=ev_state.state_hash,
+                atomic=atomic,
             )
 
         return _task_submit_response(
@@ -682,8 +711,7 @@ async def run_task_submission(
             **extra,
         )
 
-    engine = GateEngine()
-    evaluation = engine.evaluate(spec, body.ocgg_identity)
+    evaluation = atomic.grl
     decision = evaluation.decision
     plan_json = evaluation.plan_json
     spec_hash = evaluation.spec_hash
@@ -726,6 +754,8 @@ async def run_task_submission(
             ic_res=ic_res,
             ie_frame_trace=ie_frame_trace,
         )
+        await persist_evaluation_record(session, atomic, task_id=task.task_id)
+        await session.commit()
         return _task_submit_response(
             task_id=task.task_id,
             status=task.status.value,
@@ -747,6 +777,8 @@ async def run_task_submission(
                 approval_request_id=str(ar.id),
                 governance_reached=True,
                 dispatch_reached=False,
+                state_hash=ev_state.state_hash,
+                atomic=atomic,
             ),
         )
 
@@ -861,6 +893,8 @@ async def run_task_submission(
     task.audit_history.append({"event_type": "gate_decision", "payload": {"outcome": decision.outcome.value, "reason_codes": decision.reason_codes}})
     flag_modified(task, "audit_history")
     await session.commit()
+    await persist_evaluation_record(session, atomic, task_id=task.task_id)
+    await session.commit()
 
     if decision.outcome.value != "PASS":
         return _task_submit_response(
@@ -878,6 +912,8 @@ async def run_task_submission(
                 frame,
                 governance_reached=True,
                 dispatch_reached=False,
+                state_hash=ev_state.state_hash,
+                atomic=atomic,
             ),
         )
 
@@ -891,7 +927,7 @@ async def run_task_submission(
         spec_hash=spec_hash,
         validation_controls=body.validation,
     )
-    ie_res = evaluate_invariant_e(inv_env)
+    ie_res = enforce_invariant_e_dispatch(inv_env)
     ie_evaluated_at = datetime.utcnow()
     ie_trace = ie_to_trace(inv_env, ie_res)
     ie_hash = ie_trace["invariant_e_input_hash"]
@@ -953,6 +989,8 @@ async def run_task_submission(
                 frame,
                 governance_reached=True,
                 dispatch_reached=True,
+                state_hash=ev_state.state_hash,
+                atomic=atomic,
             ),
         )
 
@@ -987,6 +1025,8 @@ async def run_task_submission(
                 frame,
                 governance_reached=True,
                 dispatch_reached=True,
+                state_hash=ev_state.state_hash,
+                atomic=atomic,
             ),
         )
     if get_policy_version_at_execution() != decision.policy_version:
@@ -1008,6 +1048,8 @@ async def run_task_submission(
                 frame,
                 governance_reached=True,
                 dispatch_reached=True,
+                state_hash=ev_state.state_hash,
+                atomic=atomic,
             ),
         )
     existing = await session.get(UsedExecutionToken, token_hash)
@@ -1030,6 +1072,8 @@ async def run_task_submission(
                 frame,
                 governance_reached=True,
                 dispatch_reached=True,
+                state_hash=ev_state.state_hash,
+                atomic=atomic,
             ),
         )
     used = UsedExecutionToken(token_hash=token_hash, task_id=task.task_id)
@@ -1056,6 +1100,8 @@ async def run_task_submission(
                 frame,
                 governance_reached=True,
                 dispatch_reached=True,
+                state_hash=ev_state.state_hash,
+                atomic=atomic,
             ),
         )
     gate_record.execution_token_hash = token_hash
@@ -1121,5 +1167,7 @@ async def run_task_submission(
             frame,
             governance_reached=True,
             dispatch_reached=True,
+            state_hash=ev_state.state_hash,
+            atomic=atomic,
         ),
     )

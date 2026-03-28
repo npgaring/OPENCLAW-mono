@@ -29,7 +29,7 @@ def test_frame_runs_all_three_evaluators_when_c_blocks():
     body = _minimal_task_body()
     shared = build_shared_governable_state_for_task(body, "550e8400-e29b-41d4-a716-446655440099", for_resume=False)
 
-    def fake_c(**kw):
+    def fake_c(state):
         from app.invariant_c.evaluator import INVARIANT_C_DECISION_VERSION, InvariantCheckResult
 
         cr = {"Meaning": InvariantCheckResult(passed=False, reason_codes=("INVARIANT_C_SYNTHETIC",))}
@@ -37,7 +37,7 @@ def test_frame_runs_all_three_evaluators_when_c_blocks():
 
         return InvariantCResult(decision="BLOCK", reason_codes=("INVARIANT_C_SYNTHETIC",), check_results=cr, decision_version=INVARIANT_C_DECISION_VERSION)
 
-    with patch("app.evaluation_frame.evaluate.evaluate_invariant_c", side_effect=fake_c):
+    with patch("app.evaluation.evaluators.invariant_c.evaluate_invariant_c_law", side_effect=fake_c):
         fr = run_evaluation_frame(shared)
     assert fr.frame_status == FrameStatus.BLOCKED
     assert fr.uato_result.decision == "PASS"
@@ -60,13 +60,14 @@ def test_uato_require_approval_only_when_c_and_e_allow():
     assert fr.approvable_via_uato is True
 
 
-def test_e_denial_blocks_even_if_uato_would_require_approval(monkeypatch):
+def test_invariant_e_deny_stops_even_when_uato_wants_approval(monkeypatch):
+    """Set-based aggregate: Invariant-E failure is a STOP; UATO approval need does not mask it."""
     body = _minimal_task_body(uato={"trust_level": "HIGH", "authority_level": "LOW"})
     shared = build_shared_governable_state_for_task(body, "550e8400-e29b-41d4-a716-4466554400cc", for_resume=False)
 
     monkeypatch.setattr(
-        "app.evaluation_frame.evaluate.evaluate_invariant_e_for_frame",
-        lambda env: result_denied(env.trace_id, ("IE_DENIED_SYNTHETIC",)),
+        "app.evaluation.evaluators.invariant_e.evaluate_invariant_e_decision",
+        lambda state: result_denied(state.governable.trace_id, ("IE_DENIED_SYNTHETIC",)),
     )
     fr = run_evaluation_frame(shared)
     assert fr.frame_status == FrameStatus.BLOCKED
@@ -79,22 +80,23 @@ def test_invariant_c_block_dominates_uato_require_approval(monkeypatch):
     body = _minimal_task_body(uato={"trust_level": "HIGH", "authority_level": "LOW"})
     shared = build_shared_governable_state_for_task(body, "550e8400-e29b-41d4-a716-4466554400ee", for_resume=False)
 
-    def fake_c(**kw):
+    def fake_c(state):
         from app.invariant_c.evaluator import INVARIANT_C_DECISION_VERSION, InvariantCheckResult, InvariantCResult
 
         cr = {"Meaning": InvariantCheckResult(passed=False, reason_codes=("INVARIANT_C_SYNTHETIC",))}
         return InvariantCResult(decision="BLOCK", reason_codes=("INVARIANT_C_SYNTHETIC",), check_results=cr, decision_version=INVARIANT_C_DECISION_VERSION)
 
-    monkeypatch.setattr("app.evaluation_frame.evaluate.evaluate_invariant_c", fake_c)
+    monkeypatch.setattr("app.evaluation.evaluators.invariant_c.evaluate_invariant_c_law", fake_c)
     fr = run_evaluation_frame(shared)
     assert fr.frame_status == FrameStatus.BLOCKED
     assert fr.uato_result.decision == "REQUIRE_APPROVAL"
     assert fr.approval_required is False
 
 
-def test_escalate_distinct_from_approval():
+def test_escalate_domain_frame_is_approval_required_not_approvable_via_uato():
     body = _minimal_task_body(uato={"trust_level": "LOW", "authority_level": "HIGH"})
     shared = build_shared_governable_state_for_task(body, "550e8400-e29b-41d4-a716-4466554400dd", for_resume=False)
     fr = run_evaluation_frame(shared)
-    assert fr.frame_status == FrameStatus.ESCALATED
-    assert fr.approval_required is False
+    assert fr.frame_status == FrameStatus.APPROVAL_REQUIRED
+    assert fr.approval_required is True
+    assert fr.approvable_via_uato is False

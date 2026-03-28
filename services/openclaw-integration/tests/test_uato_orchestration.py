@@ -1,4 +1,4 @@
-"""UATO runs before gate; non-PASS must not invoke GateEngine.evaluate."""
+"""UATO frame outcomes: external response stays frame-first; GRL is still evaluated in the atomic engine."""
 import pytest
 from httpx import ASGITransport, AsyncClient
 
@@ -15,7 +15,7 @@ def anyio_backend():
 def _valid_spec():
     from app.core.identity import IDENTITY_DOMAIN_MAP
 
-    ops = [{"type": "build", "op_id": "1", "target": "repo"}]
+    ops = [{"type": "build", "op_id": "1", "target": "repo", "inputs": {}, "outputs": {}}]
     domain = IDENTITY_DOMAIN_MAP["W-OCGG"]
     ph = hash_payload({"domain": domain, "operations": ops})
     return {
@@ -54,12 +54,13 @@ async def test_gate_skipped_when_uato_blocks(monkeypatch):
     assert r.status_code == 200
     data = r.json()
     assert data.get("uato_skipped_gate") is True
-    assert "PLAN_HASH_MISMATCH" not in (data.get("reason_codes") or [])
+    # Atomic cycle always evaluates GRL; mismatch may appear alongside UATO_BLOCK in reason_codes.
+    assert "UATO_BLOCK_LOW_TRUST_LOW_AUTHORITY" in (data.get("reason_codes") or [])
     ef = data.get("evaluation_frame") or {}
     assert ef.get("governance_reached") is False
     assert ef.get("dispatch_reached") is False
     assert (ef.get("uato_result") or {}).get("decision") == data.get("uato_decision")
-    assert called == []
+    assert len(called) == 1
 
 
 @pytest.mark.asyncio
@@ -98,7 +99,7 @@ async def test_gate_runs_when_uato_passes(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_task_uato_require_approval_status_and_skips_gate(monkeypatch):
+async def test_task_uato_require_approval_status_frame_blocks_execution(monkeypatch):
     called = []
 
     real_evaluate = GateEngine.evaluate
@@ -130,4 +131,4 @@ async def test_task_uato_require_approval_status_and_skips_gate(monkeypatch):
     assert ef.get("approval_request_id")
     assert ef.get("governance_reached") is False
     assert ef.get("dispatch_reached") is False
-    assert called == []
+    assert len(called) == 1

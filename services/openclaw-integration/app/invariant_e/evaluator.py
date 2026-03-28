@@ -58,28 +58,36 @@ def _invariant_e_admission_core(
     return result_allowed(trace_id)
 
 
-def evaluate_invariant_e_for_frame(envelope: ExecutionEnvelope) -> InvariantEResult:
+def evaluate_invariant_e_decision(envelope: ExecutionEnvelope) -> InvariantEResult:
     """
-    Pre-governance frame evaluation: same admission rules as dispatch, except governance need not be PASS.
+    Shared evaluation engine entrypoint (decision mode): admission rules without requiring governance PASS.
 
-    Production deploy human approval is enforced by GateEngine (PROD_DEPLOY_NO_APPROVAL) and again at dispatch;
+    Production deploy human approval is enforced by GRL (PROD_DEPLOY_NO_APPROVAL) and again at dispatch;
     the frame omits prod approver fields so governance can still evaluate and materialize approvals.
 
-    Use governance_outcome=\"PENDING\" (or any non-PASS sentinel) on the envelope; this entrypoint ignores it
-    for the governance check, but ``build_execution_envelope`` still applies ``validation.dispatch_boundary_scenario``
-    for PENDING so the frame matches post-PASS dispatch.
+    Naming aligns with ``enforce_invariant_e_dispatch`` so decision vs enforcement stays explicit.
     """
     e = normalize_envelope(envelope)
     return _invariant_e_admission_core(e, e.trace_id, enforce_prod_deploy_approver=False)
 
 
-def evaluate_invariant_e(envelope: ExecutionEnvelope) -> InvariantEResult:
+def evaluate_invariant_e_for_frame(envelope: ExecutionEnvelope) -> InvariantEResult:
     """
-    Post-governance dispatch boundary: requires governance_outcome PASS, then runs the same admission core as the frame.
+    Backward-compatible alias for ``evaluate_invariant_e_decision`` (pre-governance frame evaluation).
+    """
+    return evaluate_invariant_e_decision(envelope)
 
-    Phase 1: returns EXECUTION_ALLOWED or EXECUTION_DENIED only.
 
-    EXECUTION_TERMINATED is reserved for downstream signals (see types module TODO).
+def evaluate_invariant_e(envelope: ExecutionEnvelope) -> InvariantEResult:
+    return enforce_invariant_e_dispatch(envelope)
+
+
+def enforce_invariant_e_dispatch(envelope: ExecutionEnvelope) -> InvariantEResult:
+    """
+    Dispatch-time enforcement: requires governance_outcome PASS, then verifies execution boundary / envelope /
+    prod-approver constraints immediately before gateway dispatch.
+
+    This is intentionally separate from ``evaluate_invariant_e_decision`` (frame / shared-state admissibility).
     """
     e = normalize_envelope(envelope)
     trace_id = e.trace_id

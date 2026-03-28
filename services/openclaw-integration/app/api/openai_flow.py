@@ -15,8 +15,9 @@ from app.core.config import settings
 from app.core.security import hash_payload
 from app.core.trace_id import normalize_trace_id
 from app.db.session import get_session
+from app.evaluation import build_evaluation_state_from_shared_governable, default_engine
+from app.evaluation.aggregator import composite_frame_from_atomic
 from app.evaluation_frame.response_mapper import to_evaluation_frame_response
-from app.evaluation_frame import run_evaluation_frame
 from app.evaluation_frame.build import build_shared_governable_state_from_adapter_candidate
 from app.evaluation_frame.state import FrameStatus
 from app.models import (
@@ -310,70 +311,8 @@ async def _adapt_candidate_to_substrate(
 ) -> AdapterToSubstrateResponse:
     candidate_payload = candidate_plan.model_dump(mode="python")
     candidate_plan_hash = hash_payload(candidate_payload)
-    shared = build_shared_governable_state_from_adapter_candidate(
-        trace_id=trace_id,
-        ocgg_identity=ocgg_identity,
-        intent=intent,
-        candidate_plan=candidate_plan,
-        deployment_target=deployment_target,
-        objective=objective,
-        context=context,
-        acceptance_criteria=acceptance_criteria,
-        constraints=constraints,
-        approval_reference=approval_reference,
-        approver_id=approver_id,
-    )
-    frame = run_evaluation_frame(shared)
-    frame_response = to_evaluation_frame_response(
-        frame,
-        governance_reached=False,
-        dispatch_reached=False,
-    )
-    ic_res = frame.invariant_c_result
-    session.add(
-        InvariantCDecisionRecord(
-            trace_id=trace_id,
-            ocgg_identity=ocgg_identity,
-            intent=intent,
-            candidate_plan_hash=candidate_plan_hash,
-            decision=ic_res.decision,
-            reason_codes=list(ic_res.reason_codes),
-            check_results=ic_res.to_persisted_checks(),
-            decision_version=ic_res.decision_version,
-        )
-    )
-    if frame.frame_status != FrameStatus.PASS:
-        session.add(
-            SubstrateAdapterEvent(
-                trace_id=trace_id,
-                ocgg_identity=ocgg_identity,
-                intent=intent,
-                candidate_plan_hash=candidate_plan_hash,
-                integration_plan_hash=None,
-                outcome="BLOCK",
-                reason_codes=list(frame.reason_codes),
-                payload={
-                    "frame_status": frame.frame_status.value,
-                    "shared_state_hash": frame.shared_state_hash,
-                    "uato_decision": frame.uato_result.decision,
-                    "invariant_e_decision": frame.invariant_e_result.decision,
-                },
-            )
-        )
-        await session.commit()
-        raise HTTPException(
-            status_code=422,
-            detail={
-                "code": "EVALUATION_FRAME_BLOCK",
-                "reason_codes": list(frame.reason_codes),
-                "trace_id": trace_id,
-                "frame_status": frame.frame_status.value,
-                "evaluation_frame": jsonable_encoder(frame_response),
-            },
-        )
 
-    # Candidate metadata approval flag: enforced here as structural pre-check only. Production deploy and
-    # SoD are owned by GateEngine on POST /task (see app/gate/engine.py). Reason code is distinct from gate.
+    # Structural metadata approval before atomic frame evaluation so production UATO hints do not mask this path.
     if candidate_plan.metadata.requiresApproval and not (approval_reference or approver_id):
         reason_codes = ["ADAPTER_METADATA_REQUIRES_APPROVAL"]
         from app.services.approvals_service import create_adapter_approval_request
@@ -422,6 +361,70 @@ async def _adapt_candidate_to_substrate(
                 "approval_status": "PENDING",
                 "source_layer": "ADAPTER",
                 "resume_available": True,
+            },
+        )
+
+    shared = build_shared_governable_state_from_adapter_candidate(
+        trace_id=trace_id,
+        ocgg_identity=ocgg_identity,
+        intent=intent,
+        candidate_plan=candidate_plan,
+        deployment_target=deployment_target,
+        objective=objective,
+        context=context,
+        acceptance_criteria=acceptance_criteria,
+        constraints=constraints,
+        approval_reference=approval_reference,
+        approver_id=approver_id,
+    )
+    ev_state = build_evaluation_state_from_shared_governable(shared)
+    atomic = default_engine.evaluate(ev_state)
+    frame = composite_frame_from_atomic(atomic)
+    frame_response = to_evaluation_frame_response(
+        frame,
+        governance_reached=False,
+        dispatch_reached=False,
+        atomic=atomic,
+    )
+    ic_res = frame.invariant_c_result
+    session.add(
+        InvariantCDecisionRecord(
+            trace_id=trace_id,
+            ocgg_identity=ocgg_identity,
+            intent=intent,
+            candidate_plan_hash=candidate_plan_hash,
+            decision=ic_res.decision,
+            reason_codes=list(ic_res.reason_codes),
+            check_results=ic_res.to_persisted_checks(),
+            decision_version=ic_res.decision_version,
+        )
+    )
+    if frame.frame_status != FrameStatus.PASS:
+        session.add(
+            SubstrateAdapterEvent(
+                trace_id=trace_id,
+                ocgg_identity=ocgg_identity,
+                intent=intent,
+                candidate_plan_hash=candidate_plan_hash,
+                integration_plan_hash=None,
+                outcome="BLOCK",
+                reason_codes=list(frame.reason_codes),
+                payload={
+                    "frame_status": frame.frame_status.value,
+                    "shared_state_hash": frame.shared_state_hash,
+                    "uato_decision": frame.uato_result.decision,
+                    "invariant_e_decision": frame.invariant_e_result.decision,
+                },
+            )
+        )
+        await session.commit()
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "code": "EVALUATION_FRAME_BLOCK",
+                "reason_codes": list(frame.reason_codes),
+                "trace_id": trace_id,
+                "frame_status": frame.frame_status.value,
                 "evaluation_frame": jsonable_encoder(frame_response),
             },
         )

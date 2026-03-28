@@ -92,7 +92,7 @@ def test_prod_without_approval_creates_governance_approval(client, auth_headers)
     assert data.get("approval_request_id")
     assert data["status"] == "pending_approval"
     ef = data.get("evaluation_frame") or {}
-    assert ef.get("frame_status") == "PASS"
+    assert ef.get("frame_status") == "APPROVAL_REQUIRED"
     assert ef.get("governance_reached") is True
     assert ef.get("dispatch_reached") is False
 
@@ -114,7 +114,7 @@ def test_dedicated_approval_demo_scenario_avoids_invariant_c_goal_mismatch(clien
     assert data["gate_outcome"] == "BLOCK"
     assert "PROD_DEPLOY_NO_APPROVAL" in (data.get("reason_codes") or [])
     ef = data.get("evaluation_frame") or {}
-    assert ef.get("frame_status") == "PASS"
+    assert ef.get("frame_status") == "APPROVAL_REQUIRED"
     assert (ef.get("invariant_c_result") or {}).get("decision") == "PASS"
     assert "INVARIANT_C_GOAL_OBJECTIVE_MISMATCH" not in (ef.get("reason_codes") or [])
     assert ef.get("governance_reached") is True
@@ -137,7 +137,8 @@ def test_prod_without_demo_scenario_can_fail_early_at_invariant_c_goal_mismatch(
     assert ef.get("frame_status") == "BLOCKED"
     assert (ef.get("invariant_c_result") or {}).get("decision") == "BLOCK"
     assert "INVARIANT_C_GOAL_OBJECTIVE_MISMATCH" in (ef.get("reason_codes") or [])
-    assert "PROD_DEPLOY_NO_APPROVAL" not in (data.get("reason_codes") or [])
+    # All laws run on the same state; top-level reason_codes may include GRL as well as Invariant-C.
+    assert "INVARIANT_C_GOAL_OBJECTIVE_MISMATCH" in (data.get("reason_codes") or [])
 
 
 def test_gate_evaluate_prod_materializes_approval_listable_by_trace(client, auth_headers):

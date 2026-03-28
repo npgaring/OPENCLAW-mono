@@ -98,3 +98,7 @@ class GateDecisionResponse(BaseModel):
         default=None,
         description="Authoritative grouped frame-level admissibility result available before governance evaluation.",
     )
+    state_hash: Optional[str] = Field(
+        default=None,
+        description="Canonical EvaluationState fingerprint for this evaluation cycle (see evaluation_frame.state_hash).",
+    )

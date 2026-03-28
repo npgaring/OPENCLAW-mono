@@ -38,6 +38,13 @@ class EvaluationFrameResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     shared_state_hash: Optional[str] = None
+    state_hash: Optional[str] = Field(
+        default=None,
+        description=(
+            "Canonical fingerprint of the full EvaluationState (trust/authority snapshot, validation, approval "
+            "context, plan material). Distinct from shared_state_hash (legacy frame slice) and governance plan_hash."
+        ),
+    )
     frame_status: Optional[Literal["PASS", "APPROVAL_REQUIRED", "ESCALATED", "BLOCKED"]] = None
     reason_codes: list[str] = Field(default_factory=list)
     invariant_c_result: Optional[InvariantCFrameResult] = None
