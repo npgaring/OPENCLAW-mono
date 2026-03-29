@@ -40,20 +40,23 @@ from app.services.evaluation_persistence import persist_evaluation_record
 
 def make_governance_evaluation_id(
     *,
-    trace_id: str,
-    ocgg_identity: str,
+    state_hash: str,
     plan_hash: str,
     policy_version: str,
     outcome: str,
     uato_decision: str,
+    reason_codes: list[str],
 ) -> str:
+    """Deterministic continuity token: same EvaluationState + same GRL outcome + same frame UATO → same id."""
     return hash_payload(
         {
-            "trace_id": trace_id,
-            "ocgg_identity": ocgg_identity,
+            "state_hash": state_hash,
             "plan_hash": plan_hash,
-            "policy_version": policy_version,
-            "outcome": outcome,
+            "evaluation_results": {
+                "policy_version": policy_version,
+                "outcome": outcome,
+                "reason_codes": sorted(reason_codes),
+            },
             "uato_decision": uato_decision,
         }
     )
@@ -717,12 +720,12 @@ async def run_task_submission(
     spec_hash = evaluation.spec_hash
     plan_hash = evaluation.plan_hash
     governance_evaluation_id = make_governance_evaluation_id(
-        trace_id=trace_id,
-        ocgg_identity=body.ocgg_identity,
-        plan_hash=body.plan_hash,
+        state_hash=ev_state.state_hash,
+        plan_hash=plan_hash,
         policy_version=decision.policy_version,
         outcome=decision.outcome.value,
         uato_decision=uato_res.decision,
+        reason_codes=list(decision.reason_codes),
     )
     governance_continuity_verified = body.governance_evaluation_id is not None
     if body.governance_evaluation_id and body.governance_evaluation_id != governance_evaluation_id:

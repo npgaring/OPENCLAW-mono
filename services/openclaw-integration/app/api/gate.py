@@ -166,12 +166,12 @@ async def evaluate_gate(
     evaluation = atomic.grl
     d = evaluation.decision
     governance_evaluation_id = make_governance_evaluation_id(
-        trace_id=trace_id,
-        ocgg_identity=body.ocgg_identity,
-        plan_hash=body.plan_hash or shared.plan_hash,
+        state_hash=ev_state.state_hash,
+        plan_hash=d.plan_hash,
         policy_version=d.policy_version,
         outcome=d.outcome.value,
         uato_decision=uato_res.decision,
+        reason_codes=list(d.reason_codes),
     )
     approval_extras: dict = {}
     if prod_deploy_materialize:

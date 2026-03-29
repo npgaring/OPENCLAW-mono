@@ -20,5 +20,11 @@ def integration_plan_preview(spec: dict[str, Any], ocgg_identity: str) -> Tuple[
         plan_json["context"] = spec["context"]
     if spec.get("acceptance_criteria"):
         plan_json["acceptance_criteria"] = spec["acceptance_criteria"]
-    spec_hash = hash_payload(spec)
+    # Align POST /gate/evaluate (optional plan_hash) with POST /task: canonical plan_hash on spec before
+    # spec_hash so EvaluationState matches when the client omits plan_hash on gate but sends it on task.
+    if not spec.get("plan_hash"):
+        spec["plan_hash"] = plan_hash
+    # Omit None-valued keys so TaskSubmitRequest.model_dump (many optional Nones) hashes like gate to_payload(exclude_none).
+    spec_for_hash = {k: v for k, v in spec.items() if v is not None}
+    spec_hash = hash_payload(spec_for_hash)
     return plan_json, plan_hash, spec_hash

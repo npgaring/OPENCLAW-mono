@@ -29,6 +29,36 @@ def test_gate_evaluate_emits_governance_evaluation_id(auth_headers):
     assert ef.get("governance_reached") is True
 
 
+def test_gate_task_governance_id_matches_when_task_sends_null_optionals_gate_omitted(auth_headers):
+    """GateEvaluateRequest excludes null keys; TaskSubmitRequest may carry optional nulls — same EvaluationState + same id."""
+    client = TestClient(app)
+    trace_id = "550e8400-e29b-41d4-a716-446655449904"
+    ops = [{"type": "build", "op_id": "1", "target": "repo", "inputs": {}, "outputs": {}}]
+    domain = IDENTITY_DOMAIN_MAP["W-OCGG"]
+    ph = hash_payload({"domain": domain, "operations": ops})
+    gate_body = {"ocgg_identity": "W-OCGG", "plan_hash": ph, "operations": ops, "trace_id": trace_id}
+    g = client.post("/gate/evaluate", json=gate_body, headers=auth_headers)
+    assert g.status_code == 200, g.text
+    gid = g.json().get("governance_evaluation_id")
+    assert gid
+    task_body = {
+        **gate_body,
+        "goal": None,
+        "context": None,
+        "acceptance_criteria": None,
+        "deployment_target": None,
+        "governance_evaluation_id": gid,
+    }
+    with patch("app.services.task_submission.OpenClawClient") as mock_client_class:
+        mock_client_class.return_value.execute = AsyncMock(
+            return_value={"execution_id": "ex-null-opt", "status": "completed", "message": "ok"}
+        )
+        t = client.post("/task", json=task_body, headers=auth_headers)
+    assert t.status_code == 200, t.text
+    assert t.json().get("governance_evaluation_id") == gid
+    assert t.json().get("governance_continuity_verified") is True
+
+
 def test_task_accepts_matching_governance_evaluation_id(auth_headers):
     client = TestClient(app)
     trace_id = "550e8400-e29b-41d4-a716-446655449901"
