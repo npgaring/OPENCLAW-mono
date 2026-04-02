@@ -17,6 +17,8 @@ class StepType(str, Enum):
     deploy = "deploy"
     test = "test"
     rollback_prep = "rollback_prep"
+    provision_repo = "provision_repo"
+    provision_hosting = "provision_hosting"
 
 
 class RiskLevel(str, Enum):
@@ -59,6 +61,15 @@ class RollbackPrepInputs(DependsOnInputs):
     strategy: Optional[str] = None
 
 
+class ProvisionRepoInputs(DependsOnInputs):
+    provider: str = Field(min_length=1)
+
+
+class ProvisionHostingInputs(DependsOnInputs):
+    provider: str = Field(min_length=1)
+    project: Optional[str] = None
+
+
 BoundedStepInputs = Union[
     CreateFileInputs,
     WriteConfigInputs,
@@ -66,6 +77,8 @@ BoundedStepInputs = Union[
     DeployInputs,
     TestInputs,
     RollbackPrepInputs,
+    ProvisionRepoInputs,
+    ProvisionHostingInputs,
 ]
 
 
@@ -94,6 +107,8 @@ class CandidatePlanStep(BaseModel):
             StepType.deploy.value: DeployInputs,
             StepType.test.value: TestInputs,
             StepType.rollback_prep.value: RollbackPrepInputs,
+            StepType.provision_repo.value: ProvisionRepoInputs,
+            StepType.provision_hosting.value: ProvisionHostingInputs,
         }
         expected_type = expected_by_type.get(step_type_raw)
         if expected_type is None:
@@ -113,6 +128,8 @@ class CandidatePlanStep(BaseModel):
             StepType.deploy: DeployInputs,
             StepType.test: TestInputs,
             StepType.rollback_prep: RollbackPrepInputs,
+            StepType.provision_repo: ProvisionRepoInputs,
+            StepType.provision_hosting: ProvisionHostingInputs,
         }
         expected_type = expected_by_type[self.type]
         if not isinstance(self.inputs, expected_type):
