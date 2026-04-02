@@ -6,6 +6,7 @@ from uuid import UUID, uuid4
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 from sqlalchemy import Column, Enum as SaEnum, JSON, Text
+from sqlalchemy.dialects.postgresql import UUID as PgUUID
 from sqlmodel import Field as SqlField, SQLModel
 
 from app.models.evaluation_frame import EvaluationFrameResponse
@@ -60,7 +61,7 @@ class TaskStatus(str, Enum):
 class Task(SQLModel, table=True):
     __tablename__ = "tasks"
 
-    task_id: UUID = SqlField(primary_key=True, default_factory=uuid4)
+    task_id: UUID = SqlField(default_factory=uuid4, sa_column=Column(PgUUID(as_uuid=True), primary_key=True, default=uuid4))
     ocgg_identity: str = SqlField(index=True)
     domain: str = SqlField()
     plan_hash: str = SqlField()
@@ -218,6 +219,8 @@ class TaskSubmitResponse(BaseModel):
     execution_id: Optional[str] = None
     status: str
     execution_response: Optional[dict] = None
+    deployment_url: Optional[str] = None
+    preview_url: Optional[str] = None
     # gate_outcome: effective "may dispatch" signal for backward compatibility (BLOCK if governance blocked, UATO blocked, or execution denied).
     gate_outcome: Optional[str] = None
     # governance_outcome: GateEngine PASS/BLOCK only when gate evaluated (None if stopped at UATO only).

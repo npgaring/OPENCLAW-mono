@@ -3,9 +3,10 @@ from __future__ import annotations
 
 from datetime import datetime
 from typing import Any, Optional
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 from sqlalchemy import Column, DateTime, JSON
+from sqlalchemy.dialects.postgresql import UUID as PgUUID
 from sqlmodel import Field, SQLModel
 
 
@@ -70,7 +71,7 @@ class ExecutionPlanRecordV2(SQLModel, table=True):
 class StageEventRecordV2(SQLModel, table=True):
     __tablename__ = "stage_events_v2"
 
-    id: str = Field(primary_key=True, default_factory=lambda: str(uuid4()), max_length=36)
+    id: UUID = Field(default_factory=uuid4, sa_column=Column(PgUUID(as_uuid=True), primary_key=True, default=uuid4))
     trace_id: str = Field(index=True, max_length=36)
     stage: str = Field(index=True, max_length=64)
     event_type: str = Field(index=True, max_length=64)
@@ -78,4 +79,3 @@ class StageEventRecordV2(SQLModel, table=True):
     artifact_hash: Optional[str] = Field(default=None, index=True, max_length=255)
     metadata_: dict[str, Any] = Field(default_factory=dict, sa_column=Column("metadata", JSON, nullable=False))
     created_at: datetime = Field(default_factory=_utc_now, sa_column=Column(DateTime(timezone=True), nullable=False))
-
