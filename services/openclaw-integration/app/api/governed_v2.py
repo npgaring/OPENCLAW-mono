@@ -1,6 +1,8 @@
 """Governed dual-engine v2 lock endpoints."""
 from __future__ import annotations
 
+import logging
+
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -28,6 +30,13 @@ from app.services.task_submission import make_governance_evaluation_id
 from app.uato.normalize import minimal_plan_admissibility_issues
 
 router = APIRouter(prefix="/v2", tags=["governed-v2"])
+logger = logging.getLogger(__name__)
+
+
+def _trace(event: str, **fields: object) -> None:
+    if settings.governed_v2_trace_logging:
+        payload = {k: v for k, v in fields.items() if v is not None}
+        logger.info("governed_v2.%s %s", event, payload)
 
 
 def _ensure_v2_enabled() -> None:
@@ -71,6 +80,13 @@ async def lock_build_sot(
     session: AsyncSession = Depends(get_session),
 ):
     _ensure_v2_enabled()
+    _trace(
+        "build_sot.lock.start",
+        trace_id=body.trace_id,
+        build_sot_hash=body.build_sot_hash,
+        ocgg_identity=body.ocgg_identity,
+        intent=body.intent,
+    )
     if body.ocgg_identity not in IDENTITY_DOMAIN_MAP:
         raise HTTPException(
             status_code=422,
@@ -79,6 +95,12 @@ async def lock_build_sot(
     spec = _projection_spec_from_request(body)
     trace_id = normalize_trace_id(body.trace_id)
     if minimal_plan_admissibility_issues(spec):
+        _trace(
+            "build_sot.lock.blocked",
+            trace_id=trace_id,
+            build_sot_hash=body.build_sot_hash,
+            reason_codes=list(minimal_plan_admissibility_issues(spec)),
+        )
         return BuildSoTLockResponse(
             trace_id=trace_id,
             build_sot_hash=body.build_sot_hash,
@@ -101,6 +123,14 @@ async def lock_build_sot(
     ev_state = build_evaluation_state_from_shared_governable(shared)
     atomic = default_engine.evaluate(ev_state)
     frame = composite_frame_from_atomic(atomic)
+    _trace(
+        "build_sot.lock.done",
+        trace_id=trace_id,
+        build_sot_hash=body.build_sot_hash,
+        outcome=_to_outcome(atomic.final_decision),
+        state_hash=ev_state.state_hash,
+        reason_codes=stop_reason_codes_for_api(atomic),
+    )
     return BuildSoTLockResponse(
         trace_id=trace_id,
         build_sot_hash=body.build_sot_hash,
@@ -124,6 +154,13 @@ async def lock_execution_plan(
     session: AsyncSession = Depends(get_session),
 ):
     _ensure_v2_enabled()
+    _trace(
+        "execution_plan.lock.start",
+        trace_id=body.trace_id,
+        build_sot_hash=body.build_sot_hash,
+        execution_plan_hash=body.execution_plan_hash,
+        ocgg_identity=body.ocgg_identity,
+    )
     if body.ocgg_identity not in IDENTITY_DOMAIN_MAP:
         raise HTTPException(
             status_code=422,
@@ -132,6 +169,13 @@ async def lock_execution_plan(
     spec = _spec_from_execution_plan_request(body)
     trace_id = normalize_trace_id(body.trace_id)
     if minimal_plan_admissibility_issues(spec):
+        _trace(
+            "execution_plan.lock.blocked",
+            trace_id=trace_id,
+            build_sot_hash=body.build_sot_hash,
+            execution_plan_hash=body.execution_plan_hash,
+            reason_codes=list(minimal_plan_admissibility_issues(spec)),
+        )
         return ExecutionPlanLockResponse(
             trace_id=trace_id,
             build_sot_hash=body.build_sot_hash,
@@ -191,6 +235,24 @@ async def lock_execution_plan(
             state_hash=ev_state.state_hash,
         )
         await session.commit()
+        _trace(
+            "execution_plan.lock.continuity_created",
+            trace_id=trace_id,
+            build_sot_hash=body.build_sot_hash,
+            execution_plan_hash=body.execution_plan_hash,
+            governance_evaluation_id=governance_evaluation_id,
+            continuity_id=continuity_id,
+        )
+    _trace(
+        "execution_plan.lock.done",
+        trace_id=trace_id,
+        build_sot_hash=body.build_sot_hash,
+        execution_plan_hash=body.execution_plan_hash,
+        outcome=outcome,
+        state_hash=ev_state.state_hash,
+        governance_plan_hash=shared.plan_hash,
+        reason_codes=stop_reason_codes_for_api(atomic),
+    )
     return ExecutionPlanLockResponse(
         trace_id=trace_id,
         build_sot_hash=body.build_sot_hash,
@@ -209,4 +271,3 @@ async def lock_execution_plan(
             atomic=atomic,
         ),
     )
-

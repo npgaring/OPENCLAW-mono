@@ -31,5 +31,9 @@ Development workflow, CI/CD, and branch/commit standards are defined in **[docs/
   1. `cd frontend`
   2. `npm install`
   3. `npm run dev`
+- Governed v2 QA:
+  1. `./scripts/qa_governed_v2_run_all.sh`
+  2. Optional HTTP smoke (against running services):
+     `QA_DUDEX_BASE=http://127.0.0.1:8011 QA_INTEGRATION_BASE=http://127.0.0.1:8012 INTEGRATION_API_KEY=<token> ./scripts/qa_governed_v2_run_all.sh`
 
 Configure branch protection and GitHub secrets in the repo settings. **Deploy is off by default**: the Deploy workflow runs on push to `main` but skips until you set **ENABLE_DEPLOY** to `true` and add **VERCEL_TOKEN** (required). Optional: **VERCEL_ORG_ID**, **VERCEL_PROJECT_ID**; for monorepos set **VERCEL_ROOT_DIR** (e.g. `web`) to the app root.

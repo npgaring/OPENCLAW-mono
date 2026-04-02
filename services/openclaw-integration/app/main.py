@@ -9,9 +9,10 @@ if str(_svc_root) not in sys.path:
 
 import logging
 import os
+import time
 from contextlib import asynccontextmanager
 
-from fastapi import Depends, FastAPI
+from fastapi import Depends, FastAPI, Request
 from fastapi.openapi.utils import get_openapi
 
 from app.api import approvals, audit, evaluation_frame, gate, governed_v2, health, public, status, task
@@ -77,6 +78,53 @@ app = FastAPI(
     root_path=OPENCLAW_ROOT_PATH or "",
     lifespan=lifespan,
 )
+
+
+@app.middleware("http")
+async def request_log_middleware(request: Request, call_next):
+    start = time.perf_counter()
+    path = request.url.path
+    method = request.method
+    trace_id = request.headers.get("x-trace-id")
+    if settings.governed_v2_trace_logging:
+        logger.info(
+            "http.request.start %s",
+            {
+                "service": "openclaw-integration",
+                "method": method,
+                "path": path,
+                "trace_id": trace_id,
+                "query": str(request.query_params) or None,
+            },
+        )
+    try:
+        response = await call_next(request)
+    except Exception:
+        if settings.governed_v2_trace_logging:
+            logger.exception(
+                "http.request.error %s",
+                {
+                    "service": "openclaw-integration",
+                    "method": method,
+                    "path": path,
+                    "trace_id": trace_id,
+                    "duration_ms": round((time.perf_counter() - start) * 1000, 2),
+                },
+            )
+        raise
+    if settings.governed_v2_trace_logging:
+        logger.info(
+            "http.request.done %s",
+            {
+                "service": "openclaw-integration",
+                "method": method,
+                "path": path,
+                "status_code": response.status_code,
+                "trace_id": trace_id,
+                "duration_ms": round((time.perf_counter() - start) * 1000, 2),
+            },
+        )
+    return response
 
 
 def custom_openapi():

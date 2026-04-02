@@ -14,6 +14,19 @@ _TASK_INPUT_KEYS_ALLOWLIST = frozenset(
         "command",
         "provider",
         "project",
+        "project_name",
+        "linked_repo_name",
+        "repo_name",
+        "owner",
+        "owner_type",
+        "fallback_owner",
+        "repo_name_template",
+        "default_branch",
+        "production_branch",
+        "team_id",
+        "domain_behavior",
+        "branch",
+        "visibility",
         "artifact",
         "strategy",
     }
@@ -61,10 +74,14 @@ def task_spec_to_candidate_plan(
         st_raw = raw.get("type")
         if not st_raw:
             raise ValueError(f"operations[{i}].type is required")
-        st = StepType(str(st_raw))
+        normalized_type, normalized_inputs = _normalize_task_operation_for_candidate(
+            op_type=str(st_raw),
+            raw_inputs=raw.get("inputs") if isinstance(raw.get("inputs"), dict) else {},
+            target=raw.get("target"),
+        )
+        st = StepType(normalized_type)
         target = (raw.get("target") or "").strip() or "(integration-target)"
-        inputs_raw = raw.get("inputs") if isinstance(raw.get("inputs"), dict) else {}
-        inputs_raw = {k: v for k, v in inputs_raw.items() if k in _TASK_INPUT_KEYS_ALLOWLIST}
+        inputs_raw = {k: v for k, v in normalized_inputs.items() if k in _TASK_INPUT_KEYS_ALLOWLIST}
         step_payload = {
             "id": str(op_id).strip(),
             "type": st.value,
@@ -80,3 +97,40 @@ def task_spec_to_candidate_plan(
         steps=steps,
         metadata=CandidatePlanMetadata(requiresApproval=False, riskLevel=RiskLevel.low),
     )
+
+
+def _normalize_task_operation_for_candidate(
+    *,
+    op_type: str,
+    raw_inputs: dict[str, Any],
+    target: Any,
+) -> tuple[str, dict[str, Any]]:
+    """
+    Normalize integration operation types into bounded candidate step types.
+
+    Compatibility rule:
+    - provision_repo/provision_hosting are converted to deploy-shaped candidate steps.
+      This keeps Invariant-C admissibility stable across older/newer StepType vocabularies.
+    """
+    t = (op_type or "").strip()
+    if t == "provision_repo":
+        provider = str(raw_inputs.get("provider") or "github").strip() or "github"
+        project = str(
+            raw_inputs.get("repo_name")
+            or raw_inputs.get("project")
+            or raw_inputs.get("project_name")
+            or target
+            or "repository"
+        ).strip() or "repository"
+        return "deploy", {"provider": provider, "project": project}
+    if t == "provision_hosting":
+        provider = str(raw_inputs.get("provider") or "vercel").strip() or "vercel"
+        project = str(
+            raw_inputs.get("project")
+            or raw_inputs.get("project_name")
+            or raw_inputs.get("linked_repo_name")
+            or target
+            or "hosting-project"
+        ).strip() or "hosting-project"
+        return "deploy", {"provider": provider, "project": project}
+    return t, dict(raw_inputs or {})

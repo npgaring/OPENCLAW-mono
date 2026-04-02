@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+import logging
 from typing import Any
 
 import httpx
@@ -41,6 +42,13 @@ from app.services.governed_v2_runtime import (
 )
 
 router = APIRouter(prefix="/v2", tags=["governed-v2"])
+logger = logging.getLogger(__name__)
+
+
+def _trace(event: str, **fields: Any) -> None:
+    if settings.governed_v2_trace_logging:
+        payload = {k: v for k, v in fields.items() if v is not None}
+        logger.info("governed_v2.%s %s", event, payload)
 
 
 def _ensure_v2_enabled() -> None:
@@ -95,7 +103,23 @@ async def submit_raw_intent(
 ):
     _ensure_v2_enabled()
     trace_id = normalize_trace_id(body.trace_id)
+    _trace(
+        "raw_intent.start",
+        trace_id=trace_id,
+        ocgg_identity=body.ocgg_identity,
+        intent=body.intent,
+        deployment_target=body.deployment_target,
+    )
     result = run_cognitive_mode(body, trace_id)
+    _trace(
+        "raw_intent.cognitive_done",
+        trace_id=trace_id,
+        raw_intent_hash=result.raw_intent_hash,
+        build_sot_hash=result.build_sot_hash,
+        unresolved_count=len(result.build_sot.unresolved_items),
+        contradictions_count=len(result.build_sot.contradictions),
+        cognitive_outcome=result.cognitive_outcome.value,
+    )
     existing_raw = await session.get(RawIntentRecord, result.raw_intent_hash)
     if existing_raw is None:
         session.add(
@@ -126,6 +150,12 @@ async def submit_raw_intent(
                 payload=result.build_sot.model_dump(mode="python"),
             )
         )
+    _trace(
+        "raw_intent.persistence",
+        trace_id=trace_id,
+        raw_intent_exists=existing_raw is not None,
+        build_sot_exists=existing_sot is not None,
+    )
     session.add(
         _event(
             stage="RAW_INTENT",
@@ -149,7 +179,38 @@ async def submit_raw_intent(
             },
         )
     )
-    await session.commit()
+    _trace(
+        "raw_intent.commit.start",
+        trace_id=trace_id,
+        raw_intent_hash=result.raw_intent_hash,
+        build_sot_hash=result.build_sot_hash,
+    )
+    try:
+        await session.commit()
+    except Exception:
+        logger.exception(
+            "governed_v2.raw_intent.commit_error",
+            extra={
+                "trace_id": trace_id,
+                "raw_intent_hash": result.raw_intent_hash,
+                "build_sot_hash": result.build_sot_hash,
+            },
+        )
+        raise
+    _trace(
+        "raw_intent.commit.done",
+        trace_id=trace_id,
+        raw_intent_hash=result.raw_intent_hash,
+        build_sot_hash=result.build_sot_hash,
+    )
+    _trace(
+        "raw_intent.done",
+        trace_id=trace_id,
+        raw_intent_hash=result.raw_intent_hash,
+        build_sot_hash=result.build_sot_hash,
+        cognitive_outcome=result.cognitive_outcome.value,
+        build_sot_status=result.build_sot.status.value,
+    )
     return BuildSoTEnvelope(
         stage_linkage=result.linkage,
         build_sot=result.build_sot,
@@ -163,6 +224,7 @@ async def get_build_sot(
     session: AsyncSession = Depends(get_session),
 ):
     _ensure_v2_enabled()
+    _trace("build_sot.get.start", build_sot_hash=build_sot_hash)
     rec = await session.get(BuildSoTRecord, build_sot_hash)
     if rec is None:
         raise DUDEXError(
@@ -170,7 +232,15 @@ async def get_build_sot(
             "Build SoT not found",
             details={"build_sot_hash": build_sot_hash},
         )
-    return _record_to_envelope(rec)
+    out = _record_to_envelope(rec)
+    _trace(
+        "build_sot.get.done",
+        trace_id=rec.trace_id,
+        build_sot_hash=build_sot_hash,
+        status=rec.status,
+        approval_status=rec.approval_status,
+    )
+    return out
 
 
 @router.post("/build-sot/{build_sot_hash}/revise", response_model=BuildSoTEnvelope)
@@ -180,6 +250,7 @@ async def revise_build_sot(
     session: AsyncSession = Depends(get_session),
 ):
     _ensure_v2_enabled()
+    _trace("build_sot.revise.start", build_sot_hash=build_sot_hash, patch_keys=sorted((body.patch or {}).keys()))
     rec = await session.get(BuildSoTRecord, build_sot_hash)
     if rec is None:
         raise DUDEXError(ErrorCode.INVALID_SPEC, "Build SoT not found", details={"build_sot_hash": build_sot_hash})
@@ -214,6 +285,13 @@ async def revise_build_sot(
         )
     )
     await session.commit()
+    _trace(
+        "build_sot.revise.done",
+        trace_id=trace_id,
+        parent_build_sot_hash=build_sot_hash,
+        revised_build_sot_hash=revised_hash,
+        status=revised.status.value,
+    )
     return BuildSoTEnvelope(
         stage_linkage=StageLinkage(
             trace_id=trace_id,
@@ -234,9 +312,29 @@ async def _run_authoritative_governance(
     body: BuildSoTGovernanceEvaluateRequest,
 ) -> tuple[str, list[str], dict[str, Any] | None, str | None, str | None]:
     base = (settings.governed_v2_integration_base_url or "").rstrip("/")
+    _trace(
+        "build_sot.lock.governance_call.start",
+        trace_id=trace_id,
+        build_sot_hash=build_sot_hash,
+        live_governance=settings.governed_v2_live_governance,
+        integration_base=base or None,
+    )
     if not (settings.governed_v2_live_governance and base):
         if projection.get("operations") and not projection.get("goal", "").startswith("pending-"):
+            _trace(
+                "build_sot.lock.governance_call.short_circuit",
+                trace_id=trace_id,
+                build_sot_hash=build_sot_hash,
+                outcome="PASS",
+            )
             return "PASS", [], None, projection.get("plan_hash"), None
+        _trace(
+            "build_sot.lock.governance_call.short_circuit",
+            trace_id=trace_id,
+            build_sot_hash=build_sot_hash,
+            outcome="CLARIFY",
+            reason_code="BUILD_SOT_INCOMPLETE_FOR_GOVERNANCE",
+        )
         return "CLARIFY", ["BUILD_SOT_INCOMPLETE_FOR_GOVERNANCE"], None, projection.get("plan_hash"), None
 
     payload = {
@@ -251,8 +349,21 @@ async def _run_authoritative_governance(
     async with httpx.AsyncClient(timeout=timeout) as client:
         resp = await client.post(f"{base}/v2/build-sot/lock", json=payload, headers=headers)
     if resp.status_code >= 400:
+        _trace(
+            "build_sot.lock.governance_call.error",
+            trace_id=trace_id,
+            build_sot_hash=build_sot_hash,
+            http_status=resp.status_code,
+        )
         return "BLOCK", ["EXTERNAL_GOVERNANCE_UNREACHABLE"], None, projection.get("plan_hash"), None
     data = resp.json()
+    _trace(
+        "build_sot.lock.governance_call.done",
+        trace_id=trace_id,
+        build_sot_hash=build_sot_hash,
+        http_status=resp.status_code,
+        outcome=data.get("outcome"),
+    )
     return (
         data.get("outcome", "BLOCK"),
         list(data.get("reason_codes") or []),
@@ -269,6 +380,7 @@ async def evaluate_build_sot_governance(
     session: AsyncSession = Depends(get_session),
 ):
     _ensure_v2_enabled()
+    _trace("build_sot.governance_evaluate.start", build_sot_hash=build_sot_hash)
     rec = await session.get(BuildSoTRecord, build_sot_hash)
     if rec is None:
         raise DUDEXError(ErrorCode.INVALID_SPEC, "Build SoT not found", details={"build_sot_hash": build_sot_hash})
@@ -311,7 +423,28 @@ async def evaluate_build_sot_governance(
             metadata={"outcome": outcome, "reason_codes": reason_codes},
         )
     )
-    await session.commit()
+    try:
+        await session.commit()
+    except Exception:
+        logger.exception(
+            "governed_v2.build_sot.governance_commit_error",
+            extra={
+                "trace_id": trace_id,
+                "build_sot_hash": build_sot_hash,
+                "outcome": outcome,
+            },
+        )
+        raise
+    _trace(
+        "build_sot.governance_evaluate.done",
+        trace_id=trace_id,
+        build_sot_hash=build_sot_hash,
+        outcome=outcome,
+        status=rec.status,
+        approval_status=rec.approval_status,
+        governance_plan_hash=governance_plan_hash or plan_hash,
+        state_hash=state_hash,
+    )
     return BuildSoTGovernanceResult(
         build_sot_hash=build_sot_hash,
         trace_id=trace_id,
@@ -331,6 +464,7 @@ async def decide_build_sot_approval(
     session: AsyncSession = Depends(get_session),
 ):
     _ensure_v2_enabled()
+    _trace("build_sot.approval.start", build_sot_hash=build_sot_hash, decision=body.decision, approver_id=body.approver_id)
     rec = await session.get(BuildSoTRecord, build_sot_hash)
     if rec is None:
         raise DUDEXError(ErrorCode.INVALID_SPEC, "Build SoT not found", details={"build_sot_hash": build_sot_hash})
@@ -366,7 +500,26 @@ async def decide_build_sot_approval(
             metadata={"decision": body.decision, "approver_id": body.approver_id},
         )
     )
-    await session.commit()
+    try:
+        await session.commit()
+    except Exception:
+        logger.exception(
+            "governed_v2.build_sot.approval_commit_error",
+            extra={
+                "trace_id": rec.trace_id,
+                "build_sot_hash": build_sot_hash,
+                "decision": body.decision,
+            },
+        )
+        raise
+    _trace(
+        "build_sot.approval.done",
+        trace_id=rec.trace_id,
+        build_sot_hash=build_sot_hash,
+        decision=body.decision,
+        status=rec.status,
+        approval_status=rec.approval_status,
+    )
     return _record_to_envelope(rec)
 
 
@@ -376,6 +529,7 @@ async def compile_locked_build_sot(
     session: AsyncSession = Depends(get_session),
 ):
     _ensure_v2_enabled()
+    _trace("build_sot.compile.start", build_sot_hash=build_sot_hash)
     rec = await session.get(BuildSoTRecord, build_sot_hash)
     if rec is None:
         raise DUDEXError(ErrorCode.INVALID_SPEC, "Build SoT not found", details={"build_sot_hash": build_sot_hash})
@@ -394,6 +548,12 @@ async def compile_locked_build_sot(
         )
         existing_latest = (await session.execute(stmt)).scalar_one_or_none()
         if existing_latest is not None:
+            _trace(
+                "build_sot.compile.cache_hit",
+                trace_id=rec.trace_id,
+                build_sot_hash=build_sot_hash,
+                execution_plan_hash=existing_latest.execution_plan_hash,
+            )
             return ExecutionPlanV1.model_validate(existing_latest.payload)
     if rec.status != ArtifactStatus.locked.value:
         raise DUDEXError(
@@ -437,7 +597,25 @@ async def compile_locked_build_sot(
             metadata={"build_sot_hash": build_sot_hash},
         )
     )
-    await session.commit()
+    try:
+        await session.commit()
+    except Exception:
+        logger.exception(
+            "governed_v2.build_sot.compile_commit_error",
+            extra={
+                "trace_id": rec.trace_id,
+                "build_sot_hash": build_sot_hash,
+                "execution_plan_hash": execution_plan_hash,
+            },
+        )
+        raise
+    _trace(
+        "build_sot.compile.done",
+        trace_id=rec.trace_id,
+        build_sot_hash=build_sot_hash,
+        execution_plan_hash=execution_plan_hash,
+        governance_plan_hash=plan.governance_projection.get("plan_hash"),
+    )
     return plan
 
 
@@ -447,6 +625,7 @@ async def get_execution_plan_v2(
     session: AsyncSession = Depends(get_session),
 ):
     _ensure_v2_enabled()
+    _trace("execution_plan.get.start", execution_plan_hash=execution_plan_hash)
     rec = await session.get(ExecutionPlanRecordV2, execution_plan_hash)
     if rec is None:
         raise DUDEXError(
@@ -454,4 +633,12 @@ async def get_execution_plan_v2(
             "Execution plan not found",
             details={"execution_plan_hash": execution_plan_hash},
         )
-    return ExecutionPlanV1.model_validate(rec.payload)
+    out = ExecutionPlanV1.model_validate(rec.payload)
+    _trace(
+        "execution_plan.get.done",
+        trace_id=rec.trace_id,
+        execution_plan_hash=execution_plan_hash,
+        build_sot_hash=rec.build_sot_hash,
+        status=rec.status,
+    )
+    return out

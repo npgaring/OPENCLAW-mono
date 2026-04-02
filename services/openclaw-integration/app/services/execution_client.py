@@ -43,6 +43,8 @@ class AgentResponseSchema(BaseModel):
     artifacts: Optional[List[ArtifactItem]] = None
     steps_completed: Optional[List[str]] = None
     session_summary: Optional[str] = None
+    deployment_url: Optional[str] = None
+    preview_url: Optional[str] = None
 
 
 def _extract_json_from_text(text: str) -> Optional[dict]:
@@ -75,8 +77,10 @@ BASE_RESPONSE_FORMAT_INSTRUCTION = (
     "You must respond with valid JSON only, in this exact shape: "
     '{"status": "success"|"failed"|"partial"|"needs_review", "message": "...", '
     '"artifacts": [{"path": "...", "type": "...", "summary": "..."}], '
-    '"steps_completed": ["..."], "session_summary": "..."}. '
+    '"steps_completed": ["..."], "session_summary": "...", '
+    '"deployment_url": "...", "preview_url": "..."}. '
     "Only status and message are required; artifacts, steps_completed, and session_summary are optional. "
+    "When a deploy step runs, include deployment_url (and preview_url for preview deploys) using full https URL. "
     "When you finish, if the user might send a follow-up, set session_summary to a short summary of what was done and current state."
 )
 
@@ -163,6 +167,10 @@ def _parse_gateway_response(resp_body: dict[str, Any]) -> dict[str, Any]:
                 result["steps_completed"] = validated.steps_completed
             if validated.session_summary is not None:
                 result["session_summary"] = validated.session_summary
+            if validated.deployment_url is not None:
+                result["deployment_url"] = validated.deployment_url
+            if validated.preview_url is not None:
+                result["preview_url"] = validated.preview_url
             return result
         except Exception:
             pass

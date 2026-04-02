@@ -1,6 +1,8 @@
 import type { JsonMap } from '../types/governed';
 import { normalizeBase } from '../utils/format';
 
+const ENV_INTEGRATION_TOKEN = (import.meta.env.VITE_INTEGRATION_API_KEY ?? '').trim();
+
 function readErrorMessage(parsed: unknown, status: number): string {
   if (typeof parsed === 'object' && parsed !== null) {
     const bag = parsed as JsonMap;
@@ -24,11 +26,12 @@ export async function request<T>(
   body?: JsonMap,
 ): Promise<T> {
   const url = `${normalizeBase(base)}${path}`;
+  const effectiveToken = apiToken.trim() || ENV_INTEGRATION_TOKEN;
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
   };
-  if (apiToken.trim()) {
-    headers.Authorization = `Bearer ${apiToken.trim()}`;
+  if (effectiveToken) {
+    headers.Authorization = `Bearer ${effectiveToken}`;
   }
   const res = await fetch(url, {
     method,

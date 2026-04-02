@@ -10,13 +10,15 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 _ENV_PATH = _PROJECT_ROOT / ".env"
+_WORKSPACE_ENV_PATH = _PROJECT_ROOT.parent.parent / ".env"
+_ENV_FILES = tuple(path for path in (_ENV_PATH, _WORKSPACE_ENV_PATH) if path.exists())
 
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
         env_prefix="",
         case_sensitive=False,  # Vercel and most envs use UPPERCASE (DATABASE_URL, etc.)
-        env_file=_ENV_PATH if _ENV_PATH.exists() else None,
+        env_file=_ENV_FILES or None,
         env_file_encoding="utf-8",
         extra="ignore",
     )
@@ -70,6 +72,10 @@ class Settings(BaseSettings):
     governed_v2_enabled: bool = Field(
         default=True,
         description="Enable governed dual-engine v2 lock endpoints and continuity enforcement hooks.",
+    )
+    governed_v2_trace_logging: bool = Field(
+        default=True,
+        description="Enable verbose governed v2 tracing logs for debugging.",
     )
     approval_request_ttl_hours: int = Field(
         default=72,

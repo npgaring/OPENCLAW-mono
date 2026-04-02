@@ -8,6 +8,8 @@ if str(_svc_root) not in sys.path:
     sys.path.insert(0, str(_svc_root))
 
 import os
+import logging
+import time
 from contextlib import asynccontextmanager
 
 from fastapi import Depends, FastAPI, Request
@@ -22,9 +24,9 @@ from app.core.errors import DUDEXError, ErrorCode, ErrorResponse
 from app.db.init_db import init_db
 from app.logging.logger import configure_logging
 
-DUDEX_ROOT_PATH = os.getenv("DUDEX_ROOT_PATH")
-if not DUDEX_ROOT_PATH and os.getenv("VERCEL") == "1":
-    DUDEX_ROOT_PATH = "/dude-x"
+logger = logging.getLogger(__name__)
+
+DUDEX_ROOT_PATH = os.getenv("DUDEX_ROOT_PATH") or "/dude-x"
 
 
 @asynccontextmanager
@@ -75,6 +77,53 @@ app.add_middleware(
     allow_methods=["POST", "OPTIONS"],
     allow_headers=["authorization", "content-type"],
 )
+
+
+@app.middleware("http")
+async def request_log_middleware(request: Request, call_next):
+    start = time.perf_counter()
+    path = request.url.path
+    method = request.method
+    trace_id = request.headers.get("x-trace-id")
+    if settings.governed_v2_trace_logging:
+        logger.info(
+            "http.request.start %s",
+            {
+                "service": "dude-x",
+                "method": method,
+                "path": path,
+                "trace_id": trace_id,
+                "query": str(request.query_params) or None,
+            },
+        )
+    try:
+        response = await call_next(request)
+    except Exception:
+        if settings.governed_v2_trace_logging:
+            logger.exception(
+                "http.request.error %s",
+                {
+                    "service": "dude-x",
+                    "method": method,
+                    "path": path,
+                    "trace_id": trace_id,
+                    "duration_ms": round((time.perf_counter() - start) * 1000, 2),
+                },
+            )
+        raise
+    if settings.governed_v2_trace_logging:
+        logger.info(
+            "http.request.done %s",
+            {
+                "service": "dude-x",
+                "method": method,
+                "path": path,
+                "status_code": response.status_code,
+                "trace_id": trace_id,
+                "duration_ms": round((time.perf_counter() - start) * 1000, 2),
+            },
+        )
+    return response
 
 
 def custom_openapi():
@@ -140,9 +189,15 @@ async def validation_error_handler(request: Request, exc: RequestValidationError
 @app.exception_handler(Exception)
 async def unhandled_error_handler(request: Request, exc: Exception):
     from fastapi.responses import JSONResponse
-    import logging
-
-    logging.getLogger(__name__).exception("Unhandled error")
+    logger.exception(
+        "Unhandled error",
+        extra={
+            "path": request.url.path,
+            "method": request.method,
+            "query": str(request.query_params),
+            "trace_id": request.headers.get("x-trace-id"),
+        },
+    )
     return JSONResponse(
         status_code=500,
         content=ErrorResponse(

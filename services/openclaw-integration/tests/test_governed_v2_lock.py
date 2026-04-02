@@ -54,7 +54,13 @@ def test_v2_execution_plan_lock_and_task_continuity_flow(auth_headers, monkeypat
 
     monkeypatch.setattr(
         "app.services.execution_client.OpenClawClient.execute",
-        AsyncMock(return_value={"status": "success", "execution_id": "ex-governed-v2"}),
+        AsyncMock(
+            return_value={
+                "status": "success",
+                "execution_id": "ex-governed-v2",
+                "message": "Deployment complete: https://governed-preview-123.vercel.app",
+            }
+        ),
     )
 
     task_resp = client.post(
@@ -79,6 +85,8 @@ def test_v2_execution_plan_lock_and_task_continuity_flow(auth_headers, monkeypat
     task = task_resp.json()
     assert task["status"] == "completed"
     assert task["governance_continuity_verified"] is True
+    assert task["deployment_url"] == "https://governed-preview-123.vercel.app"
+    assert task["preview_url"] == "https://governed-preview-123.vercel.app"
 
     replay_resp = client.post(
         "/task",

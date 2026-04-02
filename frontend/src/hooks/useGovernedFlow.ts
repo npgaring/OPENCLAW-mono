@@ -22,25 +22,34 @@ import * as integration from '../services/integration';
 
 const initialDudexBase = `${window.location.origin}/dude-x`;
 const initialIntegrationBase = `${window.location.origin}/openclaw-integration`;
+const initialApiToken = (import.meta.env.VITE_INTEGRATION_API_KEY ?? '').trim();
+const defaultIdea = 'Build a conversion-focused website for Conversion Interactive Agency with Home, Services, Case Studies, and Contact pages.';
+const defaultVoice = 'Professional, clear, and modern tone. Prioritize lead capture and trust signals. Include CTA buttons and a contact form.';
+const defaultProjectName = 'CDMBR Launch Site';
+const defaultSitePurpose = 'Generate qualified leads and present agency credibility.';
+const defaultAudience = 'founders, marketing managers, local business owners';
+const defaultTone = 'professional';
+const defaultPages = 'home, services, case studies, contact';
+const defaultIntegrations = 'analytics, hubspot';
 
 export function useGovernedFlow() {
   const [dudexBase, setDudexBase] = useState(initialDudexBase);
   const [integrationBase, setIntegrationBase] = useState(initialIntegrationBase);
-  const [apiToken, setApiToken] = useState('');
+  const [apiToken, setApiToken] = useState(initialApiToken);
 
   const [identity, setIdentity] = useState<OcggIdentity>('W-OCGG');
   const [intent, setIntent] = useState<Intent>('web-build');
   const [deployTarget, setDeployTarget] = useState<DeployTarget>('preview');
   const [approverId, setApproverId] = useState('ops-01');
 
-  const [idea, setIdea] = useState('');
-  const [voice, setVoice] = useState('');
-  const [projectName, setProjectName] = useState('');
-  const [sitePurpose, setSitePurpose] = useState('');
-  const [audience, setAudience] = useState('');
-  const [tone, setTone] = useState('');
-  const [pages, setPages] = useState('');
-  const [integrations, setIntegrations] = useState('');
+  const [idea, setIdea] = useState(defaultIdea);
+  const [voice, setVoice] = useState(defaultVoice);
+  const [projectName, setProjectName] = useState(defaultProjectName);
+  const [sitePurpose, setSitePurpose] = useState(defaultSitePurpose);
+  const [audience, setAudience] = useState(defaultAudience);
+  const [tone, setTone] = useState(defaultTone);
+  const [pages, setPages] = useState(defaultPages);
+  const [integrations, setIntegrations] = useState(defaultIntegrations);
 
   const [traceId, setTraceId] = useState<string | null>(null);
   const [buildSotHash, setBuildSotHash] = useState<string | null>(null);

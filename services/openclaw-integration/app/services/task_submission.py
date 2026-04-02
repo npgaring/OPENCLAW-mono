@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 from datetime import datetime
+import logging
+import re
 from typing import Any, Optional
 from uuid import UUID
 
@@ -12,6 +14,7 @@ from sqlalchemy.orm.attributes import flag_modified
 from sqlmodel import select
 
 from app.core.errors import ErrorCodes
+from app.core.config import settings
 from app.core.identity import IDENTITY_DOMAIN_MAP
 from app.core.security import hash_payload
 from app.evaluation import build_evaluation_state_from_task_request, build_evaluation_state_with_resolved_approval, default_engine
@@ -40,6 +43,51 @@ from app.uato.plan_bridge import integration_plan_preview
 from app.uato.types import UATO_DECISION_VERSION
 from app.invariant_e import build_execution_envelope, enforce_invariant_e_dispatch, to_trace_record as ie_to_trace
 from app.services.evaluation_persistence import persist_evaluation_record
+
+logger = logging.getLogger(__name__)
+_HTTP_URL_RE = re.compile(r"https?://[^\s\"'<>]+", re.IGNORECASE)
+
+
+def _trace(event: str, **fields: Any) -> None:
+    if settings.governed_v2_trace_logging:
+        payload = {k: v for k, v in fields.items() if v is not None}
+        logger.info("governed_v2.%s %s", event, payload)
+
+
+def _find_vercel_url(value: Any) -> Optional[str]:
+    """Extract first Vercel deployment URL from nested execution payload."""
+    queue = [value]
+    scanned = 0
+    while queue and scanned < 2000:
+        scanned += 1
+        cur = queue.pop(0)
+        if isinstance(cur, dict):
+            for k, v in cur.items():
+                lk = str(k).lower()
+                if isinstance(v, str):
+                    urls = _HTTP_URL_RE.findall(v)
+                    if "vercel" in lk:
+                        for u in urls:
+                            if ".vercel.app" in u:
+                                return u.rstrip(".,;)")
+                    for u in urls:
+                        if ".vercel.app" in u:
+                            return u.rstrip(".,;)")
+                elif isinstance(v, (dict, list, tuple)):
+                    queue.append(v)
+        elif isinstance(cur, (list, tuple)):
+            queue.extend(cur)
+        elif isinstance(cur, str):
+            for u in _HTTP_URL_RE.findall(cur):
+                if ".vercel.app" in u:
+                    return u.rstrip(".,;)")
+    return None
+
+
+def _deployment_urls_from_execution_result(result: Any, deployment_target: Optional[str]) -> tuple[Optional[str], Optional[str]]:
+    deployment_url = _find_vercel_url(result)
+    preview_url = deployment_url if deployment_url and (deployment_target or "").lower() == "preview" else None
+    return deployment_url, preview_url
 
 
 def make_governance_evaluation_id(
@@ -371,6 +419,17 @@ async def run_task_submission(
     reuse_task_id: Optional[UUID] = None,
 ) -> TaskSubmitResponse:
     """Run integration task pipeline. When reuse_task_id is set, update the existing task (approval resume)."""
+    _trace(
+        "task.submit.start",
+        trace_id=trace_id,
+        ocgg_identity=body.ocgg_identity,
+        deployment_target=body.deployment_target,
+        has_governance_evaluation_id=bool(body.governance_evaluation_id),
+        has_v2_continuity_id=bool(body.v2_continuity_id),
+        has_build_sot_hash=bool(body.build_sot_hash),
+        has_execution_plan_hash=bool(body.execution_plan_hash),
+        reuse_task_id=str(reuse_task_id) if reuse_task_id else None,
+    )
     if body.ocgg_identity not in IDENTITY_DOMAIN_MAP:
         raise HTTPException(status_code=422, detail={"code": ErrorCodes.INVALID_PAYLOAD, "message": "Unknown ocgg_identity"})
     domain = IDENTITY_DOMAIN_MAP[body.ocgg_identity]
@@ -380,6 +439,12 @@ async def run_task_submission(
     spec_pre.pop("validation", None)
     spec_pre.pop("governance_evaluation_id", None)
     if minimal_plan_admissibility_issues(spec_pre):
+        _trace(
+            "task.submit.preflight_blocked",
+            trace_id=trace_id,
+            ocgg_identity=body.ocgg_identity,
+            reason_codes=list(minimal_plan_admissibility_issues(spec_pre)),
+        )
         if reuse_task_id:
             raise HTTPException(
                 status_code=422,
@@ -740,7 +805,20 @@ async def run_task_submission(
         reason_codes=list(decision.reason_codes),
     )
     governance_continuity_verified = False
+    _trace(
+        "task.submit.governance_evaluation_id",
+        trace_id=trace_id,
+        governance_evaluation_id=governance_evaluation_id,
+        provided_governance_evaluation_id=body.governance_evaluation_id,
+        plan_hash=plan_hash,
+    )
     if body.governance_evaluation_id and body.governance_evaluation_id != governance_evaluation_id:
+        _trace(
+            "task.submit.governance_mismatch",
+            trace_id=trace_id,
+            provided_governance_evaluation_id=body.governance_evaluation_id,
+            expected_governance_evaluation_id=governance_evaluation_id,
+        )
         raise HTTPException(
             status_code=422,
             detail={
@@ -755,6 +833,13 @@ async def run_task_submission(
 
     continuity_record = None
     if body.v2_continuity_id:
+        _trace(
+            "task.submit.v2_continuity.verify_start",
+            trace_id=trace_id,
+            continuity_id=body.v2_continuity_id,
+            build_sot_hash=body.build_sot_hash,
+            execution_plan_hash=body.execution_plan_hash,
+        )
         if not body.build_sot_hash or not body.execution_plan_hash:
             raise HTTPException(
                 status_code=422,
@@ -773,6 +858,12 @@ async def run_task_submission(
             governance_evaluation_id=governance_evaluation_id,
         )
         governance_continuity_verified = True
+        _trace(
+            "task.submit.v2_continuity.verify_done",
+            trace_id=trace_id,
+            continuity_id=body.v2_continuity_id,
+            governance_continuity_verified=governance_continuity_verified,
+        )
 
     if (
         not reuse_task_id
@@ -1146,6 +1237,13 @@ async def run_task_submission(
     task.execution_token_hash = token_hash
     if continuity_record is not None:
         await mark_continuity_used(session, continuity_record)
+        _trace(
+            "task.submit.v2_continuity.consumed",
+            trace_id=trace_id,
+            continuity_id=body.v2_continuity_id,
+            build_sot_hash=body.build_sot_hash,
+            execution_plan_hash=body.execution_plan_hash,
+        )
         task.audit_history = (task.audit_history or []) + [
             {
                 "event_type": "v2_continuity_consumed",
@@ -1161,8 +1259,23 @@ async def run_task_submission(
 
     try:
         client = OpenClawClient()
+        _trace(
+            "task.submit.execute_start",
+            trace_id=trace_id,
+            task_id=str(task.task_id),
+            plan_hash=plan_hash,
+            governance_continuity_verified=governance_continuity_verified,
+        )
         result = await client.execute(plan_json, execution_token, task_id=str(task.task_id))
     except OpenClawError as e:
+        _trace(
+            "task.submit.execute_error",
+            trace_id=trace_id,
+            task_id=str(task.task_id),
+            error_type=e.error_type,
+            status_code=e.status_code,
+            execution_id=e.response.get("execution_id") if isinstance(e.response, dict) else None,
+        )
         try:
             task.status = TaskStatus(e.error_type)
         except ValueError:
@@ -1172,11 +1285,14 @@ async def run_task_submission(
             task.execution_id = e.response["execution_id"]
         await session.commit()
         reason_codes = ["EXECUTION_ABORTED"] if e.error_type == "execution_aborted" else []
+        deployment_url, preview_url = _deployment_urls_from_execution_result(e.response, body.deployment_target)
         return _task_submit_response(
             task_id=task.task_id,
             status=task.status.value,
             trace_id=trace_id,
             execution_response=e.response,
+            deployment_url=deployment_url,
+            preview_url=preview_url,
             gate_outcome="PASS",
             governance_outcome="PASS",
             governance_evaluation_id=governance_evaluation_id,
@@ -1198,12 +1314,24 @@ async def run_task_submission(
         task.status = TaskStatus.failed
     task.audit_history = (task.audit_history or []) + [{"event_type": "execution_response", "payload": result}]
     await session.commit()
+    deployment_url, preview_url = _deployment_urls_from_execution_result(result, body.deployment_target)
+    _trace(
+        "task.submit.execute_done",
+        trace_id=trace_id,
+        task_id=str(task.task_id),
+        task_status=task.status.value,
+        execution_id=task.execution_id,
+        response_status=result.get("status") if isinstance(result, dict) else None,
+        deployment_url=deployment_url,
+    )
     return _task_submit_response(
         task_id=task.task_id,
         execution_id=task.execution_id,
         status=task.status.value,
         trace_id=trace_id,
         execution_response=result,
+        deployment_url=deployment_url,
+        preview_url=preview_url,
         gate_outcome="PASS",
         governance_outcome="PASS",
         governance_evaluation_id=governance_evaluation_id,
