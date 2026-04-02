@@ -32,6 +32,25 @@ from app.gate.policy import (
 
 
 class GateEngine:
+    @staticmethod
+    def _enrich_plan_json_from_spec(plan_json: dict[str, Any], spec: Any) -> None:
+        if not isinstance(spec, dict):
+            return
+        # Optional payloads that are not part of plan_hash but required by deterministic executor paths.
+        passthrough_keys = (
+            "goal",
+            "context",
+            "acceptance_criteria",
+            "build_sot_hash",
+            "execution_plan_hash",
+            "executor_contract",
+            "execution_plan_v2",
+        )
+        for key in passthrough_keys:
+            val = spec.get(key)
+            if val is not None and val != "":
+                plan_json[key] = val
+
     def evaluate(self, spec: Any, ocgg_identity: str) -> GateEvaluation:
         reason_codes: list[str] = []
         defects: list[Defect] = []
@@ -171,12 +190,7 @@ class GateEngine:
         spec_hash = hash_payload(spec)
         plan_hash = computed_plan_hash
         plan_json = {"domain": domain, "plan_hash": plan_hash, "operations": operations}
-        if spec.get("goal"):
-            plan_json["goal"] = spec["goal"]
-        if spec.get("context"):
-            plan_json["context"] = spec["context"]
-        if spec.get("acceptance_criteria"):
-            plan_json["acceptance_criteria"] = spec["acceptance_criteria"]
+        self._enrich_plan_json_from_spec(plan_json, spec)
         decision = GateDecision(
             outcome=outcome,
             reason_codes=list(set(reason_codes)),
@@ -199,13 +213,7 @@ class GateEngine:
         domain = IDENTITY_DOMAIN_MAP.get(ocgg_identity, "web")
         operations = spec.get("operations", []) if isinstance(spec, dict) else []
         plan_json = {"domain": domain, "plan_hash": "", "operations": operations}
-        if isinstance(spec, dict):
-            if spec.get("goal"):
-                plan_json["goal"] = spec["goal"]
-            if spec.get("context"):
-                plan_json["context"] = spec["context"]
-            if spec.get("acceptance_criteria"):
-                plan_json["acceptance_criteria"] = spec["acceptance_criteria"]
+        self._enrich_plan_json_from_spec(plan_json, spec)
         spec_hash = hash_payload(spec) if isinstance(spec, dict) else ""
         plan_hash = hash_payload(plan_json) if plan_json.get("operations") else ""
         decision = GateDecision(

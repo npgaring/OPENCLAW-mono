@@ -14,7 +14,7 @@ from contextlib import asynccontextmanager
 from fastapi import Depends, FastAPI
 from fastapi.openapi.utils import get_openapi
 
-from app.api import approvals, audit, evaluation_frame, gate, health, public, status, task
+from app.api import approvals, audit, evaluation_frame, gate, governed_v2, health, public, status, task
 from app.api import openai_flow
 from app.core.config import settings
 from app.core.auth import require_integration_auth
@@ -127,6 +127,8 @@ app.include_router(gate.router, prefix="/gate", tags=["gate"], dependencies=[Dep
 app.include_router(status.router, tags=["status"], dependencies=[Depends(require_integration_auth)])
 if settings.openai_flow_enabled:
     app.include_router(openai_flow.router, tags=["openai-flow"], dependencies=[Depends(require_integration_auth)])
+if settings.governed_v2_enabled:
+    app.include_router(governed_v2.router, tags=["governed-v2"], dependencies=[Depends(require_integration_auth)])
 # Public
 app.include_router(health.router, tags=["health"])
 app.include_router(public.router, tags=["public"])

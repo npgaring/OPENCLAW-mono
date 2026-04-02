@@ -12,6 +12,13 @@ from app.models.approval_request import ApprovalRequest
 from app.models.audit_event import AuditEvent
 from app.models.evaluation_frame import EvaluationFrameResponse
 from app.models.gate_decision import GateDecisionRecord
+from app.models.governed_v2 import (
+    BuildSoTLockRequest,
+    BuildSoTLockResponse,
+    ExecutionPlanLockRequest,
+    ExecutionPlanLockResponse,
+)
+from app.models.governed_v2_lock import ExecutionPlanLockRecord
 from app.models.openai_flow import (
     AdapterToSubstrateRequest,
     AdapterToSubstrateResponse,
@@ -46,12 +53,17 @@ __all__ = [
     "AuditAck",
     "AuditEvent",
     "AuditRequest",
+    "BuildSoTLockRequest",
+    "BuildSoTLockResponse",
     "AdapterToSubstrateRequest",
     "AdapterToSubstrateResponse",
     "CandidatePlan",
     "CandidatePlanMetadata",
     "CandidatePlanStep",
     "ErrorResponse",
+    "ExecutionPlanLockRequest",
+    "ExecutionPlanLockResponse",
+    "ExecutionPlanLockRecord",
     "EvaluationFrameResponse",
     "GateDecisionRecord",
     "GateEvaluateRequest",

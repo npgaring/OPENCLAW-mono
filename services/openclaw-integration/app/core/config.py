@@ -67,6 +67,10 @@ class Settings(BaseSettings):
         default=1.0,
         description="Base delay (seconds) before retry; exponential backoff: base * 2^attempt.",
     )
+    governed_v2_enabled: bool = Field(
+        default=True,
+        description="Enable governed dual-engine v2 lock endpoints and continuity enforcement hooks.",
+    )
     approval_request_ttl_hours: int = Field(
         default=72,
         description="Default lifetime for PENDING approval requests (expiry enforced on approve/resume).",

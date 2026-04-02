@@ -30,6 +30,10 @@ from app.services.approvals_service import (
     prod_governance_resume_snapshot_hash,
 )
 from app.services.execution_client import OpenClawClient, OpenClawError
+from app.services.governed_v2_continuity import (
+    mark_continuity_used,
+    verify_task_continuity_lock,
+)
 from app.uato import build_uato_input_from_spec, evaluate_uato, to_trace_record
 from app.uato.normalize import minimal_plan_admissibility_issues
 from app.uato.plan_bridge import integration_plan_preview
@@ -717,6 +721,14 @@ async def run_task_submission(
     evaluation = atomic.grl
     decision = evaluation.decision
     plan_json = evaluation.plan_json
+    if body.build_sot_hash:
+        plan_json["build_sot_hash"] = body.build_sot_hash
+    if body.execution_plan_hash:
+        plan_json["execution_plan_hash"] = body.execution_plan_hash
+    if body.executor_contract:
+        plan_json["executor_contract"] = body.executor_contract
+    if body.execution_plan_v2:
+        plan_json["execution_plan_v2"] = body.execution_plan_v2
     spec_hash = evaluation.spec_hash
     plan_hash = evaluation.plan_hash
     governance_evaluation_id = make_governance_evaluation_id(
@@ -727,7 +739,7 @@ async def run_task_submission(
         uato_decision=uato_res.decision,
         reason_codes=list(decision.reason_codes),
     )
-    governance_continuity_verified = body.governance_evaluation_id is not None
+    governance_continuity_verified = False
     if body.governance_evaluation_id and body.governance_evaluation_id != governance_evaluation_id:
         raise HTTPException(
             status_code=422,
@@ -738,6 +750,29 @@ async def run_task_submission(
                 "expected": governance_evaluation_id,
             },
         )
+    if body.governance_evaluation_id:
+        governance_continuity_verified = True
+
+    continuity_record = None
+    if body.v2_continuity_id:
+        if not body.build_sot_hash or not body.execution_plan_hash:
+            raise HTTPException(
+                status_code=422,
+                detail={
+                    "code": "V2_CONTINUITY_MISSING_LINEAGE",
+                    "message": "build_sot_hash and execution_plan_hash are required when v2_continuity_id is provided.",
+                },
+            )
+        continuity_record = await verify_task_continuity_lock(
+            session,
+            continuity_id=body.v2_continuity_id,
+            ocgg_identity=body.ocgg_identity,
+            build_sot_hash=body.build_sot_hash,
+            execution_plan_hash=body.execution_plan_hash,
+            plan_hash=plan_hash,
+            governance_evaluation_id=governance_evaluation_id,
+        )
+        governance_continuity_verified = True
 
     if (
         not reuse_task_id
@@ -1109,6 +1144,19 @@ async def run_task_submission(
         )
     gate_record.execution_token_hash = token_hash
     task.execution_token_hash = token_hash
+    if continuity_record is not None:
+        await mark_continuity_used(session, continuity_record)
+        task.audit_history = (task.audit_history or []) + [
+            {
+                "event_type": "v2_continuity_consumed",
+                "payload": {
+                    "v2_continuity_id": body.v2_continuity_id,
+                    "build_sot_hash": body.build_sot_hash,
+                    "execution_plan_hash": body.execution_plan_hash,
+                },
+            }
+        ]
+        flag_modified(task, "audit_history")
     await session.commit()
 
     try:

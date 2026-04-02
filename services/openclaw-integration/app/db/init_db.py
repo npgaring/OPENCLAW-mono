@@ -9,6 +9,7 @@ from app.db.run_migrations import run_migration_files
 from app.db.session import get_engine
 from app.models import (
     AuditEvent,
+    ExecutionPlanLockRecord,
     GateDecisionRecord,
     InvariantCDecisionRecord,
     OpenAIVesselEvent,
@@ -35,6 +36,7 @@ _MIGRATION_FILES = [
     "010_governance_outcome_column.sql",
     "011_approval_workflow.sql",
     "012_evaluation_records.sql",
+    "013_governed_v2_execution_locks.sql",
 ]
 
 _init_lock = asyncio.Lock()

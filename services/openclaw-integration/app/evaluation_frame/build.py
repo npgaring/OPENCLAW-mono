@@ -103,6 +103,12 @@ def build_shared_governable_state_for_task(
     spec.pop("uato", None)
     spec.pop("validation", None)
     spec.pop("governance_evaluation_id", None)
+    # Governance hash/evaluation continuity should be based on admissibility material, not lineage metadata.
+    spec.pop("build_sot_hash", None)
+    spec.pop("execution_plan_hash", None)
+    spec.pop("v2_continuity_id", None)
+    spec.pop("executor_contract", None)
+    spec.pop("execution_plan_v2", None)
     spec.setdefault("ocgg_identity", body.ocgg_identity)
 
     domain_spec = dict(spec)
@@ -167,6 +173,11 @@ def build_shared_governable_state_for_gate_payload(
         raise ValueError("spec must be a dict")
     domain_spec = dict(spec)
     domain_spec.pop("validation", None)
+    domain_spec.pop("build_sot_hash", None)
+    domain_spec.pop("execution_plan_hash", None)
+    domain_spec.pop("v2_continuity_id", None)
+    domain_spec.pop("executor_contract", None)
+    domain_spec.pop("execution_plan_v2", None)
     domain_spec.setdefault("ocgg_identity", ocgg_identity)
     plan_json, plan_hash, spec_hash = integration_plan_preview(domain_spec, ocgg_identity)
 

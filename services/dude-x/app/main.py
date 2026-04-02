@@ -15,7 +15,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.openapi.utils import get_openapi
 
-from app.api import compile as compile_api, health, plans, privacy, root
+from app.api import compile as compile_api, governed_v2, health, plans, privacy, root
 from app.core.auth import require_integration_auth
 from app.core.config import settings
 from app.core.errors import DUDEXError, ErrorCode, ErrorResponse
@@ -156,6 +156,8 @@ async def unhandled_error_handler(request: Request, exc: Exception):
 # Routers with API key (order as in overview)
 app.include_router(compile_api.router, dependencies=[Depends(require_integration_auth)])
 app.include_router(plans.router, dependencies=[Depends(require_integration_auth)])
+if settings.dudex_v2_enabled:
+    app.include_router(governed_v2.router, dependencies=[Depends(require_integration_auth)])
 # Public
 app.include_router(health.router)
 app.include_router(root.router)

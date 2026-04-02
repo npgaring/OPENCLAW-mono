@@ -25,6 +25,9 @@ Governance-gated layer between callers (e.g. Builder System) and the runtime exe
 - `GET /status/{task_id}` — Task status, execution_id, audit_history.
 - `POST /openai/plan` — **Opt-in** (`OPENAI_FLOW_ENABLED=true`): bounded OpenAI vessel returning locked candidate-plan JSON only.
 - `POST /adapter/to-substrate` — **Opt-in**: runs Invariant-C on candidate plan and maps to governance-compatible substrate payload (no execution).
+- Governed v2 lock endpoints (`GOVERNED_V2_ENABLED=true`):
+  - `POST /v2/build-sot/lock` — evaluate Build SoT governance projection using the same atomic engine.
+  - `POST /v2/execution-plan/lock` — evaluate compiled execution plan and mint `continuity_id` for `/task` lineage enforcement.
 - `GET /health` — Health check.
 - `GET /`, `GET /privacy` — HTML.
 

@@ -109,6 +109,12 @@ def _plan_to_openresponses_body(plan: dict, task_id: Optional[str] = None) -> di
     domain = plan.get("domain") or "default"
     user = f"project:{domain}:{task_id}" if task_id else f"project:{domain}"
     instructions = BASE_RESPONSE_FORMAT_INSTRUCTION + "\n\n" + (DOMAIN_INSTRUCTIONS.get(domain) or "")
+    if plan.get("executor_contract") == "deterministic_web_v1" or isinstance(plan.get("execution_plan_v2"), dict):
+        instructions += (
+            "\n\nDeterministic executor contract is active. "
+            "Execute only the structured execution_plan_v2 commands and file targets exactly as provided. "
+            "Do not invent additional steps, tools, dependencies, or scope."
+        )
     return {
         "model": "openclaw:main",
         "user": user,
@@ -130,7 +136,7 @@ def _extract_text_from_output(output: list[Any]) -> str:
             for part in content:
                 if isinstance(part, dict) and "text" in part:
                     parts.append(str(part["text"]))
-    return " ".join(parts).lower()
+    return " ".join(parts)
 
 
 def _parse_gateway_response(resp_body: dict[str, Any]) -> dict[str, Any]:
@@ -161,12 +167,13 @@ def _parse_gateway_response(resp_body: dict[str, Any]) -> dict[str, Any]:
         except Exception:
             pass
     result["response_parse_failed"] = True
+    text_l = text.lower() if text else ""
     status = "success"
-    if text and (
-        "failed" in text
-        or '"status": "failed"' in text
-        or "'status': 'failed'" in text
-        or '"status":"failed"' in text
+    if text_l and (
+        "failed" in text_l
+        or '"status": "failed"' in text_l
+        or "'status': 'failed'" in text_l
+        or '"status":"failed"' in text_l
     ):
         status = "failed"
     if isinstance(output, list):

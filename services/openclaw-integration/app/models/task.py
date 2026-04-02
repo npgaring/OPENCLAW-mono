@@ -176,6 +176,26 @@ class TaskSubmitRequest(BaseModel):
             "When provided, POST /task verifies it matches the same frame+governance evaluation before dispatch."
         ),
     )
+    build_sot_hash: Optional[str] = Field(
+        default=None,
+        description="Governed v2 lineage: approved Build SoT hash that produced this execution plan.",
+    )
+    execution_plan_hash: Optional[str] = Field(
+        default=None,
+        description="Governed v2 lineage: deterministic execution-plan hash.",
+    )
+    v2_continuity_id: Optional[str] = Field(
+        default=None,
+        description="Governed v2 lock token from POST /v2/execution-plan/lock; required to prevent lineage drift.",
+    )
+    executor_contract: Optional[str] = Field(
+        default=None,
+        description="Optional execution contract selector (e.g., deterministic_web_v1).",
+    )
+    execution_plan_v2: Optional[dict] = Field(
+        default=None,
+        description="Optional structured execution-plan payload for deterministic executor mode.",
+    )
     uato: Optional[UatoHints] = Field(default=None, description="Optional UATO trust/authority hints for admissibility.")
     validation: Optional[ValidationControls] = Field(
         default=None,

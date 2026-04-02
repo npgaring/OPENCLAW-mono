@@ -74,3 +74,8 @@ secrets/
 
 # Node
 node_modules/
+
+# TypeScript build artifacts
+*.tsbuildinfo
+vite.config.d.ts
+vite.config.js

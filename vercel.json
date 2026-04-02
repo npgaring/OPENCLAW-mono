@@ -4,8 +4,11 @@
     "deploymentEnabled": false
   },
   "builds": [
-    { "src": "index.html", "use": "@vercel/static" },
-    { "src": "public/**", "use": "@vercel/static" },
+    {
+      "src": "frontend/package.json",
+      "use": "@vercel/static-build",
+      "config": { "distDir": "dist" }
+    },
     { "src": "services/dude-x/app/main.py", "use": "@vercel/python" },
     { "src": "services/openclaw-integration/app/main.py", "use": "@vercel/python" }
   ],

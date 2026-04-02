@@ -31,6 +31,50 @@ class Settings(BaseSettings):
         default="*",
         description="Allowed CORS origins (comma-separated). Use '*' to allow all.",
     )
+    dudex_v2_enabled: bool = Field(
+        default=True,
+        description="Enable governed dual-engine v2 endpoints.",
+    )
+    governed_v2_live_governance: bool = Field(
+        default=False,
+        description="When true, DUDE-X v2 governance evaluation calls openclaw-integration for authoritative lock outcomes.",
+    )
+    governed_v2_integration_base_url: str = Field(
+        default="",
+        description="Base URL for openclaw-integration service (used when governed_v2_live_governance=true).",
+    )
+    governed_v2_github_owner: str = Field(
+        default="",
+        description="Primary GitHub owner slug for auto-created repos (org or user).",
+    )
+    governed_v2_github_owner_type: str = Field(
+        default="org",
+        description="Primary GitHub owner type: org | user.",
+    )
+    governed_v2_github_owner_fallback: str = Field(
+        default="",
+        description="Fallback GitHub owner slug when primary owner is unavailable.",
+    )
+    governed_v2_repo_name_template: str = Field(
+        default="cdmbr-{projectname}-{timestamp}",
+        description="Repository/project naming template used by deterministic web executor provisioning.",
+    )
+    governed_v2_default_branch: str = Field(
+        default="prod",
+        description="Default deployment branch for generated repositories and Vercel production branch.",
+    )
+    governed_v2_vercel_team_id: str = Field(
+        default="",
+        description="Vercel team id for auto-created projects.",
+    )
+    governed_v2_domain_behavior: str = Field(
+        default="vercel_default_only",
+        description="Domain behavior for v2 deploys (vercel_default_only | custom_domains).",
+    )
+    governed_v2_stack_preset: str = Field(
+        default="nextjs-typescript-react",
+        description="Default stack preset for generated web projects.",
+    )
 
 
 settings = Settings()

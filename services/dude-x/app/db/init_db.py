@@ -5,11 +5,20 @@ from sqlmodel import SQLModel
 from app.core.config import settings
 from app.db.run_migrations import run_migration_files
 from app.db.session import engine
-from app.models import CompileEvent, PlanRecord, SpecRecord
+from app.models import (
+    BuildSoTRecord,
+    CompileEvent,
+    ExecutionPlanRecordV2,
+    PlanRecord,
+    RawIntentRecord,
+    SpecRecord,
+    StageEventRecordV2,
+)
 
 _MIGRATION_FILES = [
     "001_dude_x_tables.sql",
     "002_add_identity_columns.sql",
+    "003_governed_dual_engine_v2.sql",
 ]
 
 _ADD_IDENTITY_MIGRATIONS = """
@@ -25,8 +34,8 @@ async def init_db() -> None:
     async with engine.begin() as conn:
         if is_pg:
             await run_migration_files(conn, _MIGRATION_FILES)
+            for stmt in _ADD_IDENTITY_MIGRATIONS.strip().split(";"):
+                stmt = stmt.strip()
+                if stmt:
+                    await conn.execute(text(stmt))
         await conn.run_sync(SQLModel.metadata.create_all)
-        for stmt in _ADD_IDENTITY_MIGRATIONS.strip().split(";"):
-            stmt = stmt.strip()
-            if stmt:
-                await conn.execute(text(stmt))

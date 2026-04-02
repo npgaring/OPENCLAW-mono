@@ -1,248 +1,37 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="en">
   <head>
     <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>OpenClaw Monorepo Index</title>
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>OpenClaw Governed Builder Console</title>
     <style>
-      @import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap');
-
-      :root {
-        color-scheme: light;
-        --bg: #0f172a;
-        --bg-soft: #111b34;
-        --panel: #121a2b;
-        --panel-border: rgba(148, 163, 184, 0.25);
-        --text: #e2e8f0;
-        --text-muted: #94a3b8;
-        --accent: #38bdf8;
-        --accent-strong: #0ea5e9;
-        --accent-glow: rgba(56, 189, 248, 0.18);
-        --success: #22c55e;
-        --warning: #f59e0b;
-        --shadow: 0 20px 60px rgba(15, 23, 42, 0.45);
-      }
-
-      * {
-        box-sizing: border-box;
-      }
-
       body {
         margin: 0;
+        font-family: system-ui, -apple-system, sans-serif;
+        background: #061126;
+        color: #e6edf8;
+        display: grid;
         min-height: 100vh;
-        font-family: 'Space Grotesk', system-ui, -apple-system, sans-serif;
-        color: var(--text);
-        background:
-          radial-gradient(circle at top, rgba(56, 189, 248, 0.18), transparent 55%),
-          radial-gradient(circle at 20% 80%, rgba(34, 197, 94, 0.12), transparent 50%),
-          var(--bg);
+        place-items: center;
       }
-
-      .page {
-        max-width: 1080px;
-        margin: 0 auto;
-        padding: 56px 24px 96px;
+      .card {
+        max-width: 520px;
+        padding: 32px;
+        border-radius: 14px;
+        border: 1px solid rgba(148, 163, 184, 0.28);
+        background: rgba(7, 17, 33, 0.9);
+        text-align: center;
       }
-
-      .hero {
-        margin-bottom: 32px;
-      }
-
-      .eyebrow {
-        text-transform: uppercase;
-        letter-spacing: 0.24em;
-        font-size: 12px;
-        font-weight: 600;
-        color: var(--text-muted);
-      }
-
-      h1 {
-        margin: 16px 0 10px;
-        font-size: clamp(30px, 4vw, 46px);
-        line-height: 1.1;
-      }
-
-      p {
-        margin: 0 0 16px;
-        color: var(--text-muted);
-        font-size: 16px;
-      }
-
-      .panel {
-        background: linear-gradient(180deg, rgba(18, 26, 43, 0.95), rgba(15, 23, 42, 0.92));
-        border: 1px solid var(--panel-border);
-        border-radius: 22px;
-        padding: 28px;
-        box-shadow: var(--shadow);
-        backdrop-filter: blur(12px);
-      }
-
-      .grid {
-        display: grid;
-        gap: 20px;
-      }
-
-      .grid.two {
-        grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
-      }
-
-      .form-row {
-        display: grid;
-        gap: 12px;
-      }
-
-      label {
-        font-size: 13px;
-        color: var(--text-muted);
-      }
-
-      input[type="text"] {
-        width: 100%;
-        border-radius: 12px;
-        border: 1px solid rgba(148, 163, 184, 0.3);
-        padding: 10px 12px;
-        background: rgba(15, 23, 42, 0.6);
-        color: var(--text);
-        font-family: 'IBM Plex Mono', ui-monospace, SFMono-Regular, Menlo, monospace;
-        font-size: 13px;
-      }
-
-      .actions {
-        display: flex;
-        flex-wrap: wrap;
-        gap: 12px;
-        margin-top: 16px;
-      }
-
-      .btn {
-        display: inline-flex;
-        align-items: center;
-        gap: 8px;
-        padding: 10px 16px;
-        border-radius: 999px;
-        border: 1px solid transparent;
-        font-weight: 600;
-        font-size: 14px;
-        text-decoration: none;
-        transition: transform 0.18s ease, box-shadow 0.18s ease, background 0.18s ease;
-      }
-
-      .btn.primary {
-        background: linear-gradient(135deg, var(--accent), var(--accent-strong));
-        color: #0b1220;
-        box-shadow: 0 12px 24px var(--accent-glow);
-      }
-
-      .btn.secondary {
-        background: rgba(148, 163, 184, 0.12);
-        color: var(--text);
-        border-color: rgba(148, 163, 184, 0.3);
-      }
-
-      .btn.ghost {
-        background: transparent;
-        color: var(--text-muted);
-        border-color: rgba(148, 163, 184, 0.2);
-      }
-
-      .btn:hover {
-        transform: translateY(-1px);
-      }
-
-      .divider {
-        margin: 20px 0;
-        height: 1px;
-        background: linear-gradient(90deg, transparent, rgba(148, 163, 184, 0.3), transparent);
-      }
-
-      .meta {
-        font-family: 'IBM Plex Mono', ui-monospace, SFMono-Regular, Menlo, monospace;
-        font-size: 13px;
-        color: var(--text-muted);
-      }
+      code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+      a { color: #22d3ee; }
     </style>
   </head>
   <body>
-    <main class="page">
-      <section class="hero">
-        <div class="eyebrow">Monorepo Index</div>
-        <h1>OpenClaw Services</h1>
-        <p>Quick navigation for public endpoints across DUDE-X and OpenClaw Integration.</p>
-      </section>
-
-      <section class="panel grid two">
-        <div class="form-row">
-          <label for="dudex-base">DUDE-X base URL</label>
-          <input id="dudex-base" type="text" value="https://openclaw-mono.vercel.app/dude-x" />
-        </div>
-        <div class="form-row">
-          <label for="integration-base">OpenClaw Integration base URL</label>
-          <input id="integration-base" type="text" value="https://openclaw-mono.vercel.app/openclaw-integration" />
-        </div>
-        <div class="meta">Edit base URLs to point at your environment. Changes update the buttons below.</div>
-      </section>
-
-      <div class="divider"></div>
-
-      <section class="grid two">
-        <article class="panel">
-          <div class="eyebrow">DUDE-X</div>
-          <h1>Planner Service</h1>
-          <p>Compile-only deterministic planner for specs and plan expansion.</p>
-          <div class="actions">
-            <a class="btn primary" data-base="dudex" data-path="/">Home</a>
-            <a class="btn secondary" data-base="dudex" data-path="/docs">Swagger UI</a>
-            <a class="btn secondary" data-base="dudex" data-path="/redoc">ReDoc</a>
-            <a class="btn secondary" data-base="dudex" data-path="/health">Health</a>
-            <a class="btn secondary" data-base="dudex" data-path="/openapi-unified.json">OpenAPI JSON</a>
-            <a class="btn ghost" data-base="integration" data-path="/privacy">Privacy</a>
-          </div>
-          <div class="divider"></div>
-          <div class="meta">Public endpoints only. Protected routes require `X-API-Key`.</div>
-        </article>
-
-        <article class="panel">
-          <div class="eyebrow">OpenClaw Integration</div>
-          <h1>Governance Gateway</h1>
-          <p>Governance-gated layer between callers and the runtime executor.</p>
-          <div class="actions">
-            <a class="btn primary" data-base="integration" data-path="/">Home</a>
-            <a class="btn secondary" data-base="integration" data-path="/docs">Swagger UI</a>
-            <a class="btn secondary" data-base="integration" data-path="/redoc">ReDoc</a>
-            <a class="btn secondary" data-base="integration" data-path="/health">Health</a>
-            <a class="btn ghost" data-base="integration" data-path="/openapi-unified.json">OpenAPI JSON</a>
-            <a class="btn ghost" data-base="integration" data-path="/privacy">Privacy</a>
-          </div>
-          <div class="divider"></div>
-          <div class="meta">Protected routes require `Authorization: Bearer &lt;INTEGRATION_API_KEY&gt;`.</div>
-        </article>
-      </section>
+    <main class="card">
+      <h1>OpenClaw Governed Builder Console</h1>
+      <p>The frontend is built from <code>frontend/</code> via Vite and served by Vercel's static build.</p>
+      <p>If you see this page, the static build has not been deployed yet.</p>
+      <p>Local dev: <code>cd frontend && npm install && npm run dev</code></p>
     </main>
-
-    <script>
-      const dudexBase = document.getElementById('dudex-base');
-      const integrationBase = document.getElementById('integration-base');
-      const links = document.querySelectorAll('[data-base]');
-
-      const normalizeBase = (value) => value.trim().replace(/\/$/, '');
-
-      const refreshLinks = () => {
-        const bases = {
-          dudex: normalizeBase(dudexBase.value || ''),
-          integration: normalizeBase(integrationBase.value || ''),
-        };
-
-        links.forEach((link) => {
-          const baseKey = link.dataset.base;
-          const path = link.dataset.path || '';
-          const base = bases[baseKey];
-          link.href = base ? `${base}${path}` : path;
-        });
-      };
-
-      dudexBase.addEventListener('input', refreshLinks);
-      integrationBase.addEventListener('input', refreshLinks);
-      refreshLinks();
-    </script>
   </body>
 </html>
