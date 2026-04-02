@@ -6,7 +6,6 @@ from typing import Any, Optional
 from uuid import UUID, uuid4
 
 from sqlalchemy import Column, DateTime, JSON
-from sqlalchemy.dialects.postgresql import UUID as PgUUID
 from sqlmodel import Field, SQLModel
 
 
@@ -71,7 +70,7 @@ class ExecutionPlanRecordV2(SQLModel, table=True):
 class StageEventRecordV2(SQLModel, table=True):
     __tablename__ = "stage_events_v2"
 
-    id: UUID = Field(default_factory=uuid4, sa_column=Column(PgUUID(as_uuid=True), primary_key=True, default=uuid4))
+    id: UUID = Field(primary_key=True, default_factory=uuid4)
     trace_id: str = Field(index=True, max_length=36)
     stage: str = Field(index=True, max_length=64)
     event_type: str = Field(index=True, max_length=64)

@@ -37,6 +37,7 @@ _MIGRATION_FILES = [
     "011_approval_workflow.sql",
     "012_evaluation_records.sql",
     "013_governed_v2_execution_locks.sql",
+    "014_uuid_columns_to_text.sql",
 ]
 
 _init_lock = asyncio.Lock()

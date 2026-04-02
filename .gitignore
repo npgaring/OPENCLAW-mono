@@ -72,6 +72,9 @@ dmypy.json
 *.key
 secrets/
 
+# SQLite
+*.db
+
 # Node
 node_modules/
 

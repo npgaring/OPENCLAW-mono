@@ -6,7 +6,6 @@ from uuid import UUID, uuid4
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 from sqlalchemy import Column, Enum as SaEnum, JSON, Text
-from sqlalchemy.dialects.postgresql import UUID as PgUUID
 from sqlmodel import Field as SqlField, SQLModel
 
 from app.models.evaluation_frame import EvaluationFrameResponse
@@ -61,7 +60,7 @@ class TaskStatus(str, Enum):
 class Task(SQLModel, table=True):
     __tablename__ = "tasks"
 
-    task_id: UUID = SqlField(default_factory=uuid4, sa_column=Column(PgUUID(as_uuid=True), primary_key=True, default=uuid4))
+    task_id: UUID = SqlField(primary_key=True, default_factory=uuid4)
     ocgg_identity: str = SqlField(index=True)
     domain: str = SqlField()
     plan_hash: str = SqlField()

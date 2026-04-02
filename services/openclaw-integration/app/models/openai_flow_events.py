@@ -6,14 +6,13 @@ from typing import Any, Optional
 from uuid import UUID, uuid4
 
 from sqlalchemy import Column, JSON
-from sqlalchemy.dialects.postgresql import UUID as PgUUID
 from sqlmodel import Field, SQLModel
 
 
 class OpenAIVesselEvent(SQLModel, table=True):
     __tablename__ = "openai_vessel_events"
 
-    id: UUID = Field(default_factory=uuid4, sa_column=Column(PgUUID(as_uuid=True), primary_key=True, default=uuid4))
+    id: UUID = Field(primary_key=True, default_factory=uuid4)
     trace_id: str = Field(index=True, max_length=36)
     ocgg_identity: str = Field(index=True)
     intent: str = Field(index=True)
@@ -31,7 +30,7 @@ class OpenAIVesselEvent(SQLModel, table=True):
 class InvariantCDecisionRecord(SQLModel, table=True):
     __tablename__ = "invariant_c_decisions"
 
-    id: UUID = Field(default_factory=uuid4, sa_column=Column(PgUUID(as_uuid=True), primary_key=True, default=uuid4))
+    id: UUID = Field(primary_key=True, default_factory=uuid4)
     trace_id: str = Field(index=True, max_length=36)
     ocgg_identity: str = Field(index=True)
     intent: str = Field(index=True)
@@ -46,7 +45,7 @@ class InvariantCDecisionRecord(SQLModel, table=True):
 class SubstrateAdapterEvent(SQLModel, table=True):
     __tablename__ = "substrate_adapter_events"
 
-    id: UUID = Field(default_factory=uuid4, sa_column=Column(PgUUID(as_uuid=True), primary_key=True, default=uuid4))
+    id: UUID = Field(primary_key=True, default_factory=uuid4)
     trace_id: str = Field(index=True, max_length=36)
     ocgg_identity: str = Field(index=True)
     intent: str = Field(index=True)

@@ -4,15 +4,14 @@ from typing import Any, List, Optional
 from uuid import UUID, uuid4
 
 from sqlalchemy import Column, JSON
-from sqlalchemy.dialects.postgresql import UUID as PgUUID
 from sqlmodel import Field, SQLModel
 
 
 class GateDecisionRecord(SQLModel, table=True):
     __tablename__ = "gate_decisions"
 
-    id: UUID = Field(default_factory=uuid4, sa_column=Column(PgUUID(as_uuid=True), primary_key=True, default=uuid4))
-    task_id: UUID = Field(sa_column=Column(PgUUID(as_uuid=True), index=True, nullable=False))
+    id: UUID = Field(primary_key=True, default_factory=uuid4)
+    task_id: UUID = Field(index=True)
     ocgg_identity: str = Field(index=True)
     outcome: str = Field()
     reason_codes: List[str] = Field(default_factory=list, sa_column=Column(JSON, nullable=False))

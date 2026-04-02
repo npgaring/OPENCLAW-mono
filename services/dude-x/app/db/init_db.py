@@ -19,6 +19,7 @@ _MIGRATION_FILES = [
     "001_dude_x_tables.sql",
     "002_add_identity_columns.sql",
     "003_governed_dual_engine_v2.sql",
+    "004_uuid_columns_to_text.sql",
 ]
 
 _ADD_IDENTITY_MIGRATIONS = """
