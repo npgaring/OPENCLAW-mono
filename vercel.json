@@ -7,7 +7,7 @@
     {
       "src": "frontend/package.json",
       "use": "@vercel/static-build",
-      "config": { "distDir": "dist" }
+      "config": { "distDir": "frontend/dist" }
     },
     { "src": "services/dude-x/app/main.py", "use": "@vercel/python" },
     { "src": "services/openclaw-integration/app/main.py", "use": "@vercel/python" }
