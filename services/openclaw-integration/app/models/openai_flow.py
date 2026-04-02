@@ -50,6 +50,19 @@ class BuildInputs(DependsOnInputs):
 class DeployInputs(DependsOnInputs):
     provider: str = Field(min_length=1)
     project: str = Field(min_length=1)
+    project_name: Optional[str] = None
+    linked_repo_name: Optional[str] = None
+    repo_name: Optional[str] = None
+    owner: Optional[str] = None
+    owner_type: Optional[str] = None
+    fallback_owner: Optional[str] = None
+    repo_name_template: Optional[str] = None
+    default_branch: Optional[str] = None
+    production_branch: Optional[str] = None
+    team_id: Optional[str] = None
+    domain_behavior: Optional[str] = None
+    branch: Optional[str] = None
+    visibility: Optional[str] = None
 
 
 class TestInputs(DependsOnInputs):
@@ -63,11 +76,27 @@ class RollbackPrepInputs(DependsOnInputs):
 
 class ProvisionRepoInputs(DependsOnInputs):
     provider: str = Field(min_length=1)
+    project: Optional[str] = None
+    project_name: Optional[str] = None
+    repo_name: Optional[str] = None
+    owner: Optional[str] = None
+    owner_type: Optional[str] = None
+    fallback_owner: Optional[str] = None
+    repo_name_template: Optional[str] = None
+    default_branch: Optional[str] = None
+    visibility: Optional[str] = None
 
 
 class ProvisionHostingInputs(DependsOnInputs):
     provider: str = Field(min_length=1)
     project: Optional[str] = None
+    project_name: Optional[str] = None
+    linked_repo_name: Optional[str] = None
+    team_id: Optional[str] = None
+    domain_behavior: Optional[str] = None
+    branch: Optional[str] = None
+    default_branch: Optional[str] = None
+    production_branch: Optional[str] = None
 
 
 BoundedStepInputs = Union[
