@@ -1,6 +1,5 @@
 """Human approval workflow: list, detail, approve, reject, resume."""
 from typing import Any, Optional
-from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, ConfigDict, Field
@@ -31,9 +30,9 @@ class ResumeBody(BaseModel):
 class ApprovalOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
-    id: UUID
+    id: str
     trace_id: str
-    task_id: Optional[UUID] = None
+    task_id: Optional[str] = None
     source_layer: str
     status: str
     reason_code: Optional[str] = None
@@ -56,7 +55,7 @@ async def list_approvals(
 
 
 @router.get("/{approval_id}", response_model=ApprovalOut)
-async def get_approval(approval_id: UUID, session: AsyncSession = Depends(get_session)):
+async def get_approval(approval_id: str, session: AsyncSession = Depends(get_session)):
     ar = await session.get(ApprovalRequest, approval_id)
     if not ar:
         raise HTTPException(status_code=404, detail="Approval request not found")
@@ -65,7 +64,7 @@ async def get_approval(approval_id: UUID, session: AsyncSession = Depends(get_se
 
 @router.post("/{approval_id}/approve", response_model=ApprovalOut)
 async def approve(
-    approval_id: UUID,
+    approval_id: str,
     body: ApproveRejectBody,
     session: AsyncSession = Depends(get_session),
 ):
@@ -76,7 +75,7 @@ async def approve(
 
 @router.post("/{approval_id}/reject", response_model=ApprovalOut)
 async def reject(
-    approval_id: UUID,
+    approval_id: str,
     body: ApproveRejectBody,
     session: AsyncSession = Depends(get_session),
 ):
@@ -87,7 +86,7 @@ async def reject(
 
 @router.post("/{approval_id}/resume")
 async def resume(
-    approval_id: UUID,
+    approval_id: str,
     session: AsyncSession = Depends(get_session),
     body: ResumeBody = ResumeBody(),
 ):

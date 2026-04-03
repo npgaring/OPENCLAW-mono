@@ -51,6 +51,10 @@ export interface ExecutionPlanLockResult {
 export interface TaskSubmitResult {
   status?: string;
   execution_id?: string;
+  deployment_url?: string;
+  preview_url?: string;
+  repository_url?: string;
+  execution_response?: Record<string, unknown>;
   [k: string]: unknown;
 }
 

@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 from typing import Any, Optional
-from uuid import UUID
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -63,8 +62,8 @@ async def persist_evaluation_record(
     session: AsyncSession,
     atomic: AtomicEvaluationResult,
     *,
-    task_id: Optional[UUID] = None,
-) -> UUID:
+    task_id: Optional[str] = None,
+) -> str:
     row = EvaluationRecord(
         trace_id=atomic.trace_id,
         state_hash=atomic.state_hash,

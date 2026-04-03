@@ -1,7 +1,7 @@
 """GateDecisionRecord table."""
 from datetime import datetime
 from typing import Any, List, Optional
-from uuid import UUID, uuid4
+from uuid import uuid4
 
 from sqlalchemy import Column, JSON
 from sqlmodel import Field, SQLModel
@@ -10,8 +10,8 @@ from sqlmodel import Field, SQLModel
 class GateDecisionRecord(SQLModel, table=True):
     __tablename__ = "gate_decisions"
 
-    id: UUID = Field(primary_key=True, default_factory=uuid4)
-    task_id: UUID = Field(index=True)
+    id: str = Field(primary_key=True, default_factory=lambda: str(uuid4()))
+    task_id: str = Field(index=True)
     ocgg_identity: str = Field(index=True)
     outcome: str = Field()
     reason_codes: List[str] = Field(default_factory=list, sa_column=Column(JSON, nullable=False))

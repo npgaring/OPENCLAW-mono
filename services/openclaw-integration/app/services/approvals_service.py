@@ -6,7 +6,6 @@ import json
 import logging
 from datetime import datetime, timedelta
 from typing import Any, Optional
-from uuid import UUID
 
 from fastapi import HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -68,7 +67,7 @@ async def create_approval_request_for_stop(
     session: AsyncSession,
     *,
     trace_id: str,
-    task_id: Optional[UUID],
+    task_id: Optional[str],
     source_layer: ApprovalSourceLayer,
     reason_code: str,
     resume_from_stage: str,
@@ -171,7 +170,7 @@ def _ensure_not_expired(ar: ApprovalRequest) -> None:
 
 async def approve_request(
     session: AsyncSession,
-    approval_id: UUID,
+    approval_id: str,
     *,
     approver_id: str,
     comment: Optional[str] = None,
@@ -204,7 +203,7 @@ async def approve_request(
 
 async def reject_request(
     session: AsyncSession,
-    approval_id: UUID,
+    approval_id: str,
     *,
     rejected_by: str,
     comment: Optional[str] = None,
@@ -253,7 +252,7 @@ async def list_approvals(
 
 async def resume_approved_request(
     session: AsyncSession,
-    approval_id: UUID,
+    approval_id: str,
     *,
     actor: str,
 ) -> Any:

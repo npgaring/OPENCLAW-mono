@@ -599,3 +599,140 @@ pre {
   opacity: 0.5;
   cursor: not-allowed;
 }
+
+/* Deployment Results */
+.deployment-results {
+  background: #0d1117;
+  border: 1px solid #30363d;
+  border-radius: 8px;
+  padding: 16px;
+  margin-top: 8px;
+}
+
+.deployment-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 12px;
+}
+
+.deployment-header h3 {
+  margin: 0;
+  font-size: 15px;
+  color: #e6edf3;
+}
+
+.deployment-badge {
+  padding: 2px 10px;
+  border-radius: 10px;
+  font-size: 12px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.deployment-badge.success {
+  background: #238636;
+  color: #fff;
+}
+
+.deployment-badge.pending {
+  background: #9e6a03;
+  color: #fff;
+}
+
+.deployment-links {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.deployment-link {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 14px;
+  border-radius: 6px;
+  text-decoration: none;
+  transition: background 0.15s;
+}
+
+.deployment-link.repo {
+  background: #161b22;
+  border: 1px solid #30363d;
+}
+
+.deployment-link.vercel {
+  background: #161b22;
+  border: 1px solid #30363d;
+}
+
+.deployment-link:hover {
+  background: #1c2129;
+  border-color: #58a6ff;
+}
+
+.deployment-link-icon {
+  font-size: 20px;
+  flex-shrink: 0;
+}
+
+.deployment-link span span {
+  display: block;
+}
+
+.deployment-link-label {
+  font-size: 13px;
+  font-weight: 600;
+  color: #58a6ff;
+}
+
+.deployment-link-url {
+  font-size: 11px;
+  color: #8b949e;
+  word-break: break-all;
+  margin-top: 2px;
+}
+
+.deployment-link-arrow {
+  margin-left: auto;
+  font-size: 16px;
+  color: #8b949e;
+  flex-shrink: 0;
+}
+
+/* Pipeline Phases */
+.pipeline-phases {
+  display: flex;
+  gap: 4px;
+  margin-bottom: 12px;
+  padding: 8px 0;
+}
+
+.pipeline-phase {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 12px;
+  background: #161b22;
+  border-radius: 6px;
+  font-size: 12px;
+  color: #8b949e;
+  border: 1px solid #30363d;
+  transition: all 0.2s;
+}
+
+.pipeline-phase.done {
+  color: #3fb950;
+  border-color: #238636;
+  background: #0d1117;
+}
+
+.phase-indicator {
+  font-size: 14px;
+  font-weight: 700;
+  width: 18px;
+  text-align: center;
+  flex-shrink: 0;
+}

@@ -2,7 +2,7 @@
 from datetime import datetime
 from enum import Enum
 from typing import Any, List, Literal, Optional
-from uuid import UUID, uuid4
+from uuid import uuid4
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 from sqlalchemy import Column, Enum as SaEnum, JSON, Text
@@ -60,7 +60,7 @@ class TaskStatus(str, Enum):
 class Task(SQLModel, table=True):
     __tablename__ = "tasks"
 
-    task_id: UUID = SqlField(primary_key=True, default_factory=uuid4)
+    task_id: str = SqlField(primary_key=True, default_factory=lambda: str(uuid4()))
     ocgg_identity: str = SqlField(index=True)
     domain: str = SqlField()
     plan_hash: str = SqlField()
@@ -99,7 +99,7 @@ class Task(SQLModel, table=True):
     updated_at: datetime = SqlField(default_factory=datetime.utcnow)
     execution_id: Optional[str] = SqlField(default=None, index=True)
     trace_id: Optional[str] = SqlField(default=None, index=True, max_length=36)
-    approval_request_id: Optional[UUID] = SqlField(default=None, index=True)
+    approval_request_id: Optional[str] = SqlField(default=None, index=True)
     blocked_stage: Optional[str] = SqlField(default=None)
 
 
@@ -214,12 +214,13 @@ class TaskSubmitRequest(BaseModel):
 class TaskSubmitResponse(BaseModel):
     model_config = ConfigDict(extra="allow")
 
-    task_id: UUID
+    task_id: str
     execution_id: Optional[str] = None
     status: str
     execution_response: Optional[dict] = None
     deployment_url: Optional[str] = None
     preview_url: Optional[str] = None
+    repository_url: Optional[str] = None
     # gate_outcome: effective "may dispatch" signal for backward compatibility (BLOCK if governance blocked, UATO blocked, or execution denied).
     gate_outcome: Optional[str] = None
     # governance_outcome: GateEngine PASS/BLOCK only when gate evaluated (None if stopped at UATO only).
@@ -240,7 +241,7 @@ class TaskSubmitResponse(BaseModel):
     operator_identity: Optional[str] = None
     approver_identity: Optional[str] = None
     approval_required: Optional[bool] = None
-    approval_request_id: Optional[UUID] = None
+    approval_request_id: Optional[str] = None
     approval_status: Optional[str] = None
     source_layer: Optional[str] = None
     resume_available: Optional[bool] = None
@@ -262,7 +263,7 @@ class TaskContinueRequest(BaseModel):
 class TaskStatusResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    task_id: UUID
+    task_id: str
     status: str
     execution_id: Optional[str] = None
     governance_outcome: Optional[str] = Field(

@@ -11,6 +11,7 @@ import httpx
 
 from app.core.config import settings
 from app.models.governed_v2 import BuildSoTV1
+from app.services.openai_chat_compat import sanitize_chat_completions_payload
 
 logger = logging.getLogger(__name__)
 
@@ -94,6 +95,7 @@ class Skill(ABC):
                     "schema": schema,
                 },
             }
+        payload = sanitize_chat_completions_payload(payload)
         try:
             timeout = httpx.Timeout(float(settings.openai_content_timeout_seconds))
             async with httpx.AsyncClient(timeout=timeout) as client:

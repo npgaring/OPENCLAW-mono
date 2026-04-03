@@ -5,7 +5,6 @@ from datetime import datetime
 import logging
 import re
 from typing import Any, Optional
-from uuid import UUID
 
 from fastapi import HTTPException
 from sqlalchemy.exc import IntegrityError
@@ -33,6 +32,12 @@ from app.services.approvals_service import (
     prod_governance_resume_snapshot_hash,
 )
 from app.services.execution_client import OpenClawClient, OpenClawError
+from app.services.deployment_tracker import record_deployment
+from app.services.deterministic_executor import (
+    DeterministicExecutionError,
+    DeterministicWebExecutor,
+    _is_deterministic_plan,
+)
 from app.services.governed_v2_continuity import (
     mark_continuity_used,
     verify_task_continuity_lock,
@@ -46,6 +51,15 @@ from app.services.evaluation_persistence import persist_evaluation_record
 
 logger = logging.getLogger(__name__)
 _HTTP_URL_RE = re.compile(r"https?://[^\s\"'<>]+", re.IGNORECASE)
+
+
+def _is_concrete_external_url(url: str) -> bool:
+    """Reject placeholder/template URLs such as ...{timestamp}... ."""
+    if not isinstance(url, str) or not url:
+        return False
+    if "{" in url or "}" in url:
+        return False
+    return True
 
 
 def _trace(event: str, **fields: Any) -> None:
@@ -69,10 +83,14 @@ def _find_vercel_url(value: Any) -> Optional[str]:
                     if "vercel" in lk:
                         for u in urls:
                             if ".vercel.app" in u:
-                                return u.rstrip(".,;)")
+                                candidate = u.rstrip(".,;)")
+                                if _is_concrete_external_url(candidate):
+                                    return candidate
                     for u in urls:
                         if ".vercel.app" in u:
-                            return u.rstrip(".,;)")
+                            candidate = u.rstrip(".,;)")
+                            if _is_concrete_external_url(candidate):
+                                return candidate
                 elif isinstance(v, (dict, list, tuple)):
                     queue.append(v)
         elif isinstance(cur, (list, tuple)):
@@ -80,14 +98,84 @@ def _find_vercel_url(value: Any) -> Optional[str]:
         elif isinstance(cur, str):
             for u in _HTTP_URL_RE.findall(cur):
                 if ".vercel.app" in u:
-                    return u.rstrip(".,;)")
+                    candidate = u.rstrip(".,;)")
+                    if _is_concrete_external_url(candidate):
+                        return candidate
     return None
 
 
-def _deployment_urls_from_execution_result(result: Any, deployment_target: Optional[str]) -> tuple[Optional[str], Optional[str]]:
+def _find_github_url(value: Any) -> Optional[str]:
+    """Extract first GitHub repository URL from nested execution payload."""
+    queue = [value]
+    scanned = 0
+    while queue and scanned < 2000:
+        scanned += 1
+        cur = queue.pop(0)
+        if isinstance(cur, dict):
+            for k, v in cur.items():
+                lk = str(k).lower()
+                if isinstance(v, str):
+                    urls = _HTTP_URL_RE.findall(v)
+                    if "github" in lk:
+                        for u in urls:
+                            if "github.com/" in u.lower():
+                                candidate = u.rstrip(".,;)")
+                                if _is_concrete_external_url(candidate):
+                                    return candidate
+                    for u in urls:
+                        if "github.com/" in u.lower():
+                            candidate = u.rstrip(".,;)")
+                            if _is_concrete_external_url(candidate):
+                                return candidate
+                elif isinstance(v, (dict, list, tuple)):
+                    queue.append(v)
+        elif isinstance(cur, (list, tuple)):
+            queue.extend(cur)
+        elif isinstance(cur, str):
+            for u in _HTTP_URL_RE.findall(cur):
+                if "github.com/" in u.lower():
+                    candidate = u.rstrip(".,;)")
+                    if _is_concrete_external_url(candidate):
+                        return candidate
+    return None
+
+
+def _execution_evidence_reason_codes(plan: dict[str, Any], result: dict[str, Any]) -> list[str]:
+    """For deterministic provisioning plans, require concrete evidence links on success."""
+    status = str(result.get("status") or "").lower()
+    if status != "success":
+        return []
+
+    operations = plan.get("operations")
+    if not isinstance(operations, list):
+        return []
+
+    expects_repo = False
+    expects_deploy = False
+    for op in operations:
+        if not isinstance(op, dict):
+            continue
+        op_type = str(op.get("type") or "").strip().lower()
+        inputs = op.get("inputs") if isinstance(op.get("inputs"), dict) else {}
+        provider = str(inputs.get("provider") or "").strip().lower()
+        if op_type == "provision_repo" or provider == "github":
+            expects_repo = True
+        if op_type == "deploy":
+            expects_deploy = True
+
+    reason_codes: list[str] = []
+    if expects_repo and not _find_github_url(result):
+        reason_codes.append("EXECUTION_EVIDENCE_MISSING_GITHUB_URL")
+    if expects_deploy and not _find_vercel_url(result):
+        reason_codes.append("EXECUTION_EVIDENCE_MISSING_DEPLOYMENT_URL")
+    return reason_codes
+
+
+def _deployment_urls_from_execution_result(result: Any, deployment_target: Optional[str]) -> tuple[Optional[str], Optional[str], Optional[str]]:
     deployment_url = _find_vercel_url(result)
     preview_url = deployment_url if deployment_url and (deployment_target or "").lower() == "preview" else None
-    return deployment_url, preview_url
+    repository_url = result.get("repository_url") if isinstance(result, dict) else None
+    return deployment_url, preview_url, repository_url
 
 
 def make_governance_evaluation_id(
@@ -116,7 +204,7 @@ def make_governance_evaluation_id(
 
 def _task_submit_response(
     *,
-    task_id: UUID,
+    task_id: str,
     status: str,
     trace_id: Optional[str] = None,
     uato_decision: Optional[str] = None,
@@ -192,7 +280,7 @@ def _frame_pass_audit_entries(
     ]
 
 
-async def _latest_gate_record(session: AsyncSession, task_id: UUID) -> Optional[GateDecisionRecord]:
+async def _latest_gate_record(session: AsyncSession, task_id: str) -> Optional[GateDecisionRecord]:
     stmt = (
         select(GateDecisionRecord)
         .where(GateDecisionRecord.task_id == task_id)
@@ -416,7 +504,7 @@ async def run_task_submission(
     body: TaskSubmitRequest,
     trace_id: str,
     *,
-    reuse_task_id: Optional[UUID] = None,
+    reuse_task_id: Optional[str] = None,
 ) -> TaskSubmitResponse:
     """Run integration task pipeline. When reuse_task_id is set, update the existing task (approval resume)."""
     _trace(
@@ -1257,16 +1345,72 @@ async def run_task_submission(
         flag_modified(task, "audit_history")
     await session.commit()
 
+    deterministic_mode = _is_deterministic_plan(plan_json)
     try:
-        client = OpenClawClient()
+        if deterministic_mode:
+            client = DeterministicWebExecutor(timeout_seconds=300.0)
+            _trace(
+                "task.submit.execute_start",
+                trace_id=trace_id,
+                task_id=str(task.task_id),
+                plan_hash=plan_hash,
+                governance_continuity_verified=governance_continuity_verified,
+                execute_mode="deterministic_web_v1",
+            )
+            result = await client.execute(
+                plan_json,
+                task_id=str(task.task_id),
+                trace_id=trace_id,
+                deployment_target=body.deployment_target,
+            )
+        else:
+            client = OpenClawClient()
+            _trace(
+                "task.submit.execute_start",
+                trace_id=trace_id,
+                task_id=str(task.task_id),
+                plan_hash=plan_hash,
+                governance_continuity_verified=governance_continuity_verified,
+                execute_mode="openclaw_gateway",
+            )
+            result = await client.execute(plan_json, execution_token, task_id=str(task.task_id))
+    except DeterministicExecutionError as e:
         _trace(
-            "task.submit.execute_start",
+            "task.submit.execute_error",
             trace_id=trace_id,
             task_id=str(task.task_id),
-            plan_hash=plan_hash,
-            governance_continuity_verified=governance_continuity_verified,
+            execute_mode="deterministic_web_v1",
+            reason_code=e.reason_code,
+            status_code=e.status_code,
+            provider=e.provider,
         )
-        result = await client.execute(plan_json, execution_token, task_id=str(task.task_id))
+        task.status = TaskStatus.needs_review
+        deterministic_response = e.as_execution_response(execution_id=f"detexec_{task.task_id}")
+        task.audit_history = (task.audit_history or []) + [{"event_type": "execution_response", "payload": deterministic_response}]
+        if deterministic_response.get("execution_id"):
+            task.execution_id = str(deterministic_response["execution_id"])
+        await session.commit()
+        deployment_url, preview_url, repository_url = _deployment_urls_from_execution_result(deterministic_response, body.deployment_target)
+        return _task_submit_response(
+            task_id=task.task_id,
+            execution_id=task.execution_id,
+            status=task.status.value,
+            trace_id=trace_id,
+            execution_response=deterministic_response,
+            deployment_url=deployment_url,
+            preview_url=preview_url,
+            repository_url=repository_url,
+            gate_outcome="PASS",
+            governance_outcome="PASS",
+            governance_evaluation_id=governance_evaluation_id,
+            governance_continuity_verified=governance_continuity_verified,
+            reason_codes=[e.reason_code],
+            uato_decision=uato_res.decision,
+            uato_reason_codes=list(uato_res.reason_codes),
+            invariant_e_decision=ie_res.decision,
+            invariant_e_reason_codes=list(ie_res.reason_codes),
+            dispatch_blocked=False,
+        )
     except OpenClawError as e:
         _trace(
             "task.submit.execute_error",
@@ -1285,7 +1429,7 @@ async def run_task_submission(
             task.execution_id = e.response["execution_id"]
         await session.commit()
         reason_codes = ["EXECUTION_ABORTED"] if e.error_type == "execution_aborted" else []
-        deployment_url, preview_url = _deployment_urls_from_execution_result(e.response, body.deployment_target)
+        deployment_url, preview_url, repository_url = _deployment_urls_from_execution_result(e.response, body.deployment_target)
         return _task_submit_response(
             task_id=task.task_id,
             status=task.status.value,
@@ -1293,6 +1437,7 @@ async def run_task_submission(
             execution_response=e.response,
             deployment_url=deployment_url,
             preview_url=preview_url,
+            repository_url=repository_url,
             gate_outcome="PASS",
             governance_outcome="PASS",
             governance_evaluation_id=governance_evaluation_id,
@@ -1304,6 +1449,11 @@ async def run_task_submission(
             invariant_e_reason_codes=list(ie_res.reason_codes),
             dispatch_blocked=False,
         )
+    evidence_reason_codes = _execution_evidence_reason_codes(plan_json, result if isinstance(result, dict) else {})
+    if evidence_reason_codes:
+        result = dict(result)
+        result["status"] = "needs_review"
+        result["reason_codes"] = evidence_reason_codes
     task.execution_id = result.get("execution_id")
     s = result.get("status")
     if s == "success":
@@ -1313,8 +1463,21 @@ async def run_task_submission(
     else:
         task.status = TaskStatus.failed
     task.audit_history = (task.audit_history or []) + [{"event_type": "execution_response", "payload": result}]
+    if isinstance(result, dict) and result.get("status") == "success":
+        try:
+            await record_deployment(
+                session,
+                result=result,
+                task_id=str(task.task_id),
+                trace_id=trace_id,
+                build_sot_hash=plan_json.get("build_sot_hash"),
+                execution_plan_hash=plan_json.get("execution_plan_hash") or plan_hash,
+                project_name=plan_json.get("project_name") or result.get("repository_url", "").rstrip("/").split("/")[-1] or None,
+            )
+        except Exception:
+            logger.exception("task.submit.record_deployment_failed task_id=%s", task.task_id)
     await session.commit()
-    deployment_url, preview_url = _deployment_urls_from_execution_result(result, body.deployment_target)
+    deployment_url, preview_url, repository_url = _deployment_urls_from_execution_result(result, body.deployment_target)
     _trace(
         "task.submit.execute_done",
         trace_id=trace_id,
@@ -1323,6 +1486,7 @@ async def run_task_submission(
         execution_id=task.execution_id,
         response_status=result.get("status") if isinstance(result, dict) else None,
         deployment_url=deployment_url,
+        reason_codes=evidence_reason_codes or None,
     )
     return _task_submit_response(
         task_id=task.task_id,
@@ -1332,11 +1496,12 @@ async def run_task_submission(
         execution_response=result,
         deployment_url=deployment_url,
         preview_url=preview_url,
+        repository_url=repository_url,
         gate_outcome="PASS",
         governance_outcome="PASS",
         governance_evaluation_id=governance_evaluation_id,
         governance_continuity_verified=governance_continuity_verified,
-        reason_codes=[],
+        reason_codes=evidence_reason_codes,
         uato_decision=uato_res.decision,
         uato_reason_codes=list(uato_res.reason_codes),
         invariant_e_decision=ie_res.decision,

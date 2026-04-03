@@ -62,7 +62,7 @@ class Settings(BaseSettings):
         description="Repository/project naming template used by deterministic web executor provisioning.",
     )
     governed_v2_default_branch: str = Field(
-        default="prod",
+        default="main",
         description="Default deployment branch for generated repositories and Vercel production branch.",
     )
     governed_v2_vercel_team_id: str = Field(

@@ -27,6 +27,7 @@ logger = logging.getLogger(__name__)
 OPENCLAW_ROOT_PATH = os.getenv("OPENCLAW_INTEGRATION_ROOT_PATH")
 if not OPENCLAW_ROOT_PATH and os.getenv("VERCEL") == "1":
     OPENCLAW_ROOT_PATH = "/openclaw-integration"
+OPENCLAW_COMPAT_ROOT_PATH = "/openclaw-integration"
 
 
 @asynccontextmanager
@@ -158,8 +159,14 @@ def custom_openapi():
 
 
 app.openapi = custom_openapi
+prefixes: list[str] = []
 if OPENCLAW_ROOT_PATH:
-    app.add_middleware(PrefixMiddleware, prefix=OPENCLAW_ROOT_PATH)
+    prefixes.append(OPENCLAW_ROOT_PATH)
+if OPENCLAW_COMPAT_ROOT_PATH not in prefixes:
+    # Local/dev compatibility: accept calls routed with platform path prefix.
+    prefixes.append(OPENCLAW_COMPAT_ROOT_PATH)
+for _prefix in prefixes:
+    app.add_middleware(PrefixMiddleware, prefix=_prefix)
 
 # Protected routes (Bearer)
 app.include_router(task.router, tags=["task"], dependencies=[Depends(require_integration_auth)])

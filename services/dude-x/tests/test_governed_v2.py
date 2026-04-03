@@ -116,8 +116,11 @@ def test_v2_compile_includes_github_vercel_provisioning_defaults():
     deploy_op = next(x for x in plan["operations"] if x["type"] == "deploy")
     assert repo_provision["inputs"]["provider"] == "github"
     assert repo_provision["inputs"]["repo_name"].startswith("cdmbr-solar-pulse-")
+    assert "{timestamp}" not in repo_provision["inputs"]["repo_name"]
     assert repo_provision["inputs"]["default_branch"] == "prod"
     assert hosting_provision["inputs"]["provider"] == "vercel"
+    assert "{timestamp}" not in hosting_provision["inputs"]["project_name"]
     assert hosting_provision["inputs"]["production_branch"] == "prod"
     assert deploy_op["inputs"]["provider"] == "vercel"
+    assert "{timestamp}" not in deploy_op["inputs"]["project"]
     assert deploy_op["inputs"]["branch"] == "prod"

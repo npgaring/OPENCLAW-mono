@@ -458,6 +458,30 @@ class TestDomainF_RuntimeIsolation:
         assert ev.decision.outcome.value == "BLOCK"
         assert "SANDBOX_REJECTION" in ev.decision.reason_codes
 
+    def test_F3_file_content_template_literals_do_not_trigger_sandbox_rejection(self):
+        """F3: Non-executable source content (e.g., JS template literals) must not be blocked."""
+        domain = IDENTITY_DOMAIN_MAP["W-OCGG"]
+        operations = [
+            {
+                "type": "create_file",
+                "op_id": "1",
+                "inputs": {
+                    "path": "src/app/sitemap.ts",
+                    "content": "const sitemap = `${baseUrl}/sitemap.xml`;",
+                },
+            },
+        ]
+        plan_canonical = {"domain": domain, "operations": operations}
+        spec = {
+            "ocgg_identity": "W-OCGG",
+            "plan_hash": hash_payload(plan_canonical),
+            "operations": operations,
+        }
+        engine = GateEngine()
+        ev = engine.evaluate(spec, "W-OCGG")
+        assert ev.decision.outcome.value == "PASS"
+        assert "SANDBOX_REJECTION" not in ev.decision.reason_codes
+
     def test_F4_resource_limits_gate_blocks_excessive(self):
         """F4 (gate): Plan requesting over resource limit → BLOCK, RESOURCE_LIMIT_EXCEEDED."""
         from app.gate.policy import MAX_MEMORY_MB, MAX_CPU_SECONDS

@@ -1,6 +1,5 @@
 """API request/response Pydantic models."""
 from typing import Any, List, Optional
-from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -10,7 +9,7 @@ from app.models.task import UatoHints, ValidationControls
 class AuditRequest(BaseModel):
     model_config = ConfigDict(extra="allow")
 
-    task_id: Optional[UUID] = None
+    task_id: Optional[str] = None
     status: Optional[str] = None
     event_type: Optional[str] = None
 

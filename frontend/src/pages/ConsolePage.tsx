@@ -12,6 +12,7 @@ import { RefinementChat } from '../components/RefinementChat';
 export function ConsolePage() {
   const flow = useGovernedFlow();
   const hasFiles = flow.generatedFiles.length > 0;
+  const hasDeployment = !!(flow.previewUrl || flow.repositoryUrl);
 
   return (
     <Layout>
@@ -120,6 +121,64 @@ export function ConsolePage() {
                 onContentChange={flow.onFileContentChange}
               />
             </div>
+          )}
+
+          {hasDeployment && (
+            <section className="deployment-results">
+              <div className="deployment-header">
+                <h3>Deployment Pipeline</h3>
+                <span className={`deployment-badge ${flow.taskStatus === 'completed' ? 'success' : 'pending'}`}>
+                  {flow.taskStatus === 'completed' ? 'Deployed' : flow.taskStatus}
+                </span>
+              </div>
+              {(() => {
+                const execResp = flow.taskResult?.execution_response ?? {};
+                const steps = (execResp as Record<string, unknown>).steps_completed as string[] | undefined;
+                const filesGen = (execResp as Record<string, unknown>).files_generated as number | undefined;
+                return steps && steps.length > 0 ? (
+                  <div className="pipeline-phases">
+                    <div className={`pipeline-phase ${steps.includes('provision_repo') ? 'done' : ''}`}>
+                      <span className="phase-indicator">{steps.includes('provision_repo') ? '\u2713' : '\u2022'}</span>
+                      <span>Create Repository</span>
+                    </div>
+                    <div className={`pipeline-phase ${steps.includes('generate_code') ? 'done' : ''}`}>
+                      <span className="phase-indicator">{steps.includes('generate_code') ? '\u2713' : '\u2022'}</span>
+                      <span>Generate Code{filesGen ? ` (${filesGen} files)` : ''}</span>
+                    </div>
+                    <div className={`pipeline-phase ${steps.includes('write_files') ? 'done' : ''}`}>
+                      <span className="phase-indicator">{steps.includes('write_files') ? '\u2713' : '\u2022'}</span>
+                      <span>Commit to GitHub</span>
+                    </div>
+                    <div className={`pipeline-phase ${steps.includes('deploy') ? 'done' : ''}`}>
+                      <span className="phase-indicator">{steps.includes('deploy') ? '\u2713' : '\u2022'}</span>
+                      <span>Deploy to Vercel</span>
+                    </div>
+                  </div>
+                ) : null;
+              })()}
+              <div className="deployment-links">
+                {flow.repositoryUrl && (
+                  <a href={flow.repositoryUrl} target="_blank" rel="noopener noreferrer" className="deployment-link repo">
+                    <span className="deployment-link-icon">&#x1F4E6;</span>
+                    <span>
+                      <span className="deployment-link-label">GitHub Repository</span>
+                      <span className="deployment-link-url">{flow.repositoryUrl}</span>
+                    </span>
+                    <span className="deployment-link-arrow">&#x2197;</span>
+                  </a>
+                )}
+                {flow.previewUrl && (
+                  <a href={flow.previewUrl} target="_blank" rel="noopener noreferrer" className="deployment-link vercel">
+                    <span className="deployment-link-icon">&#x25B2;</span>
+                    <span>
+                      <span className="deployment-link-label">Vercel Deployment</span>
+                      <span className="deployment-link-url">{flow.previewUrl}</span>
+                    </span>
+                    <span className="deployment-link-arrow">&#x2197;</span>
+                  </a>
+                )}
+              </div>
+            </section>
           )}
 
           {hasFiles && (

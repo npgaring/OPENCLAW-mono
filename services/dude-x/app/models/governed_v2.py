@@ -144,6 +144,10 @@ class ExecutionPlanV1(BaseModel):
 
     plan_version: Literal["2.0"] = "2.0"
     execution_mode: Literal["deterministic_web_v1"] = "deterministic_web_v1"
+    executor_contract: Optional[str] = Field(
+        default="deterministic_web_v1",
+        description="Executor routing hint. deterministic_web_v1 uses in-process GitHub/Vercel executor.",
+    )
     template_family: str
     scaffold_type: str
     framework: str

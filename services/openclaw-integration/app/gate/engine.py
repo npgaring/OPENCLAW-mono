@@ -129,9 +129,10 @@ class GateEngine:
                     reason_codes.append("UNAUTHORIZED_NETWORK_EGRESS")
                     defects.append(Defect("UNAUTHORIZED_NETWORK_EGRESS", f"operations[{i}].type", "Network op without allowed target"))
 
-            # F3 — Command/shell injection: blocklisted script content
+            # F3 — Command/shell injection: inspect executable command fields only.
+            # Do not scan generic file content payloads (e.g., JS/TS template literals).
             injection_found = False
-            for key in ("command", "script", "cmd", "content"):
+            for key in ("command", "script", "cmd"):
                 if injection_found:
                     break
                 val = inputs.get(key) if key in inputs else op.get(key)

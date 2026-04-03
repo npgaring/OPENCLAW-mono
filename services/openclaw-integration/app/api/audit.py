@@ -1,7 +1,6 @@
 """POST /audit — receive callbacks, update task + AuditEvent; GET reconstruct for replay."""
 import datetime
 from typing import Any, Optional
-from uuid import UUID
 
 from sqlalchemy import select
 
@@ -22,7 +21,7 @@ class ReconstructResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     trace_id: Optional[str] = None
-    task_id: UUID
+    task_id: str
     spec_hash: Optional[str] = None
     plan_hash: str
     plan_json: dict[str, Any] = Field(default_factory=dict)
@@ -42,7 +41,7 @@ class ReconstructResponse(BaseModel):
 
 @router.get("/audit/reconstruct", response_model=ReconstructResponse)
 async def reconstruct_audit(
-    task_id: Optional[UUID] = Query(None, description="Integration task UUID"),
+    task_id: Optional[str] = Query(None, description="Integration task id"),
     trace_id: Optional[str] = Query(None, description="Correlation id from compile/gate/task"),
     session: AsyncSession = Depends(get_session),
 ):

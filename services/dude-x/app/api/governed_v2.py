@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+import json
 import logging
 from typing import Any
 
@@ -42,6 +43,7 @@ from app.services.governed_v2_runtime import (
     run_cognitive_mode,
     run_cognitive_mode_async,
 )
+from app.services.openai_chat_compat import sanitize_chat_completions_payload
 
 router = APIRouter(prefix="/v2", tags=["governed-v2"])
 logger = logging.getLogger(__name__)
@@ -747,11 +749,7 @@ async def refine_build_sot(
     )
 
 
-async def _call_openai_refine(build_sot: BuildSoTV1, feedback: str) -> dict[str, Any] | None:
-    """Call OpenAI to interpret natural language feedback into a Build SoT patch."""
-    import json as _json
-    import httpx as _httpx
-
+def _build_refine_payload(build_sot: BuildSoTV1, feedback: str) -> dict[str, Any]:
     system = (
         "You are a web project manager. The user wants to refine their website project. "
         "Given the current Build SoT and user feedback, return a JSON patch object with "
@@ -770,15 +768,22 @@ async def _call_openai_refine(build_sot: BuildSoTV1, feedback: str) -> dict[str,
         "feedback": feedback,
     }
 
-    payload = {
+    payload: dict[str, Any] = {
         "model": settings.openai_content_model,
         "temperature": 0.3,
         "messages": [
             {"role": "system", "content": system},
-            {"role": "user", "content": _json.dumps(context, indent=2)},
+            {"role": "user", "content": json.dumps(context, indent=2)},
         ],
     }
+    return sanitize_chat_completions_payload(payload)
 
+
+async def _call_openai_refine(build_sot: BuildSoTV1, feedback: str) -> dict[str, Any] | None:
+    """Call OpenAI to interpret natural language feedback into a Build SoT patch."""
+    import httpx as _httpx
+
+    payload = _build_refine_payload(build_sot, feedback)
     timeout = _httpx.Timeout(30.0)
     async with _httpx.AsyncClient(timeout=timeout) as client:
         resp = await client.post(
@@ -797,4 +802,4 @@ async def _call_openai_refine(build_sot: BuildSoTV1, feedback: str) -> dict[str,
         content_str = content_str.split("\n", 1)[1] if "\n" in content_str else content_str[3:]
     if content_str.endswith("```"):
         content_str = content_str[:-3]
-    return _json.loads(content_str.strip())
+    return json.loads(content_str.strip())

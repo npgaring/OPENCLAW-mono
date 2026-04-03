@@ -2,8 +2,10 @@
 from __future__ import annotations
 
 import logging
+from typing import Any, Optional
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
+from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
@@ -21,6 +23,11 @@ from app.models.governed_v2 import (
     BuildSoTLockResponse,
     ExecutionPlanLockRequest,
     ExecutionPlanLockResponse,
+)
+from app.services.deployment_tracker import (
+    get_deployment_by_id,
+    get_deployment_for_task,
+    get_deployments_for_trace,
 )
 from app.services.governed_v2_continuity import (
     continuity_id_for_lock,
@@ -271,3 +278,86 @@ async def lock_execution_plan(
             atomic=atomic,
         ),
     )
+
+
+class DeploymentResponse(BaseModel):
+    id: str
+    trace_id: str
+    task_id: Optional[str] = None
+    build_sot_hash: Optional[str] = None
+    execution_plan_hash: Optional[str] = None
+    project_name: str
+    github_owner: Optional[str] = None
+    github_repo_name: Optional[str] = None
+    github_repo_url: Optional[str] = None
+    github_branch: Optional[str] = None
+    github_commit_sha: Optional[str] = None
+    vercel_project_id: Optional[str] = None
+    vercel_project_name: Optional[str] = None
+    vercel_deployment_id: Optional[str] = None
+    vercel_deployment_url: Optional[str] = None
+    vercel_preview_url: Optional[str] = None
+    vercel_deploy_target: Optional[str] = None
+    status: str
+    error_message: Optional[str] = None
+    created_at: str
+    updated_at: str
+
+
+def _deployment_to_response(rec: Any) -> DeploymentResponse:
+    return DeploymentResponse(
+        id=rec.id,
+        trace_id=rec.trace_id,
+        task_id=rec.task_id,
+        build_sot_hash=rec.build_sot_hash,
+        execution_plan_hash=rec.execution_plan_hash,
+        project_name=rec.project_name,
+        github_owner=rec.github_owner,
+        github_repo_name=rec.github_repo_name,
+        github_repo_url=rec.github_repo_url,
+        github_branch=rec.github_branch,
+        github_commit_sha=rec.github_commit_sha,
+        vercel_project_id=rec.vercel_project_id,
+        vercel_project_name=rec.vercel_project_name,
+        vercel_deployment_id=rec.vercel_deployment_id,
+        vercel_deployment_url=rec.vercel_deployment_url,
+        vercel_preview_url=rec.vercel_preview_url,
+        vercel_deploy_target=rec.vercel_deploy_target,
+        status=rec.status,
+        error_message=rec.error_message,
+        created_at=rec.created_at.isoformat() if rec.created_at else "",
+        updated_at=rec.updated_at.isoformat() if rec.updated_at else "",
+    )
+
+
+@router.get("/deployments", response_model=list[DeploymentResponse])
+async def list_deployments(
+    trace_id: Optional[str] = Query(default=None),
+    session: AsyncSession = Depends(get_session),
+):
+    if not trace_id:
+        raise HTTPException(status_code=400, detail="trace_id query parameter is required")
+    records = await get_deployments_for_trace(session, trace_id)
+    return [_deployment_to_response(r) for r in records]
+
+
+@router.get("/deployments/{deployment_id}", response_model=DeploymentResponse)
+async def get_deployment(
+    deployment_id: str,
+    session: AsyncSession = Depends(get_session),
+):
+    rec = await get_deployment_by_id(session, deployment_id)
+    if rec is None:
+        raise HTTPException(status_code=404, detail="Deployment not found")
+    return _deployment_to_response(rec)
+
+
+@router.get("/deployments/by-task/{task_id}", response_model=DeploymentResponse)
+async def get_deployment_by_task(
+    task_id: str,
+    session: AsyncSession = Depends(get_session),
+):
+    rec = await get_deployment_for_task(session, task_id)
+    if rec is None:
+        raise HTTPException(status_code=404, detail="No deployment found for this task")
+    return _deployment_to_response(rec)

@@ -20,9 +20,16 @@ def _slugify(value: str) -> str:
     return slug or "project"
 
 
-def _render_repo_name(project_slug: str) -> str:
+def _trace_token(trace_id: str) -> str:
+    token = "".join(ch for ch in (trace_id or "").lower() if ch.isalnum())
+    return (token[:12] or "000000000000")
+
+
+def _render_repo_name(project_slug: str, trace_id: str = "") -> str:
     template = settings.governed_v2_repo_name_template or "cdmbr-{projectname}-{timestamp}"
-    return template.replace("{projectname}", project_slug)
+    repo = template.replace("{projectname}", project_slug)
+    repo = repo.replace("{timestamp}", _trace_token(trace_id))
+    return repo
 
 
 def _all_skills() -> list[Skill]:
@@ -68,13 +75,13 @@ def _topological_sort(skills: list[Skill]) -> list[Skill]:
 class SkillsEngine:
     """Orchestrates all skills and collects file operations."""
 
-    def __init__(self, build_sot: BuildSoTV1) -> None:
+    def __init__(self, build_sot: BuildSoTV1, trace_id: str = "") -> None:
         self.build_sot = build_sot
         project_slug = _slugify(build_sot.project_name)
         self.ctx = SkillContext(
             build_sot=build_sot,
             project_slug=project_slug,
-            repo_name=_render_repo_name(project_slug),
+            repo_name=_render_repo_name(project_slug, trace_id=trace_id),
             framework=settings.governed_v2_stack_preset,
         )
 
@@ -109,7 +116,7 @@ class SkillsEngine:
         github_owner = (settings.governed_v2_github_owner or "").strip()
         github_owner_fallback = (settings.governed_v2_github_owner_fallback or "").strip()
         owner_type = (settings.governed_v2_github_owner_type or "org").strip().lower()
-        default_branch = (settings.governed_v2_default_branch or "prod").strip()
+        default_branch = (settings.governed_v2_default_branch or "main").strip()
         team_id = (settings.governed_v2_vercel_team_id or "").strip()
         domain_behavior = (settings.governed_v2_domain_behavior or "vercel_default_only").strip()
 
@@ -125,7 +132,7 @@ class SkillsEngine:
                 "repo_name_template": settings.governed_v2_repo_name_template,
                 "repo_name": self.ctx.repo_name,
                 "default_branch": default_branch,
-                "visibility": "private",
+                "visibility": "public",
             },
             "outputs": {},
         })

@@ -23,14 +23,26 @@ import * as integration from '../services/integration';
 const initialDudexBase = `${window.location.origin}/dude-x`;
 const initialIntegrationBase = `${window.location.origin}/openclaw-integration`;
 const initialApiToken = (import.meta.env.VITE_INTEGRATION_API_KEY ?? '').trim();
-const defaultIdea = 'Build a conversion-focused website for Conversion Interactive Agency with Home, Services, Case Studies, and Contact pages.';
-const defaultVoice = 'Professional, clear, and modern tone. Prioritize lead capture and trust signals. Include CTA buttons and a contact form.';
-const defaultProjectName = 'CDMBR Launch Site';
-const defaultSitePurpose = 'Generate qualified leads and present agency credibility.';
+const defaultIdea = [
+  'Build a conversion-focused website for Conversion Interactive Agency with Home, Services, Case Studies, and Contact pages.',
+  'Primary objective: generate qualified inbound leads.',
+  'Secondary objective: establish agency credibility using concrete outcomes, trust signals, and clear process.',
+  'The site should guide visitors from awareness to consultation booking with minimal friction.',
+].join(' ');
+const defaultVoice = [
+  'Professional, clear, and modern tone.',
+  'Prioritize lead capture and trust signals.',
+  'Use strong above-the-fold value proposition and repeated CTA buttons.',
+  'Include a contact form with light qualification fields (service needed, budget range, timeline).',
+  'Keep copy scannable: concise sections, benefit-led headings, and evidence-backed claims.',
+  'Avoid vague marketing language; emphasize measurable outcomes and practical execution.',
+].join(' ');
+const defaultProjectName = 'TEST CDMBR Launch Site';
+const defaultSitePurpose = 'Generate qualified leads and present agency credibility with clear service positioning and measurable proof.';
 const defaultAudience = 'founders, marketing managers, local business owners';
 const defaultTone = 'professional';
 const defaultPages = 'home, services, case studies, contact';
-const defaultIntegrations = 'analytics, hubspot';
+const defaultIntegrations = '';
 
 export function useGovernedFlow() {
   const [dudexBase, setDudexBase] = useState(initialDudexBase);
@@ -225,9 +237,25 @@ export function useGovernedFlow() {
       execution_plan_v2: executionPlan,
     };
 
+    addLog('Pipeline starting: creating repository, generating code, deploying...');
     const data = await integration.submitTask(integrationBase, apiToken, payload);
     setTaskResult(data);
+
+    const execResponse = data.execution_response ?? {};
+    const stepsCompleted = (execResponse.steps_completed as string[]) ?? [];
+    const filesGenerated = (execResponse.files_generated as number) ?? 0;
+
+    if (stepsCompleted.includes('provision_repo')) addLog('Phase 1 complete: GitHub repository created.');
+    if (stepsCompleted.includes('generate_code')) addLog(`Phase 2 complete: ${filesGenerated} files generated via AI.`);
+    if (stepsCompleted.includes('write_files')) addLog('Phase 3 complete: code committed to GitHub.');
+    if (stepsCompleted.includes('deploy')) addLog('Phase 4 complete: Vercel deployment triggered.');
+
     addLog(`Task submitted. status=${data.status ?? 'n/a'} execution_id=${data.execution_id ?? 'n/a'}`);
+    if (data.deployment_url) addLog(`Deployment URL: ${data.deployment_url}`);
+    if (data.repository_url) addLog(`Repository URL: ${data.repository_url}`);
+    if (data.deployment_url) {
+      setActiveTab('preview');
+    }
   }
 
   function onClearSession() {
@@ -254,8 +282,15 @@ export function useGovernedFlow() {
       .filter((f) => f.path);
   }, [executionPlan]);
 
-  const previewUrl = taskResult?.deployment_url as string | undefined
-    ?? taskResult?.preview_url as string | undefined
+  const execResp = taskResult?.execution_response ?? {};
+  const previewUrl = taskResult?.deployment_url
+    ?? taskResult?.preview_url
+    ?? (execResp.deployment_url as string | undefined)
+    ?? (execResp.preview_url as string | undefined)
+    ?? null;
+
+  const repositoryUrl = taskResult?.repository_url
+    ?? (execResp.repository_url as string | undefined)
     ?? null;
 
   function onFileContentChange(path: string, newContent: string) {
@@ -387,6 +422,7 @@ export function useGovernedFlow() {
     // Builder UI state
     generatedFiles,
     previewUrl,
+    repositoryUrl,
     selectedFilePath,
     setSelectedFilePath,
     activeTab,

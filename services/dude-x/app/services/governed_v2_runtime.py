@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import re
 from typing import Any, Optional
 
 from app.core.config import settings
@@ -123,7 +124,7 @@ def governance_projection_for_build_sot(
     build_sot: BuildSoTV1,
     ocgg_identity: str,
 ) -> tuple[dict[str, Any], str]:
-    operations = _operations_from_build_sot(build_sot)
+    operations = _operations_from_build_sot(build_sot, trace_id=trace_id)
     plan_hash = integration_hash_payload({"domain": "web", "operations": operations})
     projection = {
         "ocgg_identity": ocgg_identity,
@@ -148,7 +149,7 @@ def compile_execution_plan(
     intent: str,
     compiler_version: str = "governed-v2-compiler-1",
 ) -> tuple[ExecutionPlanV1, str]:
-    operations = _operations_from_build_sot(build_sot)
+    operations = _operations_from_build_sot(build_sot, trace_id=trace_id)
     governance_plan_hash = integration_hash_payload({"domain": "web", "operations": operations})
     schema_blocks = []
     for form in build_sot.forms_ctas:
@@ -189,6 +190,7 @@ def compile_execution_plan(
         template_family=template_family,
         scaffold_type="nextjs_app_router",
         framework=settings.governed_v2_stack_preset,
+        executor_contract="deterministic_web_v1",
         routes=routes,
         components=[{"id": f"cmp-{i + 1:03d}", "name": s.section, "page": s.page} for i, s in enumerate(build_sot.section_definitions)],
         file_tree=file_tree,
@@ -534,14 +536,19 @@ def _template_family(pages: list[str]) -> str:
     return "multi_page_lead_gen"
 
 
-def _operations_from_build_sot(build_sot: BuildSoTV1) -> list[dict[str, Any]]:
+def _trace_token(trace_id: str) -> str:
+    token = re.sub(r"[^a-zA-Z0-9]", "", trace_id or "").lower()
+    return (token[:12] or "000000000000")
+
+
+def _operations_from_build_sot(build_sot: BuildSoTV1, trace_id: str = "") -> list[dict[str, Any]]:
     ops: list[dict[str, Any]] = []
     project_slug = _slugify(build_sot.project_name)
-    repo_name = _render_repo_name(project_slug)
+    repo_name = _render_repo_name(project_slug, trace_id=trace_id)
     github_owner = (settings.governed_v2_github_owner or "").strip()
     github_owner_fallback = (settings.governed_v2_github_owner_fallback or "").strip()
     owner_type = (settings.governed_v2_github_owner_type or "org").strip().lower()
-    default_branch = (settings.governed_v2_default_branch or "prod").strip()
+    default_branch = (settings.governed_v2_default_branch or "main").strip()
     team_id = (settings.governed_v2_vercel_team_id or "").strip()
     domain_behavior = (settings.governed_v2_domain_behavior or "vercel_default_only").strip()
     ops.append(
@@ -557,7 +564,7 @@ def _operations_from_build_sot(build_sot: BuildSoTV1) -> list[dict[str, Any]]:
                 "repo_name_template": settings.governed_v2_repo_name_template,
                 "repo_name": repo_name,
                 "default_branch": default_branch,
-                "visibility": "private",
+                "visibility": "public",
             },
             "outputs": {},
         }
@@ -641,9 +648,11 @@ def _slugify(value: str) -> str:
     return slug or "project"
 
 
-def _render_repo_name(project_slug: str) -> str:
+def _render_repo_name(project_slug: str, trace_id: str = "") -> str:
     template = settings.governed_v2_repo_name_template or "cdmbr-{projectname}-{timestamp}"
-    return template.replace("{projectname}", project_slug)
+    repo = template.replace("{projectname}", project_slug)
+    repo = repo.replace("{timestamp}", _trace_token(trace_id))
+    return repo
 
 
 def _env_vars_for_integrations(integrations: list[str]) -> list[str]:
@@ -673,7 +682,7 @@ async def compile_execution_plan_async(
     """Async compiler that uses the skills engine to generate real code."""
     from app.skills.engine import SkillsEngine
 
-    engine = SkillsEngine(build_sot)
+    engine = SkillsEngine(build_sot, trace_id=trace_id)
     file_ops = await engine.run()
     operations = engine.to_operations(file_ops)
     governance_plan_hash = integration_hash_payload({"domain": "web", "operations": operations})
@@ -722,6 +731,7 @@ async def compile_execution_plan_async(
         template_family=template_family,
         scaffold_type="nextjs_app_router",
         framework=settings.governed_v2_stack_preset,
+        executor_contract="deterministic_web_v1",
         routes=routes,
         components=[{"id": f"cmp-{i + 1:03d}", "name": s.section, "page": s.page} for i, s in enumerate(build_sot.section_definitions)],
         file_tree=file_tree,

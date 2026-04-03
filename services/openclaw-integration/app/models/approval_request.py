@@ -2,7 +2,7 @@
 from datetime import datetime
 from enum import Enum
 from typing import Any, Optional
-from uuid import UUID, uuid4
+from uuid import uuid4
 
 from sqlalchemy import JSON, Column
 from sqlmodel import Field, SQLModel
@@ -25,9 +25,9 @@ class ApprovalSourceLayer(str, Enum):
 class ApprovalRequest(SQLModel, table=True):
     __tablename__ = "approval_requests"
 
-    id: UUID = Field(primary_key=True, default_factory=uuid4)
+    id: str = Field(primary_key=True, default_factory=lambda: str(uuid4()))
     trace_id: str = Field(index=True, max_length=36)
-    task_id: Optional[UUID] = Field(default=None, foreign_key="tasks.task_id", index=True)
+    task_id: Optional[str] = Field(default=None, foreign_key="tasks.task_id", index=True)
     source_layer: str = Field(index=True)
     status: str = Field(index=True)
     reason_code: Optional[str] = Field(default=None)

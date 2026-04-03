@@ -1,7 +1,6 @@
 """POST /task — submit task, gate, token, executor call; POST /task/{id}/continue — follow-up."""
 import logging
 from typing import Any, Optional
-from uuid import UUID
 
 import httpx
 from fastapi import APIRouter, Body, Depends, HTTPException
@@ -51,7 +50,7 @@ def _prior_context_from_audit(audit_history: list[Any]) -> str:
 
 @router.post("/task/{task_id}/continue", response_model=TaskSubmitResponse)
 async def continue_task(
-    task_id: UUID,
+    task_id: str,
     body: TaskContinueRequest,
     session: AsyncSession = Depends(get_session),
 ):

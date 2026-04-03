@@ -9,6 +9,10 @@ import httpx
 
 from app.core.config import settings
 from app.models.governed_v2 import BuildSoTV1
+from app.services.openai_chat_compat import (
+    sanitize_chat_completions_payload,
+    summarize_chat_completions_exception,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -121,7 +125,7 @@ def _build_enrichment_prompt(build_sot: BuildSoTV1) -> dict[str, Any]:
         "Return strict JSON only matching the required schema."
     )
 
-    return {
+    payload = {
         "model": settings.openai_content_model,
         "temperature": 0.7,
         "messages": [
@@ -137,6 +141,7 @@ def _build_enrichment_prompt(build_sot: BuildSoTV1) -> dict[str, Any]:
             },
         },
     }
+    return sanitize_chat_completions_payload(payload)
 
 
 async def enrich_build_sot(build_sot: BuildSoTV1) -> BuildSoTV1:
@@ -163,8 +168,11 @@ async def enrich_build_sot(build_sot: BuildSoTV1) -> BuildSoTV1:
         raw = resp.json()
         content_str = raw["choices"][0]["message"]["content"]
         enriched = json.loads(content_str)
-    except Exception:
-        logger.exception("content_enrichment.openai_call_failed, falling back to deterministic content")
+    except Exception as exc:
+        logger.exception(
+            "content_enrichment.openai_call_failed details=%s, falling back to deterministic content",
+            summarize_chat_completions_exception(exc),
+        )
         return build_sot
 
     return _apply_enrichment(build_sot, enriched)

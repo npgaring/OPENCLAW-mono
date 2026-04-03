@@ -26,6 +26,34 @@ class Settings(BaseSettings):
     database_url: Optional[str] = Field(default=None, description="PostgreSQL URL (postgres:// or postgresql://); optional on serverless until configured")
     openclaw_base_url: Optional[str] = Field(default=None, description="OpenClaw Gateway base URL (e.g. https://api.cdopenclaw.com)")
     openclaw_api_key: Optional[str] = Field(default=None, description="Bearer token for OpenClaw Gateway (POST .../v1/responses). Required by OpenClaw.")
+    github_token: Optional[str] = Field(
+        default=None,
+        description="Optional GitHub token forwarded to OpenClaw Gateway for provision_repo operations.",
+    )
+    github_app_id: Optional[str] = Field(
+        default=None,
+        description="GitHub App ID used for deterministic in-service repository provisioning.",
+    )
+    github_private_key: Optional[str] = Field(
+        default=None,
+        description="GitHub App private key PEM (supports \\n escaped newlines) for deterministic execution.",
+    )
+    github_installation_id: Optional[str] = Field(
+        default=None,
+        description="GitHub App installation ID used to exchange installation tokens.",
+    )
+    github_template_owner: Optional[str] = Field(
+        default=None,
+        description="Template repository owner used for deterministic repository generation.",
+    )
+    github_template_repo: Optional[str] = Field(
+        default=None,
+        description="Template repository name used for deterministic repository generation.",
+    )
+    vercel_token: Optional[str] = Field(
+        default=None,
+        description="Optional Vercel token forwarded to OpenClaw Gateway for provision_hosting/deploy operations.",
+    )
     integration_api_key: Optional[str] = Field(default=None, description="Authorization for our API: callers use Bearer <this> to access /task, /audit, /gate, /status. Also used to sign execution tokens.")
     app_env: str = Field(default="development", description="development | preview | production")
     log_level: str = Field(default="info", description="Log level")
@@ -68,6 +96,14 @@ class Settings(BaseSettings):
     openai_plan_retry_backoff_seconds: float = Field(
         default=1.0,
         description="Base delay (seconds) before retry; exponential backoff: base * 2^attempt.",
+    )
+    openai_content_model: Optional[str] = Field(
+        default=None,
+        description="OpenAI model for content/code generation in the deterministic executor. Falls back to openai_plan_model.",
+    )
+    skills_engine_model: Optional[str] = Field(
+        default=None,
+        description="OpenAI model used by the skills engine for code generation.",
     )
     governed_v2_enabled: bool = Field(
         default=True,

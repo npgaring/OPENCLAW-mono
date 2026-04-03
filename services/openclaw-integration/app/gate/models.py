@@ -2,7 +2,6 @@
 from dataclasses import dataclass
 from enum import Enum
 from typing import Any, List, Optional
-from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -70,11 +69,11 @@ class GateDecisionResponse(BaseModel):
     uato_reason_codes: List[str] = []
     uato_skipped_gate: bool = False
     # PROD_DEPLOY_NO_APPROVAL: same durable materialization as POST /task (task + GOVERNANCE approval_requests).
-    task_id: Optional[UUID] = Field(
+    task_id: Optional[str] = Field(
         default=None,
         description="Integration task row created or updated for this trace when PROD_DEPLOY_NO_APPROVAL is materialized.",
     )
-    approval_request_id: Optional[UUID] = Field(
+    approval_request_id: Optional[str] = Field(
         default=None,
         description="PENDING GOVERNANCE approval when outcome is BLOCK for PROD_DEPLOY_NO_APPROVAL; use with POST /approvals/{id}/approve then resume.",
     )

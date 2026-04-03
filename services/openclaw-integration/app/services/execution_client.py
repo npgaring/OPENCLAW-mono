@@ -19,6 +19,18 @@ ERROR_TYPE_MAP = {
 DEFAULT_TIMEOUT = 60.0  # LLM execution can take longer than 10s
 
 
+def _gateway_headers(api_key: Optional[str]) -> dict[str, str]:
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+    }
+    if settings.github_token:
+        headers["X-GitHub-Token"] = settings.github_token
+    if settings.vercel_token:
+        headers["X-Vercel-Token"] = settings.vercel_token
+    return headers
+
+
 class OpenClawError(Exception):
     def __init__(self, error_type: str, message: str, status_code: Optional[int] = None, response: Optional[dict] = None):
         self.error_type = error_type
@@ -243,10 +255,7 @@ class OpenClawClient:
         if not execution_token:
             raise OpenClawError("auth_error", "Execution token required")
         url = f"{self.base_url}/v1/responses"
-        headers = {
-            "Authorization": f"Bearer {self.api_key}",
-            "Content-Type": "application/json",
-        }
+        headers = _gateway_headers(self.api_key)
         body = _plan_to_openresponses_body(plan, task_id=str(task_id) if task_id else None)
         try:
             async with httpx.AsyncClient(timeout=self.timeout) as client:
@@ -289,10 +298,7 @@ class OpenClawClient:
             "instructions": instructions,
             "input": input_text,
         }
-        headers = {
-            "Authorization": f"Bearer {self.api_key}",
-            "Content-Type": "application/json",
-        }
+        headers = _gateway_headers(self.api_key)
         try:
             async with httpx.AsyncClient(timeout=self.timeout) as client:
                 resp = await client.post(url, json=body, headers=headers)

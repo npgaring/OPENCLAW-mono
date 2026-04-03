@@ -23,14 +23,19 @@ async def submit_execute(payload: dict[str, Any]) -> dict[str, Any]:
     """POST to OPENCLAW_BASE_URL/v1/responses. Uses Bearer OPENCLAW_API_KEY (OpenClaw requires it)."""
     base = settings.openclaw_base_url.rstrip("/")
     body = _to_openresponses_body(payload)
+    headers = {
+        "Authorization": f"Bearer {settings.openclaw_api_key}",
+        "Content-Type": "application/json",
+    }
+    if settings.github_token:
+        headers["X-GitHub-Token"] = settings.github_token
+    if settings.vercel_token:
+        headers["X-Vercel-Token"] = settings.vercel_token
     async with httpx.AsyncClient(timeout=60.0) as client:
         resp = await client.post(
             f"{base}/v1/responses",
             json=body,
-            headers={
-                "Authorization": f"Bearer {settings.openclaw_api_key}",
-                "Content-Type": "application/json",
-            },
+            headers=headers,
         )
     resp.raise_for_status()
     return resp.json()
