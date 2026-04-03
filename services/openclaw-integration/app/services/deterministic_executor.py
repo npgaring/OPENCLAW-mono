@@ -402,8 +402,75 @@ class DeterministicWebExecutor:
         return "main"
 
     # ------------------------------------------------------------------
-    # Phase 2: OpenAI Code Generation
+    # Phase 2: Three-Phase AI Code Generation
     # ------------------------------------------------------------------
+    _PAGE_TYPE_SECTIONS: dict[str, list[str]] = {
+        "home": ["hero_gradient", "features_grid", "social_proof", "stats_counter", "testimonials", "cta_banner"],
+        "about": ["hero_banner", "company_story", "mission_values", "team_grid", "timeline", "cta_banner"],
+        "services": ["hero_banner", "services_grid", "process_steps", "feature_comparison", "cta_banner"],
+        "pricing": ["hero_banner", "pricing_tiers", "feature_matrix", "faq_section", "cta_banner"],
+        "contact": ["hero_banner", "contact_form", "office_info", "map_placeholder", "social_links"],
+        "blog": ["hero_banner", "featured_post", "article_grid", "categories_sidebar", "newsletter_signup"],
+        "portfolio": ["hero_banner", "project_grid", "case_study_highlight", "client_logos", "cta_banner"],
+        "gallery": ["hero_banner", "image_grid", "lightbox_modal", "category_filter"],
+        "faq": ["hero_banner", "faq_accordion", "contact_cta"],
+        "testimonials": ["hero_banner", "testimonial_cards", "rating_summary", "cta_banner"],
+        "careers": ["hero_banner", "culture_section", "benefits_grid", "open_positions", "application_cta"],
+        "features": ["hero_banner", "feature_showcase", "comparison_table", "integration_logos", "cta_banner"],
+    }
+
+    def _classify_page_type(self, slug: str) -> str:
+        slug_lower = slug.lower().replace("-", "").replace("_", "")
+        for key in self._PAGE_TYPE_SECTIONS:
+            if key in slug_lower:
+                return key
+        return "generic"
+
+    def _resolve_codegen_model(self) -> str:
+        return (
+            getattr(settings, "openai_content_model", None)
+            or getattr(settings, "skills_engine_model", None)
+            or settings.openai_plan_model
+            or "gpt-4o-mini"
+        )
+
+    async def _openai_chat(
+        self,
+        api_key: str,
+        model: str,
+        system_prompt: str,
+        user_prompt: str,
+        *,
+        temperature: float = 0.3,
+        max_tokens: int = 16000,
+    ) -> Optional[str]:
+        try:
+            async with httpx.AsyncClient(timeout=CODEGEN_TIMEOUT_SECONDS) as client:
+                resp, data = await self._request(
+                    client, "POST", f"{OPENAI_API_BASE}/chat/completions",
+                    headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+                    payload={
+                        "model": model,
+                        "messages": [
+                            {"role": "system", "content": system_prompt},
+                            {"role": "user", "content": user_prompt},
+                        ],
+                        "temperature": temperature,
+                        "max_tokens": max_tokens,
+                    },
+                )
+            if resp.status_code != 200:
+                logger.error("deterministic.executor.openai_chat.error status=%s body=%s", resp.status_code, str(data)[:300])
+                return None
+            if isinstance(data, dict):
+                choices = data.get("choices")
+                if isinstance(choices, list) and choices:
+                    return choices[0].get("message", {}).get("content", "")
+            return None
+        except Exception:
+            logger.exception("deterministic.executor.openai_chat.exception")
+            return None
+
     async def _generate_code_via_openai(
         self,
         plan: dict[str, Any],
@@ -412,10 +479,7 @@ class DeterministicWebExecutor:
         trace_id: Optional[str] = None,
         template_reference: Optional[TemplateReference] = None,
     ) -> list[GeneratedFile]:
-        """Use OpenAI to generate production-quality website code from the execution plan.
-
-        Falls back to the plan's inline file content when OpenAI is unavailable.
-        """
+        """Three-phase AI code generation: Architect → Builder → Inspector."""
         api_key = (settings.openai_api_key or "").strip()
         if not api_key:
             logger.warning("deterministic.executor.codegen.no_api_key falling back to plan content")
@@ -424,112 +488,617 @@ class DeterministicWebExecutor:
                 template_reference=template_reference,
             )
 
-        file_specs = self._collect_file_specs(operations, plan)
-        if not file_specs:
-            logger.warning("deterministic.executor.codegen.no_files falling back to plan content")
-            return self._ensure_scaffold_integrity(
-                self._extract_files_from_operations(operations),
-                template_reference=template_reference,
-            )
+        context = self._build_project_context(plan, operations)
+        model = self._resolve_codegen_model()
 
-        project_context = self._build_project_context(plan, operations)
-        generated: list[GeneratedFile] = []
-
-        model = (
-            getattr(settings, "openai_content_model", None)
-            or getattr(settings, "skills_engine_model", None)
-            or settings.openai_plan_model
-            or "gpt-4o-mini"
+        # ── Phase 1: Architect ───────────────────────────────────────────
+        logger.info("deterministic.executor.codegen.phase1_architect_start model=%s", model)
+        blueprint = await self._phase1_architect(api_key, model, context, plan, operations, template_reference=template_reference)
+        logger.info(
+            "deterministic.executor.codegen.phase1_architect_done pages=%d components=%d",
+            len(blueprint.get("pages", [])), len(blueprint.get("shared_components", [])),
         )
 
-        batch_prompt = self._build_codegen_prompt(
-            project_context,
-            file_specs,
+        # ── Phase 2: Builder ─────────────────────────────────────────────
+        logger.info("deterministic.executor.codegen.phase2_builder_start")
+        generated_files = await self._phase2_build(api_key, model, blueprint, context, template_reference=template_reference)
+        logger.info("deterministic.executor.codegen.phase2_builder_done files=%d", len(generated_files))
+
+        if not generated_files:
+            logger.warning("deterministic.executor.codegen.phase2_empty falling back to plan content")
+            generated_files = self._extract_files_from_operations(operations)
+
+        # ── Phase 3: Inspector ───────────────────────────────────────────
+        logger.info("deterministic.executor.codegen.phase3_inspector_start")
+        validated_files = self._phase3_inspect(generated_files, blueprint, template_reference=template_reference)
+        logger.info("deterministic.executor.codegen.phase3_inspector_done files=%d", len(validated_files))
+
+        return validated_files
+
+    # ------------------------------------------------------------------
+    # Phase 1: Architect — site blueprint + foundation planning
+    # ------------------------------------------------------------------
+    async def _phase1_architect(
+        self,
+        api_key: str,
+        model: str,
+        context: dict[str, Any],
+        plan: dict[str, Any],
+        operations: list[dict[str, Any]],
+        *,
+        template_reference: Optional[TemplateReference] = None,
+    ) -> dict[str, Any]:
+        system_prompt = (
+            "You are an expert web architect specializing in planning production-quality websites.\n"
+            "Given a project brief, you create a detailed site blueprint as JSON.\n\n"
+            "Your blueprint must include:\n"
+            "1. An expanded page list — add pages the project needs beyond what was requested\n"
+            "2. For each page: slug, title, page_type, and a list of sections with descriptions\n"
+            "3. A shared_components list — reusable UI components needed across pages\n"
+            "4. Design notes — visual direction, color usage, spacing patterns\n"
+            "5. Content strategy — tone guidance and key messaging per page\n\n"
+            "Page types: home, about, services, pricing, contact, blog, portfolio, gallery, faq, testimonials, careers, features, generic\n\n"
+            "Respond with ONLY valid JSON. No markdown, no explanation."
+        )
+
+        user_parts: list[str] = ["Create a site blueprint for:\n"]
+        if context.get("goal"):
+            user_parts.append(f"Project Goal: {context['goal']}")
+        if context.get("context"):
+            user_parts.append(f"Context: {context['context']}")
+        if context.get("routes"):
+            user_parts.append(f"Requested Pages: {json.dumps(context['routes'])}")
+        if context.get("content_blocks") and isinstance(context["content_blocks"], dict):
+            user_parts.append(f"Content Blocks: {json.dumps(dict(list(context['content_blocks'].items())[:15]))}")
+        if context.get("acceptance_criteria"):
+            user_parts.append(f"Acceptance Criteria: {json.dumps(context['acceptance_criteria'])}")
+        if context.get("components"):
+            user_parts.append(f"Planned Components: {json.dumps(context['components'][:15])}")
+
+        user_parts.append(
+            "\nRespond with JSON matching this schema:\n"
+            "{\n"
+            '  "pages": [{"slug": "home", "title": "Home", "page_type": "home", '
+            '"sections": [{"name": "hero", "description": "Gradient hero with headline and CTA"}], '
+            '"content_brief": "Main landing with value proposition"}],\n'
+            '  "shared_components": ["NavBar", "Footer", "Hero", "CTABanner", "FeatureCard"],\n'
+            '  "design_notes": "Modern SaaS style...",\n'
+            '  "color_palette": {"primary": "#2563eb", "secondary": "#7c3aed", "accent": "#f59e0b"},\n'
+            '  "content_strategy": "Professional yet approachable tone..."\n'
+            "}"
+        )
+
+        content = await self._openai_chat(
+            api_key, model, system_prompt, "\n".join(user_parts),
+            temperature=0.4,
+            max_tokens=getattr(settings, "codegen_phase1_max_tokens", 4000),
+        )
+        if not content:
+            return self._default_blueprint(context, operations)
+
+        blueprint = self._parse_json_response(content)
+        if isinstance(blueprint, dict) and "pages" in blueprint:
+            return blueprint
+        return self._default_blueprint(context, operations)
+
+    def _default_blueprint(self, context: dict[str, Any], operations: list[dict[str, Any]]) -> dict[str, Any]:
+        """Fallback blueprint built from plan data without AI."""
+        routes = context.get("routes") or []
+        pages: list[dict[str, Any]] = []
+        for route in routes:
+            slug = str(route).strip("/").replace("/", "-") or "home"
+            page_type = self._classify_page_type(slug)
+            sections = self._PAGE_TYPE_SECTIONS.get(page_type, ["hero_banner", "content_section", "cta_banner"])
+            pages.append({
+                "slug": slug,
+                "title": slug.replace("-", " ").title(),
+                "page_type": page_type,
+                "sections": [{"name": s, "description": ""} for s in sections],
+                "content_brief": "",
+            })
+        if not pages:
+            pages = [{"slug": "home", "title": "Home", "page_type": "home",
+                       "sections": [{"name": s, "description": ""} for s in self._PAGE_TYPE_SECTIONS["home"]],
+                       "content_brief": ""}]
+        return {
+            "pages": pages,
+            "shared_components": ["NavBar", "Footer", "Hero", "CTABanner", "FeatureCard"],
+            "design_notes": "Modern, clean design with gradient accents.",
+            "color_palette": {"primary": "#2563eb", "secondary": "#7c3aed", "accent": "#f59e0b"},
+            "content_strategy": context.get("goal", "Professional website"),
+        }
+
+    @staticmethod
+    def _parse_json_response(content: str) -> Any:
+        content = content.strip()
+        if content.startswith("```"):
+            first_nl = content.find("\n")
+            if first_nl > 0:
+                content = content[first_nl + 1:]
+            if content.endswith("```"):
+                content = content[:-3]
+            content = content.strip()
+        try:
+            return json.loads(content)
+        except json.JSONDecodeError:
+            start = content.find("{")
+            end = content.rfind("}") + 1
+            if start >= 0 and end > start:
+                try:
+                    return json.loads(content[start:end])
+                except json.JSONDecodeError:
+                    pass
+        return None
+
+    # ------------------------------------------------------------------
+    # Phase 2: Builder — component + page generation via multiple calls
+    # ------------------------------------------------------------------
+    _BUILDER_SYSTEM_PROMPT = (
+        "You are an expert full-stack web developer specializing in Next.js App Router, React 19, TypeScript, and Tailwind CSS v4.\n"
+        "You generate production-quality code: beautiful, responsive, accessible, with REAL content (no Lorem Ipsum).\n\n"
+        "CRITICAL TECHNICAL RULES:\n"
+        "- Use Next.js App Router with src/app/ directory structure.\n"
+        "- Tailwind CSS v4: use @import \"tailwindcss\" in globals.css. NO tailwind.config files.\n"
+        "- PostCSS: export default { plugins: { \"@tailwindcss/postcss\": {} } };\n"
+        "- EVERY component imported MUST be generated. All components use named exports.\n"
+        "- ALWAYS import identifiers: Link from next/link, Image from next/image, etc.\n"
+        "- For MetadataRoute.Robots use lowercase keys: userAgent, allow, disallow, crawlDelay.\n"
+        "- Use proper TypeScript types throughout.\n\n"
+        "QUALITY RULES:\n"
+        "- Write marketing-quality copy — compelling headlines, clear value propositions, real testimonials.\n"
+        "- Design with visual hierarchy: large hero sections, consistent spacing, readable typography.\n"
+        "- Make every page feel complete with 3-6 distinct content sections.\n"
+        "- Use Tailwind utility classes for all styling. Use gradients, shadows, rounded corners, hover effects.\n"
+        "- Ensure full mobile responsiveness with sm:/md:/lg: breakpoints.\n"
+        "- Add smooth transitions and hover states for interactive elements.\n\n"
+        "OUTPUT FORMAT: For each file, use EXACTLY:\n"
+        "===FILE: path/to/file.ext===\n<content>\n===END_FILE===\n"
+    )
+
+    async def _phase2_build(
+        self,
+        api_key: str,
+        model: str,
+        blueprint: dict[str, Any],
+        context: dict[str, Any],
+        *,
+        template_reference: Optional[TemplateReference] = None,
+    ) -> list[GeneratedFile]:
+        all_files: list[GeneratedFile] = []
+        pages = blueprint.get("pages") or []
+        shared_components = blueprint.get("shared_components") or []
+        design_notes = blueprint.get("design_notes", "")
+        color_palette = blueprint.get("color_palette", {})
+        content_strategy = blueprint.get("content_strategy", "")
+        goal = context.get("goal", "Professional website")
+        project_context_str = context.get("context", "")
+
+        max_tokens = getattr(settings, "codegen_phase2_max_tokens", 16000)
+        batch_size = getattr(settings, "codegen_phase2_batch_size", 3)
+
+        # ── Call 1: Foundation files + shared components ──────────────────
+        foundation_prompt = self._build_foundation_prompt(
+            goal, project_context_str, shared_components, pages, design_notes, color_palette, content_strategy,
             template_reference=template_reference,
         )
+        foundation_content = await self._openai_chat(
+            api_key, model, self._BUILDER_SYSTEM_PROMPT, foundation_prompt,
+            temperature=0.3, max_tokens=max_tokens,
+        )
+        if foundation_content:
+            foundation_files = self._parse_codegen_response(foundation_content, [])
+            all_files.extend(foundation_files)
+            logger.info("deterministic.executor.codegen.phase2_foundation files=%d", len(foundation_files))
 
-        try:
-            async with httpx.AsyncClient(timeout=CODEGEN_TIMEOUT_SECONDS) as client:
-                resp, data = await self._request(
-                    client,
-                    "POST",
-                    f"{OPENAI_API_BASE}/chat/completions",
-                    headers={
-                        "Authorization": f"Bearer {api_key}",
-                        "Content-Type": "application/json",
-                    },
-                    payload={
-                        "model": model,
-                        "messages": [
-                            {"role": "system", "content": self._codegen_system_prompt()},
-                            {"role": "user", "content": batch_prompt},
-                        ],
-                        "temperature": 0.3,
-                        "max_tokens": 16000,
-                    },
-                )
-            if resp.status_code != 200:
-                logger.error(
-                    "deterministic.executor.codegen.openai_error status=%s body=%s",
-                    resp.status_code, str(data)[:300],
-                )
-                return self._ensure_scaffold_integrity(
-                    self._extract_files_from_operations(operations),
-                    template_reference=template_reference,
-                )
+        component_signatures = self._extract_component_signatures(all_files)
 
-            content = ""
-            if isinstance(data, dict):
-                choices = data.get("choices")
-                if isinstance(choices, list) and choices:
-                    msg = choices[0].get("message", {})
-                    content = msg.get("content", "")
-
-            generated = self._parse_codegen_response(content, file_specs)
-            logger.info(
-                "deterministic.executor.codegen.success model=%s files_parsed=%d",
-                model, len(generated),
+        # ── Calls 2-N: Pages in batches ──────────────────────────────────
+        for batch_start in range(0, len(pages), batch_size):
+            batch = pages[batch_start:batch_start + batch_size]
+            page_prompt = self._build_pages_prompt(
+                goal, project_context_str, batch, component_signatures, design_notes, color_palette, content_strategy,
             )
-        except Exception:
-            logger.exception("deterministic.executor.codegen.exception")
-            return self._ensure_scaffold_integrity(
-                self._extract_files_from_operations(operations),
-                template_reference=template_reference,
+            page_content = await self._openai_chat(
+                api_key, model, self._BUILDER_SYSTEM_PROMPT, page_prompt,
+                temperature=0.3, max_tokens=max_tokens,
+            )
+            if page_content:
+                page_files = self._parse_codegen_response(page_content, [])
+                all_files.extend(page_files)
+                logger.info(
+                    "deterministic.executor.codegen.phase2_pages batch=%d-%d files=%d",
+                    batch_start, batch_start + len(batch), len(page_files),
+                )
+
+        return all_files
+
+    def _build_foundation_prompt(
+        self,
+        goal: str,
+        project_context: str,
+        shared_components: list[str],
+        pages: list[dict[str, Any]],
+        design_notes: str,
+        color_palette: dict[str, str],
+        content_strategy: str,
+        *,
+        template_reference: Optional[TemplateReference] = None,
+    ) -> str:
+        nav_links = [p.get("title", p.get("slug", "")) for p in pages]
+        primary = color_palette.get("primary", "#2563eb")
+        secondary = color_palette.get("secondary", "#7c3aed")
+        accent = color_palette.get("accent", "#f59e0b")
+
+        parts: list[str] = [
+            f"Generate the FOUNDATION files for a website: {goal}\n",
+            f"Context: {project_context}" if project_context else "",
+            f"Design Direction: {design_notes}" if design_notes else "",
+            f"Content Strategy: {content_strategy}" if content_strategy else "",
+            f"Colors: primary={primary}, secondary={secondary}, accent={accent}\n",
+            f"Navigation Links: {json.dumps(nav_links)}\n",
+            "\nGenerate these files:\n",
+            "1. package.json — full deps including next, react, react-dom, tailwindcss, @tailwindcss/postcss, typescript, @types/react, @types/node",
+            "2. tsconfig.json — with @/* path alias to ./src/*",
+            "3. postcss.config.mjs — using @tailwindcss/postcss",
+            "4. next.config.ts — minimal Next.js config",
+            f"5. src/app/globals.css — @import \"tailwindcss\" + CSS variables for colors: primary={primary}, secondary={secondary}, accent={accent}",
+            f"6. src/app/layout.tsx — RootLayout importing NavBar + Footer, metadata with title and description",
+        ]
+
+        for comp in shared_components:
+            if comp in ("NavBar", "Footer"):
+                continue
+            slug_lower = comp.lower()
+            if "hero" in slug_lower:
+                parts.append(f"7. src/components/{comp}.tsx — Reusable hero section with title, subtitle, CTA button props. Gradient background using primary/secondary colors.")
+            elif "cta" in slug_lower:
+                parts.append(f"8. src/components/{comp}.tsx — Call-to-action banner with headline, description, and button. Use accent color.")
+            elif "feature" in slug_lower or "card" in slug_lower:
+                parts.append(f"9. src/components/{comp}.tsx — Card component with icon/number, title, description. Hover shadow effect.")
+            elif "testimonial" in slug_lower:
+                parts.append(f"10. src/components/{comp}.tsx — Testimonial card with quote, author name, role, avatar placeholder.")
+            elif "pricing" in slug_lower:
+                parts.append(f"11. src/components/{comp}.tsx — Pricing tier card with plan name, price, features list, CTA button. Highlighted tier option.")
+            elif "team" in slug_lower:
+                parts.append(f"12. src/components/{comp}.tsx — Team member card with photo placeholder, name, role, bio snippet.")
+            else:
+                parts.append(f"- src/components/{comp}.tsx — Reusable {comp} component with appropriate props.")
+
+        parts.append(f"\n13. src/components/NavBar.tsx — Sticky navigation: logo/brand '{goal.split('|')[0].strip()}', links for {json.dumps(nav_links)}, mobile hamburger menu, backdrop blur.")
+        parts.append(f"14. src/components/Footer.tsx — Multi-column: brand + tagline, page links, social placeholders, newsletter signup form, copyright.")
+
+        if template_reference and template_reference.source_repo:
+            parts.append(f"\nTemplate Reference: {template_reference.source_repo}")
+
+        parts.append("\nRemember: EVERY component must be a named export. Use real, compelling content.")
+
+        return "\n".join(p for p in parts if p)
+
+    def _build_pages_prompt(
+        self,
+        goal: str,
+        project_context: str,
+        page_batch: list[dict[str, Any]],
+        component_signatures: dict[str, str],
+        design_notes: str,
+        color_palette: dict[str, str],
+        content_strategy: str,
+    ) -> str:
+        parts: list[str] = [
+            f"Generate page files for: {goal}\n",
+        ]
+        if project_context:
+            parts.append(f"Context: {project_context}")
+        if content_strategy:
+            parts.append(f"Content Strategy: {content_strategy}")
+        if design_notes:
+            parts.append(f"Design: {design_notes}")
+
+        if component_signatures:
+            parts.append("\nAvailable shared components (import from @/components/):")
+            for name, sig in component_signatures.items():
+                parts.append(f"  - {name}: {sig}")
+
+        parts.append("\nPages to generate:\n")
+        for page in page_batch:
+            slug = page.get("slug", "")
+            title = page.get("title", slug.replace("-", " ").title())
+            page_type = page.get("page_type", self._classify_page_type(slug))
+            sections = page.get("sections", [])
+            brief = page.get("content_brief", "")
+
+            file_path = "src/app/page.tsx" if slug == "home" else f"src/app/{slug}/page.tsx"
+            parts.append(f"### {file_path} — {title} ({page_type} page)")
+
+            if brief:
+                parts.append(f"   Content Brief: {brief}")
+
+            section_descriptions = self._PAGE_TYPE_SECTIONS.get(page_type, ["hero_banner", "content_section", "cta_banner"])
+            if sections:
+                section_names = []
+                for s in sections:
+                    if isinstance(s, dict):
+                        desc = s.get("description", "")
+                        section_names.append(f"{s.get('name', 'section')}" + (f" — {desc}" if desc else ""))
+                    else:
+                        section_names.append(str(s))
+                parts.append(f"   Sections: {', '.join(section_names)}")
+            else:
+                parts.append(f"   Sections: {', '.join(section_descriptions)}")
+
+            if page_type == "home":
+                parts.append("   REQUIREMENTS: Large gradient hero with compelling headline + subtitle + 2 CTA buttons. Features grid (3-6 cards). Social proof / stats. Testimonials. Final CTA banner.")
+            elif page_type == "about":
+                parts.append("   REQUIREMENTS: Hero with company name. Founding story section. Mission & values (3+ values with icons). Team grid (4+ members with photo placeholders). Timeline optional.")
+            elif page_type == "services":
+                parts.append("   REQUIREMENTS: Services grid (3-6 services with icons). Process steps (3-5 numbered steps). Feature comparison or detail expand. CTA to contact.")
+            elif page_type == "pricing":
+                parts.append("   REQUIREMENTS: 2-3 pricing tiers with highlight on recommended. Feature checklist per tier. Toggle for monthly/annual optional. FAQ section below. 'use client' for interactivity.")
+            elif page_type == "contact":
+                parts.append("   REQUIREMENTS: Contact form (name, email, phone, message, submit). Office address + hours. Phone/email links. Map placeholder div. 'use client' for form state.")
+            elif page_type == "blog":
+                parts.append("   REQUIREMENTS: Featured article hero. Article grid (6+ articles with image placeholder, title, excerpt, date, category tag). Categories sidebar or filter.")
+            elif page_type == "portfolio":
+                parts.append("   REQUIREMENTS: Project grid (6+ projects with image placeholder, title, description, tags). Hover overlay effect. Optional category filter.")
+            elif page_type == "faq":
+                parts.append("   REQUIREMENTS: Accordion-style Q&A (8+ questions). 'use client' for toggle state. Contact CTA at bottom.")
+            elif page_type == "testimonials":
+                parts.append("   REQUIREMENTS: Testimonial cards grid (6+ reviews). Star ratings. Author info. Rating summary section. CTA.")
+            else:
+                parts.append(f"   REQUIREMENTS: Hero banner. 3+ content sections with real content relevant to '{title}'. CTA at bottom.")
+
+            parts.append("")
+
+        parts.append("IMPORTANT: Write compelling, real content (not placeholder text). Each page should have 3-6 sections minimum.")
+        parts.append("Use Tailwind CSS for styling. Make pages responsive. Export pages as default exports.")
+        parts.append("If a page needs interactivity (forms, toggles, accordions), add 'use client' at the top and use useState.")
+
+        return "\n".join(parts)
+
+    @staticmethod
+    def _extract_component_signatures(files: list[GeneratedFile]) -> dict[str, str]:
+        """Extract component names and their prop signatures from generated files."""
+        import re
+        signatures: dict[str, str] = {}
+        for f in files:
+            if not f.path.startswith("src/components/") or not f.path.endswith(".tsx"):
+                continue
+            name = f.path.rsplit("/", 1)[-1].replace(".tsx", "")
+            prop_match = re.search(r"export\s+function\s+\w+\s*\(([^)]*)\)", f.content)
+            if prop_match:
+                props_str = prop_match.group(1).strip()
+                signatures[name] = f"<{name} {props_str} />" if props_str else f"<{name} />"
+            else:
+                signatures[name] = f"<{name} />"
+        return signatures
+
+    # ------------------------------------------------------------------
+    # Phase 3: Inspector — validation, auto-fix, polish
+    # ------------------------------------------------------------------
+    def _phase3_inspect(
+        self,
+        files: list[GeneratedFile],
+        blueprint: dict[str, Any],
+        *,
+        template_reference: Optional[TemplateReference] = None,
+    ) -> list[GeneratedFile]:
+        """Validate all generated files and fix issues to guarantee build success."""
+        file_map = {f.path: f for f in files}
+
+        issues: list[str] = []
+
+        # Check 1: Ensure every page from blueprint has a file
+        for page in blueprint.get("pages", []):
+            slug = page.get("slug", "")
+            expected = "src/app/page.tsx" if slug == "home" else f"src/app/{slug}/page.tsx"
+            if expected not in file_map:
+                issues.append(f"missing_page:{expected}")
+                page_type = page.get("page_type", self._classify_page_type(slug))
+                file_map[expected] = GeneratedFile(
+                    path=expected,
+                    content=self._generate_fallback_page(slug, page.get("title", slug.title()), page_type),
+                )
+
+        # Check 2: Ensure layout.tsx exists
+        if "src/app/layout.tsx" not in file_map and "app/layout.tsx" not in file_map:
+            issues.append("missing_layout")
+            file_map["src/app/layout.tsx"] = GeneratedFile(
+                path="src/app/layout.tsx",
+                content=self._generate_fallback_layout(blueprint),
             )
 
-        if not generated:
-            generated = self._extract_files_from_operations(operations)
-        return self._ensure_scaffold_integrity(generated, template_reference=template_reference)
+        # Check 3: Validate component exports match imports
+        self._validate_component_exports(file_map, issues)
 
-    def _codegen_system_prompt(self) -> str:
+        # Check 4: Fix duplicate imports
+        self._fix_duplicate_imports(file_map)
+
+        # Check 5: Ensure page metadata exports
+        self._ensure_page_metadata(file_map)
+
+        # Check 6: Add SEO files if missing
+        self._ensure_seo_files(file_map, blueprint)
+
+        if issues:
+            logger.info("deterministic.executor.phase3.issues_found count=%d issues=%s", len(issues), issues[:10])
+
+        # Run existing scaffold integrity (tsconfig, postcss, package.json, globals.css, missing imports, etc.)
+        validated = self._ensure_scaffold_integrity(list(file_map.values()), template_reference=template_reference)
+        return validated
+
+    @staticmethod
+    def _generate_fallback_page(slug: str, title: str, page_type: str) -> str:
+        """Generate a minimal but complete page when the AI didn't produce one."""
+        needs_client = page_type in ("contact", "faq", "pricing")
+        lines: list[str] = []
+        if needs_client:
+            lines.append('"use client";\n')
+            lines.append('import { useState } from "react";\n')
+        lines.append(f"export default function {title.replace(' ', '').replace('-', '')}Page() {{")
+        lines.append("  return (")
+        lines.append('    <div className="min-h-screen">')
+        lines.append(f'      <section className="bg-gradient-to-br from-blue-600 to-purple-700 text-white py-20">')
+        lines.append(f'        <div className="max-w-7xl mx-auto px-4 text-center">')
+        lines.append(f'          <h1 className="text-4xl md:text-5xl font-bold mb-4">{title}</h1>')
+        lines.append(f'          <p className="text-xl opacity-90">Welcome to our {title.lower()} page</p>')
+        lines.append("        </div>")
+        lines.append("      </section>")
+        lines.append('      <section className="py-16">')
+        lines.append('        <div className="max-w-7xl mx-auto px-4">')
+        lines.append(f'          <h2 className="text-3xl font-bold text-center mb-8">About {title}</h2>')
+        lines.append(f'          <p className="text-lg text-gray-600 text-center max-w-3xl mx-auto">')
+        lines.append(f"            We are committed to delivering exceptional results. Explore our {title.lower()} to learn more.")
+        lines.append("          </p>")
+        lines.append("        </div>")
+        lines.append("      </section>")
+        lines.append("    </div>")
+        lines.append("  );")
+        lines.append("}")
+        return "\n".join(lines) + "\n"
+
+    @staticmethod
+    def _generate_fallback_layout(blueprint: dict[str, Any]) -> str:
         return (
-            "You are an expert full-stack web developer specializing in Next.js App Router, React 19, TypeScript, and Tailwind CSS v4.\n"
-            "You generate production-quality code for complete websites.\n\n"
-            "CRITICAL REQUIREMENTS:\n"
-            "- Use Next.js App Router and match the existing template layout (app/ or src/app/).\n"
-            "- Tailwind CSS v4 does NOT use tailwind.config.ts — it uses CSS-based configuration.\n"
-            "  In globals.css, use: @import \"tailwindcss\";\n"
-            "- PostCSS config (postcss.config.mjs) MUST use @tailwindcss/postcss, NOT tailwindcss:\n"
-            "  export default { plugins: { \"@tailwindcss/postcss\": {} } };\n"
-            "- package.json MUST include @tailwindcss/postcss as a dependency.\n"
-            "- For MetadataRoute.Robots, use lowercase rule keys only: userAgent, allow, disallow, crawlDelay.\n"
-            "- Do NOT generate tailwind.config.ts or tailwind.config.js — Tailwind v4 does not use them.\n"
-            "- EVERY component imported in any file MUST be generated as a separate file.\n"
-            "  For example, if layout.tsx imports NavBar and Footer, you MUST generate src/components/NavBar.tsx and src/components/Footer.tsx.\n"
-            "- All components must be exported as named exports.\n"
-            "- ALWAYS import every identifier you use. Common Next.js imports:\n"
-            "  import Link from \"next/link\";\n"
-            "  import Image from \"next/image\";\n"
-            "  import { useRouter, usePathname } from \"next/navigation\";\n"
-            "  import type { Metadata } from \"next\";\n"
-            "- Use modern, clean, well-structured code with real content (no Lorem Ipsum).\n"
-            "- Make designs responsive and mobile-friendly using Tailwind CSS utility classes.\n"
-            "- Use proper TypeScript types.\n"
-            "- Optimize for performance and SEO.\n\n"
-            "When generating code, output ONLY the file contents in the exact format requested. "
-            "Do not add explanatory text outside of code blocks."
+            'import type { Metadata } from "next";\n'
+            'import "./globals.css";\n'
+            'import { NavBar } from "@/components/NavBar";\n'
+            'import { Footer } from "@/components/Footer";\n\n'
+            "export const metadata: Metadata = {\n"
+            '  title: "Website",\n'
+            '  description: "Generated by OpenClaw",\n'
+            "};\n\n"
+            "export default function RootLayout({ children }: { children: React.ReactNode }) {\n"
+            "  return (\n"
+            '    <html lang="en">\n'
+            '      <body className="min-h-screen flex flex-col">\n'
+            "        <NavBar />\n"
+            '        <main className="flex-1">{children}</main>\n'
+            "        <Footer />\n"
+            "      </body>\n"
+            "    </html>\n"
+            "  );\n"
+            "}\n"
         )
 
+    @staticmethod
+    def _validate_component_exports(file_map: dict[str, GeneratedFile], issues: list[str]) -> None:
+        """Ensure every component file has a matching named export."""
+        import re
+        for path, f in list(file_map.items()):
+            if not path.startswith("src/components/") or not (path.endswith(".tsx") or path.endswith(".ts")):
+                continue
+            name = path.rsplit("/", 1)[-1].split(".")[0]
+            has_named = bool(re.search(rf"export\s+(function|const|class)\s+{re.escape(name)}\b", f.content))
+            has_default = "export default" in f.content
+            if not has_named and not has_default:
+                issues.append(f"no_export:{path}")
+                file_map[path] = GeneratedFile(
+                    path=path,
+                    content=f.content.rstrip() + f"\n\nexport function {name}() {{\n  return <div>{name}</div>;\n}}\n",
+                )
+
+    @staticmethod
+    def _fix_duplicate_imports(file_map: dict[str, GeneratedFile]) -> None:
+        """Remove duplicate import lines from all source files."""
+        for path, f in list(file_map.items()):
+            if not (path.endswith(".tsx") or path.endswith(".ts") or path.endswith(".jsx") or path.endswith(".js")):
+                continue
+            lines = f.content.split("\n")
+            seen: set[str] = set()
+            deduped: list[str] = []
+            changed = False
+            for line in lines:
+                stripped = line.strip()
+                if stripped.startswith("import ") and stripped in seen:
+                    changed = True
+                    continue
+                if stripped.startswith("import "):
+                    seen.add(stripped)
+                deduped.append(line)
+            if changed:
+                file_map[path] = GeneratedFile(path=path, content="\n".join(deduped))
+
+    @staticmethod
+    def _ensure_page_metadata(file_map: dict[str, GeneratedFile]) -> None:
+        """Add Metadata export to server-rendered pages that lack it."""
+        import re
+        for path, f in list(file_map.items()):
+            if not path.endswith("/page.tsx"):
+                continue
+            if '"use client"' in f.content or "'use client'" in f.content:
+                continue
+            if "export const metadata" in f.content or "export function generateMetadata" in f.content:
+                continue
+            title_match = re.search(r"<h1[^>]*>([^<]+)</h1>", f.content)
+            title = title_match.group(1).strip() if title_match else path.split("/")[-2].replace("-", " ").title()
+            metadata_block = (
+                'import type { Metadata } from "next";\n\n'
+                f"export const metadata: Metadata = {{\n"
+                f'  title: "{title}",\n'
+                f'  description: "Learn more about {title.lower()}",\n'
+                f"}};\n\n"
+            )
+            if 'from "next"' not in f.content and "from 'next'" not in f.content:
+                file_map[path] = GeneratedFile(path=path, content=metadata_block + f.content)
+            else:
+                meta_line = (
+                    f"\nexport const metadata: Metadata = {{\n"
+                    f'  title: "{title}",\n'
+                    f'  description: "Learn more about {title.lower()}",\n'
+                    f"}};\n"
+                )
+                export_match = re.search(r"^export\s+default\s+function", f.content, re.MULTILINE)
+                if export_match:
+                    insert_pos = export_match.start()
+                    file_map[path] = GeneratedFile(
+                        path=path,
+                        content=f.content[:insert_pos] + meta_line + "\n" + f.content[insert_pos:],
+                    )
+
+    @staticmethod
+    def _ensure_seo_files(file_map: dict[str, GeneratedFile], blueprint: dict[str, Any]) -> None:
+        """Add sitemap.ts and robots.ts if not present."""
+        app_root = "src/app" if any(p.startswith("src/app/") for p in file_map) else "app"
+
+        sitemap_path = f"{app_root}/sitemap.ts"
+        if sitemap_path not in file_map:
+            pages = blueprint.get("pages", [])
+            entries: list[str] = []
+            for page in pages:
+                slug = page.get("slug", "")
+                route = "/" if slug == "home" else f"/{slug}"
+                priority = "1.0" if slug == "home" else "0.8"
+                entries.append(
+                    f"    {{ url: `${{baseUrl}}{route}`, lastModified: new Date(), changeFrequency: 'weekly' as const, priority: {priority} }},"
+                )
+            file_map[sitemap_path] = GeneratedFile(
+                path=sitemap_path,
+                content=(
+                    'import type { MetadataRoute } from "next";\n\n'
+                    "export default function sitemap(): MetadataRoute.Sitemap {\n"
+                    '  const baseUrl = process.env.NEXT_PUBLIC_SITE_URL || "https://example.com";\n'
+                    "  return [\n" + "\n".join(entries) + "\n  ];\n}\n"
+                ),
+            )
+
+        robots_path = f"{app_root}/robots.ts"
+        if robots_path not in file_map:
+            file_map[robots_path] = GeneratedFile(
+                path=robots_path,
+                content=(
+                    'import type { MetadataRoute } from "next";\n\n'
+                    "export default function robots(): MetadataRoute.Robots {\n"
+                    '  const baseUrl = process.env.NEXT_PUBLIC_SITE_URL || "https://example.com";\n'
+                    "  return {\n"
+                    '    rules: { userAgent: "*", allow: "/" },\n'
+                    "    sitemap: `${baseUrl}/sitemap.xml`,\n"
+                    "  };\n}\n"
+                ),
+            )
+
+    # ------------------------------------------------------------------
+    # Shared helpers for code generation
+    # ------------------------------------------------------------------
     def _build_project_context(self, plan: dict[str, Any], operations: list[dict[str, Any]]) -> dict[str, Any]:
         context: dict[str, Any] = {}
         for key in ("template_family", "scaffold_type", "framework", "routes", "components",
@@ -542,88 +1111,6 @@ class DeterministicWebExecutor:
                 if key in gp:
                     context[key] = gp[key]
         return context
-
-    def _collect_file_specs(self, operations: list[dict[str, Any]], plan: dict[str, Any]) -> list[dict[str, str]]:
-        specs: list[dict[str, str]] = []
-        for op in operations:
-            if not isinstance(op, dict):
-                continue
-            op_type = str(op.get("type") or "").strip().lower()
-            if op_type not in ("create_file", "write_config"):
-                continue
-            inputs = op.get("inputs") if isinstance(op.get("inputs"), dict) else {}
-            path = str(inputs.get("path") or "").strip()
-            if not path:
-                continue
-            specs.append({"path": path, "hint": str(inputs.get("content") or "")[:200]})
-        return specs
-
-    def _build_codegen_prompt(
-        self,
-        context: dict[str, Any],
-        file_specs: list[dict[str, str]],
-        *,
-        template_reference: Optional[TemplateReference] = None,
-    ) -> str:
-        parts: list[str] = []
-        parts.append("Generate production-quality code for a Next.js website with the following specifications:\n")
-
-        if context.get("goal"):
-            parts.append(f"**Project Goal:** {context['goal']}\n")
-        if context.get("context"):
-            parts.append(f"**Project Context:** {context['context']}\n")
-        if context.get("framework"):
-            parts.append(f"**Framework:** {context['framework']}\n")
-        if context.get("routes"):
-            parts.append(f"**Routes:** {json.dumps(context['routes'])}\n")
-        if context.get("components"):
-            parts.append(f"**Components:** {json.dumps(context['components'][:20])}\n")
-        if context.get("content_blocks"):
-            blocks = context["content_blocks"]
-            if isinstance(blocks, list):
-                parts.append(f"**Content Blocks:** {json.dumps(blocks[:10])}\n")
-        if context.get("acceptance_criteria"):
-            parts.append(f"**Acceptance Criteria:** {json.dumps(context['acceptance_criteria'])}\n")
-
-        if template_reference and template_reference.source_repo:
-            parts.append(
-                f"**Template Reference:** {template_reference.source_repo}@{template_reference.source_branch or 'main'}\n"
-            )
-            pkg = template_reference.package_json if isinstance(template_reference.package_json, dict) else {}
-            template_deps = pkg.get("dependencies") if isinstance(pkg.get("dependencies"), dict) else {}
-            template_dev_deps = pkg.get("devDependencies") if isinstance(pkg.get("devDependencies"), dict) else {}
-            if template_deps:
-                parts.append(f"**Template Dependencies:** {json.dumps(template_deps)}\n")
-            if template_dev_deps:
-                parts.append(f"**Template DevDependencies:** {json.dumps(template_dev_deps)}\n")
-            if template_reference.key_files:
-                parts.append(
-                    "**Template Baseline Files Present:** "
-                    + json.dumps(sorted(template_reference.key_files.keys()))
-                    + "\n"
-                )
-
-        parts.append("\n**Files to generate:**\n")
-        for spec in file_specs:
-            hint_note = f" (hint: {spec['hint']})" if spec["hint"] and "generated for" not in spec["hint"] else ""
-            parts.append(f"- `{spec['path']}`{hint_note}")
-
-        parts.append("\n\n**Output format:** For each file, output the following format EXACTLY:\n")
-        parts.append("```\n===FILE: path/to/file.ext===\n<file content here>\n===END_FILE===\n```\n")
-        parts.append("\nGenerate ALL files listed above. Each file must contain complete, runnable code.\n")
-        parts.append("MANDATORY RULES:\n")
-        parts.append("1. package.json MUST include these dependencies: next, react, react-dom, tailwindcss, @tailwindcss/postcss, typescript, @types/react, @types/node\n")
-        parts.append("2. postcss.config.mjs MUST use: export default { plugins: { \"@tailwindcss/postcss\": {} } };\n")
-        parts.append("3. globals.css MUST start with: @import \"tailwindcss\";\n")
-        parts.append("4. Do NOT include tailwind.config.ts or tailwind.config.js\n")
-        parts.append("5. EVERY component referenced via import MUST have its own generated file\n")
-        parts.append("6. Use Tailwind CSS utility classes for all styling\n")
-        parts.append("7. In robots.ts rules, use lowercase keys only: userAgent/allow/disallow/crawlDelay.\n")
-        parts.append("8. Preserve template conventions and module choices where possible.\n")
-        parts.append("9. If new external libraries are required by imports, update package.json accordingly.")
-        parts.append("10. Make the website beautiful, modern, and responsive with real content relevant to the project goal.")
-
-        return "\n".join(parts)
 
     def _parse_codegen_response(self, content: str, file_specs: list[dict[str, str]]) -> list[GeneratedFile]:
         files: list[GeneratedFile] = []

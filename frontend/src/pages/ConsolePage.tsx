@@ -148,6 +148,20 @@ export function ConsolePage() {
                   <div className={`pipeline-phase ${hasSteps && steps.includes('generate_code') ? 'done' : ''}`}>
                     <span className="phase-indicator">{hasSteps && steps.includes('generate_code') ? '\u2713' : '\u2022'}</span>
                     <span>Generate Code{filesGen ? ` (${filesGen} files)` : ''}</span>
+                    {hasSteps && steps.includes('generate_code') && filesGen && (
+                      <div className="phase-sub-steps">
+                        <span className="phase-sub-step done">Architect</span>
+                        <span className="phase-sub-step done">Builder</span>
+                        <span className="phase-sub-step done">Inspector</span>
+                      </div>
+                    )}
+                    {!hasSteps && flow.taskStatus === 'pending' && (
+                      <div className="phase-sub-steps">
+                        <span className="phase-sub-step">Architect</span>
+                        <span className="phase-sub-step">Builder</span>
+                        <span className="phase-sub-step">Inspector</span>
+                      </div>
+                    )}
                   </div>
                   <div className={`pipeline-phase ${hasSteps && steps.includes('write_files') ? 'done' : ''}`}>
                     <span className="phase-indicator">{hasSteps && steps.includes('write_files') ? '\u2713' : '\u2022'}</span>

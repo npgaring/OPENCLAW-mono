@@ -8,6 +8,7 @@ from app.skills.base import FileOperation, Skill, SkillContext
 
 class ScaffoldSkill(Skill):
     name = "scaffold"
+    phase = 1
     depends_on: list[str] = []
 
     async def generate(self, ctx: SkillContext) -> list[FileOperation]:
@@ -32,10 +33,12 @@ class ScaffoldSkill(Skill):
                 "@types/node": "^22.0.0",
                 "@types/react": "^19.0.0",
                 "@types/react-dom": "^19.0.0",
-                "typescript": "^5.7.0",
-                "tailwindcss": "^4.0.0",
-                "@tailwindcss/postcss": "^4.0.0",
+                "typescript": "^5.8.0",
+                "tailwindcss": "^4.2.0",
+                "@tailwindcss/postcss": "^4.2.0",
                 "postcss": "^8.5.0",
+                "eslint": "^9.0.0",
+                "eslint-config-next": "^15.0.0",
             },
         }
         files.append(FileOperation(

@@ -105,6 +105,22 @@ class Settings(BaseSettings):
         default=None,
         description="OpenAI model used by the skills engine for code generation.",
     )
+    codegen_phase1_max_tokens: int = Field(
+        default=4000,
+        description="Max output tokens for Phase 1 (Architect) blueprint generation.",
+    )
+    codegen_phase2_max_tokens: int = Field(
+        default=16000,
+        description="Max output tokens per Phase 2 (Builder) call.",
+    )
+    codegen_phase3_max_tokens: int = Field(
+        default=8000,
+        description="Max output tokens for Phase 3 (Inspector) AI review call.",
+    )
+    codegen_phase2_batch_size: int = Field(
+        default=3,
+        description="Number of pages per batch in Phase 2 code generation.",
+    )
     governed_v2_enabled: bool = Field(
         default=True,
         description="Enable governed dual-engine v2 lock endpoints and continuity enforcement hooks.",

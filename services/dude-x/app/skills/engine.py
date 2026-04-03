@@ -33,6 +33,7 @@ def _render_repo_name(project_slug: str, trace_id: str = "") -> str:
 
 
 def _all_skills() -> list[Skill]:
+    from app.skills.components import ComponentsSkill
     from app.skills.design import DesignSkill
     from app.skills.integrations import IntegrationsSkill
     from app.skills.layout import LayoutSkill
@@ -41,12 +42,13 @@ def _all_skills() -> list[Skill]:
     from app.skills.seo import SEOSkill
 
     return [
-        ScaffoldSkill(),
-        DesignSkill(),
-        LayoutSkill(),
-        PagesSkill(),
-        IntegrationsSkill(),
-        SEOSkill(),
+        ScaffoldSkill(),       # phase 1
+        DesignSkill(),         # phase 1
+        ComponentsSkill(),     # phase 2
+        LayoutSkill(),         # phase 2
+        PagesSkill(),          # phase 2
+        IntegrationsSkill(),   # phase 3
+        SEOSkill(),            # phase 3
     ]
 
 
@@ -86,26 +88,35 @@ class SkillsEngine:
         )
 
     async def run(self) -> list[FileOperation]:
-        """Execute all skills in dependency order, returning collected file operations."""
+        """Execute all skills grouped by phase (1→2→3), with dependency order within each phase."""
         skills = _topological_sort(_all_skills())
         all_files: list[FileOperation] = []
         seen_paths: set[str] = set()
 
+        phases: dict[int, list[Skill]] = {}
         for skill in skills:
-            logger.info("skills_engine.run_skill name=%s", skill.name)
-            try:
-                files = await skill.generate(self.ctx)
-                for f in files:
-                    if f.path not in seen_paths:
-                        all_files.append(f)
-                        seen_paths.add(f.path)
-                    else:
-                        logger.warning(
-                            "skills_engine.duplicate_path skill=%s path=%s",
-                            skill.name, f.path,
-                        )
-            except Exception:
-                logger.exception("skills_engine.skill_failed name=%s", skill.name)
+            phase = getattr(skill, "phase", 1)
+            phases.setdefault(phase, []).append(skill)
+
+        for phase_num in sorted(phases.keys()):
+            phase_skills = phases[phase_num]
+            logger.info("skills_engine.phase_start phase=%d skills=%s", phase_num, [s.name for s in phase_skills])
+            for skill in phase_skills:
+                logger.info("skills_engine.run_skill phase=%d name=%s", phase_num, skill.name)
+                try:
+                    files = await skill.generate(self.ctx)
+                    for f in files:
+                        if f.path not in seen_paths:
+                            all_files.append(f)
+                            seen_paths.add(f.path)
+                        else:
+                            logger.warning(
+                                "skills_engine.duplicate_path skill=%s path=%s",
+                                skill.name, f.path,
+                            )
+                except Exception:
+                    logger.exception("skills_engine.skill_failed name=%s", skill.name)
+            logger.info("skills_engine.phase_done phase=%d files_so_far=%d", phase_num, len(all_files))
 
         logger.info("skills_engine.complete total_files=%d", len(all_files))
         return all_files

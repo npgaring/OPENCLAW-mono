@@ -69,6 +69,7 @@ class Skill(ABC):
     """Abstract base for a website generation skill."""
 
     name: str = "base"
+    phase: int = 1
     depends_on: list[str] = []
 
     @abstractmethod

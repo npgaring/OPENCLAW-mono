@@ -827,3 +827,31 @@ pre {
   text-align: center;
   flex-shrink: 0;
 }
+
+/* Sub-phase indicators for code generation */
+.pipeline-phase {
+  flex-wrap: wrap;
+}
+
+.phase-sub-steps {
+  display: flex;
+  gap: 4px;
+  width: 100%;
+  margin-top: 4px;
+  padding-left: 24px;
+}
+
+.phase-sub-step {
+  font-size: 9px;
+  padding: 2px 6px;
+  border-radius: 4px;
+  background: #21262d;
+  color: #8b949e;
+  border: 1px solid #30363d;
+}
+
+.phase-sub-step.done {
+  color: #3fb950;
+  border-color: #238636;
+  background: #0d1117;
+}
