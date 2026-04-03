@@ -1411,6 +1411,51 @@ async def run_task_submission(
             invariant_e_reason_codes=list(ie_res.reason_codes),
             dispatch_blocked=False,
         )
+    except Exception as e:
+        _trace(
+            "task.submit.execute_error",
+            trace_id=trace_id,
+            task_id=str(task.task_id),
+            execute_mode="deterministic_web_v1",
+            reason_code="EXECUTION_DETERMINISTIC_RUNTIME_ERROR",
+            error=str(e),
+        )
+        logger.exception(
+            "governed_v2.task.submit.deterministic_unhandled",
+            extra={
+                "trace_id": trace_id,
+                "task_id": str(task.task_id),
+            },
+        )
+        task.status = TaskStatus.needs_review
+        response = {
+            "status": "needs_review",
+            "execution_id": f"detexec_{task.task_id}",
+            "message": "Deterministic executor failed with an unexpected runtime error.",
+            "reason_codes": ["EXECUTION_DETERMINISTIC_RUNTIME_ERROR"],
+        }
+        task.audit_history = (task.audit_history or []) + [{"event_type": "execution_response", "payload": response}]
+        task.execution_id = str(response["execution_id"])
+        await session.commit()
+        return _task_submit_response(
+            task_id=task.task_id,
+            execution_id=task.execution_id,
+            status=task.status.value,
+            trace_id=trace_id,
+            execution_response=response,
+            deployment_url=None,
+            preview_url=None,
+            gate_outcome="PASS",
+            governance_outcome="PASS",
+            governance_evaluation_id=governance_evaluation_id,
+            governance_continuity_verified=governance_continuity_verified,
+            reason_codes=["EXECUTION_DETERMINISTIC_RUNTIME_ERROR"],
+            uato_decision=uato_res.decision,
+            uato_reason_codes=list(uato_res.reason_codes),
+            invariant_e_decision=ie_res.decision,
+            invariant_e_reason_codes=list(ie_res.reason_codes),
+            dispatch_blocked=False,
+        )
     except OpenClawError as e:
         _trace(
             "task.submit.execute_error",

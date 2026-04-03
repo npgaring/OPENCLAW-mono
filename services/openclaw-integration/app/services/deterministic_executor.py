@@ -205,13 +205,21 @@ class DeterministicWebExecutor:
         logger.info("deterministic.executor.phase2_start task_id=%s", task_id)
         generated_files = await self._generate_code_via_openai(plan, operations, trace_id=trace_id)
         steps_completed.append("generate_code")
-        # #region agent log
-        import json as _json2, time as _time2
-        _log_path2 = "/Users/braiebook/CDHQ Projects/OpenClaw-Mono/OPENCLAW-mono/.cursor/debug-5138fb.log"
-        _tsconfig_content = next((gf.content[:300] for gf in generated_files if gf.path == "tsconfig.json"), "MISSING")
-        _postcss_content = next((gf.content[:200] for gf in generated_files if gf.path == "postcss.config.mjs"), "MISSING")
-        with open(_log_path2, "a") as _f: _f.write(_json2.dumps({"sessionId":"5138fb","hypothesisId":"H2-files","location":"deterministic_executor.py:execute:phase2_done","message":"generated_files_after_scaffold","data":{"file_count":len(generated_files),"file_paths":[gf.path for gf in generated_files],"branch":repo_spec.branch,"tsconfig_snippet":_tsconfig_content,"postcss_snippet":_postcss_content,"has_at_alias":"@/*" in _tsconfig_content},"timestamp":int(_time2.time()*1000)}) + "\n")
-        # #endregion
+        tsconfig_content = next((gf.content[:300] for gf in generated_files if gf.path == "tsconfig.json"), "MISSING")
+        postcss_content = next((gf.content[:200] for gf in generated_files if gf.path == "postcss.config.mjs"), "MISSING")
+        logger.info(
+            "deterministic.executor.phase2_debug task_id=%s file_count=%d has_at_alias=%s",
+            task_id,
+            len(generated_files),
+            "@/*" in tsconfig_content,
+        )
+        logger.debug(
+            "deterministic.executor.phase2_files task_id=%s paths=%s tsconfig_snippet=%s postcss_snippet=%s",
+            task_id,
+            [gf.path for gf in generated_files],
+            tsconfig_content,
+            postcss_content,
+        )
         logger.info(
             "deterministic.executor.phase2_done task_id=%s files_generated=%d",
             task_id, len(generated_files),
@@ -890,11 +898,15 @@ class DeterministicWebExecutor:
             "include_all_branches": False,
         }
         resp, data = await self._request(client, "POST", url, headers=headers, payload=payload)
-        # #region agent log
-        import json as _json, time as _time
-        _log_path = "/Users/braiebook/CDHQ Projects/OpenClaw-Mono/OPENCLAW-mono/.cursor/debug-5138fb.log"
-        with open(_log_path, "a") as _f: _f.write(_json.dumps({"sessionId":"5138fb","hypothesisId":"H1-visibility","location":"deterministic_executor.py:_github_provision_repo","message":"repo_create_result","data":{"status_code":resp.status_code,"private_flag_sent":spec.private,"visibility":str(data.get("visibility","")) if isinstance(data,dict) else "","html_url":str(data.get("html_url",""))[:150] if isinstance(data,dict) else "","private_returned":data.get("private") if isinstance(data,dict) else ""},"timestamp":int(_time.time()*1000)}) + "\n")
-        # #endregion
+        logger.info(
+            "deterministic.executor.repo_create_result owner=%s repo=%s status_code=%s private_sent=%s visibility=%s private_returned=%s",
+            spec.owner,
+            spec.name,
+            resp.status_code,
+            spec.private,
+            str(data.get("visibility", "")) if isinstance(data, dict) else "",
+            str(data.get("private")) if isinstance(data, dict) else "",
+        )
         if resp.status_code in (200, 201):
             return RepoProvisionResult(
                 owner=spec.owner,

@@ -1,0 +1,60 @@
+{
+  "model": "gpt-5.4-mini",
+  "temperature": 0,
+  "messages": [
+    {
+      "role": "system",
+      "content": "Return strict JSON only with the required schema. No prose, no explanations, no optional fields, no reasoning text. action must exactly match type."
+    },
+    {
+      "role": "user",
+      "content": "{\"ocgg_identity\":\"W-OCGG\",\"intent\":\"web-build\",\"deployment_target\":\"preview\",\"objective\":\"Build and verify a web release candidate\",\"context\":\"Prepare the web app for a preview deployment\",\"constraints\":{\"allowed_targets\":[\"web/app\"],\"allowed_operations\":[\"write_config\",\"build\",\"test\"],\"forbidden_operations\":[\"deploy\"],\"max_steps\":3},\"approval_reference\":null,\"approver_id\":null,\"enum_types\":[\"create_file\",\"write_config\",\"build\",\"deploy\",\"test\",\"rollback_prep\"],\"enum_actions\":[\"create_file\",\"write_config\",\"build\",\"deploy\",\"test\",\"rollback_prep\"]}"
+    }
+  ],
+  "response_format": {
+    "type": "json_schema",
+    "json_schema": {
+      "name": "candidate_plan_output",
+      "strict": true,
+      "schema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "candidate_plan": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "steps": {
+                "type": "array",
+                "minItems": 1,
+                "items": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "properties": {
+                    "id": { "type": "string", "minLength": 1 },
+                    "type": { "type": "string", "enum": ["create_file", "write_config", "build", "deploy", "test", "rollback_prep"] },
+                    "action": { "type": "string", "enum": ["create_file", "write_config", "build", "deploy", "test", "rollback_prep"] },
+                    "target": { "type": "string", "minLength": 1 },
+                    "inputs": { "type": "object" }
+                  },
+                  "required": ["id", "type", "action", "target", "inputs"]
+                }
+              },
+              "metadata": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "requiresApproval": { "type": "boolean" },
+                  "riskLevel": { "type": "string", "enum": ["low", "medium", "high"] }
+                },
+                "required": ["requiresApproval", "riskLevel"]
+              }
+            },
+            "required": ["steps", "metadata"]
+          }
+        },
+        "required": ["candidate_plan"]
+      }
+    }
+  }
+}
