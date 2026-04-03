@@ -10,11 +10,11 @@ interface ArtifactsPanelProps {
 
 export function ArtifactsPanel({ displayBuildSot, displayLocks, executionPlan, taskResult }: ArtifactsPanelProps) {
   return (
-    <article className="panel">
+    <article className="panel artifacts-panel">
       <div className="head">
         <h2>Artifacts</h2>
       </div>
-      <div className="body grid">
+      <div className="body">
         <JsonViewer label="Build SoT" value={displayBuildSot} />
         <JsonViewer label="Governance / Lock Results" value={displayLocks} />
         <JsonViewer label="Execution Plan" value={executionPlan} />

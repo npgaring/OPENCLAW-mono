@@ -82,8 +82,10 @@ p {
 }
 
 .stack {
-  display: grid;
+  display: flex;
+  flex-direction: column;
   gap: 16px;
+  min-width: 0;
 }
 
 .panel {
@@ -255,8 +257,73 @@ button:hover:not(:disabled) {
   border-radius: 12px;
   background: rgba(2, 8, 20, 0.72);
   overflow: auto;
-  min-height: 120px;
-  max-height: 340px;
+  max-height: 260px;
+}
+
+/* Artifacts Panel */
+.artifacts-panel .body {
+  max-height: 480px;
+  overflow-y: auto;
+  gap: 4px;
+}
+
+/* Collapsible JSON Viewer */
+.json-viewer {
+  border: 1px solid rgba(148, 163, 184, 0.12);
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+.json-viewer-toggle {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 8px 12px;
+  border: none;
+  border-radius: 0;
+  background: rgba(15, 23, 42, 0.5);
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  text-align: left;
+  transition: background 0.15s;
+}
+
+.json-viewer-toggle:hover {
+  background: rgba(30, 41, 59, 0.6);
+  transform: none;
+}
+
+.json-viewer-chevron {
+  font-size: 9px;
+  color: var(--muted);
+  transition: transform 0.2s;
+  flex-shrink: 0;
+}
+
+.json-viewer-chevron.open {
+  transform: rotate(90deg);
+}
+
+.json-viewer-label {
+  flex: 1;
+}
+
+.json-viewer-empty-tag {
+  font-size: 10px;
+  color: #64748b;
+  background: rgba(100, 116, 139, 0.15);
+  padding: 1px 6px;
+  border-radius: 4px;
+  font-weight: 400;
+}
+
+.json-viewer .json-box {
+  border: none;
+  border-top: 1px solid rgba(148, 163, 184, 0.12);
+  border-radius: 0;
 }
 
 pre {
@@ -606,7 +673,7 @@ pre {
   border: 1px solid #30363d;
   border-radius: 8px;
   padding: 16px;
-  margin-top: 8px;
+  flex-shrink: 0;
 }
 
 .deployment-header {
@@ -639,6 +706,11 @@ pre {
 .deployment-badge.pending {
   background: #9e6a03;
   color: #fff;
+}
+
+.deployment-badge.idle {
+  background: rgba(100, 116, 139, 0.3);
+  color: #94a3b8;
 }
 
 .deployment-links {
@@ -692,6 +764,11 @@ pre {
   color: #8b949e;
   word-break: break-all;
   margin-top: 2px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  display: -webkit-box;
+  -webkit-line-clamp: 1;
+  -webkit-box-orient: vertical;
 }
 
 .deployment-link-arrow {
@@ -703,24 +780,38 @@ pre {
 
 /* Pipeline Phases */
 .pipeline-phases {
-  display: flex;
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
   gap: 4px;
   margin-bottom: 12px;
   padding: 8px 0;
 }
 
+@media (max-width: 900px) {
+  .pipeline-phases {
+    grid-template-columns: repeat(2, 1fr);
+  }
+}
+
 .pipeline-phase {
-  flex: 1;
   display: flex;
   align-items: center;
   gap: 6px;
-  padding: 8px 12px;
+  padding: 8px 10px;
   background: #161b22;
   border-radius: 6px;
-  font-size: 12px;
+  font-size: 11px;
   color: #8b949e;
   border: 1px solid #30363d;
   transition: all 0.2s;
+  min-width: 0;
+  overflow: hidden;
+}
+
+.pipeline-phase > span:last-child {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .pipeline-phase.done {

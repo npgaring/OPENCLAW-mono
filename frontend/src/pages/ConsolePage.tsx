@@ -123,39 +123,44 @@ export function ConsolePage() {
             </div>
           )}
 
-          {hasDeployment && (
-            <section className="deployment-results">
-              <div className="deployment-header">
-                <h3>Deployment Pipeline</h3>
+          <section className="deployment-results">
+            <div className="deployment-header">
+              <h3>Deployment Pipeline</h3>
+              {hasDeployment ? (
                 <span className={`deployment-badge ${flow.taskStatus === 'completed' ? 'success' : 'pending'}`}>
                   {flow.taskStatus === 'completed' ? 'Deployed' : flow.taskStatus}
                 </span>
-              </div>
-              {(() => {
-                const execResp = flow.taskResult?.execution_response ?? {};
-                const steps = (execResp as Record<string, unknown>).steps_completed as string[] | undefined;
-                const filesGen = (execResp as Record<string, unknown>).files_generated as number | undefined;
-                return steps && steps.length > 0 ? (
-                  <div className="pipeline-phases">
-                    <div className={`pipeline-phase ${steps.includes('provision_repo') ? 'done' : ''}`}>
-                      <span className="phase-indicator">{steps.includes('provision_repo') ? '\u2713' : '\u2022'}</span>
-                      <span>Create Repository</span>
-                    </div>
-                    <div className={`pipeline-phase ${steps.includes('generate_code') ? 'done' : ''}`}>
-                      <span className="phase-indicator">{steps.includes('generate_code') ? '\u2713' : '\u2022'}</span>
-                      <span>Generate Code{filesGen ? ` (${filesGen} files)` : ''}</span>
-                    </div>
-                    <div className={`pipeline-phase ${steps.includes('write_files') ? 'done' : ''}`}>
-                      <span className="phase-indicator">{steps.includes('write_files') ? '\u2713' : '\u2022'}</span>
-                      <span>Commit to GitHub</span>
-                    </div>
-                    <div className={`pipeline-phase ${steps.includes('deploy') ? 'done' : ''}`}>
-                      <span className="phase-indicator">{steps.includes('deploy') ? '\u2713' : '\u2022'}</span>
-                      <span>Deploy to Vercel</span>
-                    </div>
+              ) : (
+                <span className="deployment-badge idle">Waiting</span>
+              )}
+            </div>
+            {(() => {
+              const execResp = flow.taskResult?.execution_response ?? {};
+              const steps = (execResp as Record<string, unknown>).steps_completed as string[] | undefined;
+              const filesGen = (execResp as Record<string, unknown>).files_generated as number | undefined;
+              const hasSteps = steps && steps.length > 0;
+              return (
+                <div className="pipeline-phases">
+                  <div className={`pipeline-phase ${hasSteps && steps.includes('provision_repo') ? 'done' : ''}`}>
+                    <span className="phase-indicator">{hasSteps && steps.includes('provision_repo') ? '\u2713' : '\u2022'}</span>
+                    <span>Create Repository</span>
                   </div>
-                ) : null;
-              })()}
+                  <div className={`pipeline-phase ${hasSteps && steps.includes('generate_code') ? 'done' : ''}`}>
+                    <span className="phase-indicator">{hasSteps && steps.includes('generate_code') ? '\u2713' : '\u2022'}</span>
+                    <span>Generate Code{filesGen ? ` (${filesGen} files)` : ''}</span>
+                  </div>
+                  <div className={`pipeline-phase ${hasSteps && steps.includes('write_files') ? 'done' : ''}`}>
+                    <span className="phase-indicator">{hasSteps && steps.includes('write_files') ? '\u2713' : '\u2022'}</span>
+                    <span>Commit to GitHub</span>
+                  </div>
+                  <div className={`pipeline-phase ${hasSteps && steps.includes('deploy') ? 'done' : ''}`}>
+                    <span className="phase-indicator">{hasSteps && steps.includes('deploy') ? '\u2713' : '\u2022'}</span>
+                    <span>Deploy to Vercel</span>
+                  </div>
+                </div>
+              );
+            })()}
+            {hasDeployment && (
               <div className="deployment-links">
                 {flow.repositoryUrl && (
                   <a href={flow.repositoryUrl} target="_blank" rel="noopener noreferrer" className="deployment-link repo">
@@ -178,8 +183,8 @@ export function ConsolePage() {
                   </a>
                 )}
               </div>
-            </section>
-          )}
+            )}
+          </section>
 
           {hasFiles && (
             <RefinementChat

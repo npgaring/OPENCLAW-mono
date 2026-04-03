@@ -1,3 +1,4 @@
+import { useState } from 'react';
 import { pretty } from '../utils/format';
 
 interface JsonViewerProps {
@@ -6,12 +7,25 @@ interface JsonViewerProps {
 }
 
 export function JsonViewer({ label, value }: JsonViewerProps) {
+  const [open, setOpen] = useState(false);
+  const isEmpty = value === null || value === undefined || value === '';
+
   return (
-    <div>
-      <label>{label}</label>
-      <div className="json-box">
-        <pre>{pretty(value)}</pre>
-      </div>
+    <div className="json-viewer">
+      <button
+        type="button"
+        className="json-viewer-toggle"
+        onClick={() => setOpen(!open)}
+      >
+        <span className={`json-viewer-chevron${open ? ' open' : ''}`}>&#x25B6;</span>
+        <span className="json-viewer-label">{label}</span>
+        {isEmpty && <span className="json-viewer-empty-tag">empty</span>}
+      </button>
+      {open && (
+        <div className="json-box">
+          <pre>{pretty(value)}</pre>
+        </div>
+      )}
     </div>
   );
 }

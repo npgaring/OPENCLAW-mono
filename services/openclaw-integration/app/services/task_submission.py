@@ -1494,11 +1494,13 @@ async def run_task_submission(
             invariant_e_reason_codes=list(ie_res.reason_codes),
             dispatch_blocked=False,
         )
-    evidence_reason_codes = _execution_evidence_reason_codes(plan_json, result if isinstance(result, dict) else {})
-    if evidence_reason_codes:
-        result = dict(result)
-        result["status"] = "needs_review"
-        result["reason_codes"] = evidence_reason_codes
+    evidence_reason_codes: list[str] = []
+    if not deterministic_mode:
+        evidence_reason_codes = _execution_evidence_reason_codes(plan_json, result if isinstance(result, dict) else {})
+        if evidence_reason_codes:
+            result = dict(result)
+            result["status"] = "needs_review"
+            result["reason_codes"] = evidence_reason_codes
     task.execution_id = result.get("execution_id")
     s = result.get("status")
     if s == "success":
