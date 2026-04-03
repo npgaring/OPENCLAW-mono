@@ -4,9 +4,14 @@ import { ControlsPanel } from '../components/ControlsPanel';
 import { RuntimeState } from '../components/RuntimeState';
 import { ArtifactsPanel } from '../components/ArtifactsPanel';
 import { EventLog } from '../components/EventLog';
+import { PreviewPanel } from '../components/PreviewPanel';
+import { FileTree } from '../components/FileTree';
+import { CodeEditor } from '../components/CodeEditor';
+import { RefinementChat } from '../components/RefinementChat';
 
 export function ConsolePage() {
   const flow = useGovernedFlow();
+  const hasFiles = flow.generatedFiles.length > 0;
 
   return (
     <Layout>
@@ -62,12 +67,69 @@ export function ConsolePage() {
             planChecks={flow.planChecks}
             stepRows={flow.stepRows}
           />
-          <ArtifactsPanel
-            displayBuildSot={flow.displayBuildSot}
-            displayLocks={flow.displayLocks}
-            executionPlan={flow.executionPlan}
-            taskResult={flow.taskResult}
-          />
+
+          {hasFiles && (
+            <div className="builder-tabs">
+              <button
+                className={`tab-btn${flow.activeTab === 'artifacts' ? ' active' : ''}`}
+                onClick={() => flow.setActiveTab('artifacts')}
+              >
+                Artifacts
+              </button>
+              <button
+                className={`tab-btn${flow.activeTab === 'preview' ? ' active' : ''}`}
+                onClick={() => flow.setActiveTab('preview')}
+              >
+                Preview
+              </button>
+              <button
+                className={`tab-btn${flow.activeTab === 'code' ? ' active' : ''}`}
+                onClick={() => flow.setActiveTab('code')}
+              >
+                Code ({flow.generatedFiles.length} files)
+              </button>
+            </div>
+          )}
+
+          {(!hasFiles || flow.activeTab === 'artifacts') && (
+            <ArtifactsPanel
+              displayBuildSot={flow.displayBuildSot}
+              displayLocks={flow.displayLocks}
+              executionPlan={flow.executionPlan}
+              taskResult={flow.taskResult}
+            />
+          )}
+
+          {hasFiles && flow.activeTab === 'preview' && (
+            <PreviewPanel
+              files={flow.generatedFiles}
+              previewUrl={flow.previewUrl}
+            />
+          )}
+
+          {hasFiles && flow.activeTab === 'code' && (
+            <div className="builder-code-layout">
+              <FileTree
+                files={flow.generatedFiles}
+                selectedPath={flow.selectedFilePath}
+                onSelect={flow.setSelectedFilePath}
+              />
+              <CodeEditor
+                files={flow.generatedFiles}
+                selectedPath={flow.selectedFilePath}
+                onContentChange={flow.onFileContentChange}
+              />
+            </div>
+          )}
+
+          {hasFiles && (
+            <RefinementChat
+              disabled={!!flow.busyAction}
+              onRefine={flow.onRefine}
+              history={flow.refinementHistory}
+            />
+          )}
+
           <EventLog items={flow.eventLog} />
         </section>
       </section>

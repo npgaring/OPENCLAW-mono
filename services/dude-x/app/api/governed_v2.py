@@ -37,8 +37,10 @@ from app.models.governed_v2_db import (
 from app.services.governed_v2_runtime import (
     apply_build_sot_patch,
     compile_execution_plan,
+    compile_execution_plan_async,
     governance_projection_for_build_sot,
     run_cognitive_mode,
+    run_cognitive_mode_async,
 )
 
 router = APIRouter(prefix="/v2", tags=["governed-v2"])
@@ -110,7 +112,10 @@ async def submit_raw_intent(
         intent=body.intent,
         deployment_target=body.deployment_target,
     )
-    result = run_cognitive_mode(body, trace_id)
+    if settings.openai_content_enabled:
+        result = await run_cognitive_mode_async(body, trace_id)
+    else:
+        result = run_cognitive_mode(body, trace_id)
     _trace(
         "raw_intent.cognitive_done",
         trace_id=trace_id,
@@ -562,13 +567,22 @@ async def compile_locked_build_sot(
             details={"status": rec.status, "approval_status": rec.approval_status},
         )
     build_sot = BuildSoTV1.model_validate(rec.payload)
-    plan, execution_plan_hash = compile_execution_plan(
-        trace_id=rec.trace_id,
-        build_sot_hash=build_sot_hash,
-        build_sot=build_sot,
-        ocgg_identity=rec.ocgg_identity,
-        intent=rec.intent,
-    )
+    if settings.skills_engine_enabled:
+        plan, execution_plan_hash = await compile_execution_plan_async(
+            trace_id=rec.trace_id,
+            build_sot_hash=build_sot_hash,
+            build_sot=build_sot,
+            ocgg_identity=rec.ocgg_identity,
+            intent=rec.intent,
+        )
+    else:
+        plan, execution_plan_hash = compile_execution_plan(
+            trace_id=rec.trace_id,
+            build_sot_hash=build_sot_hash,
+            build_sot=build_sot,
+            ocgg_identity=rec.ocgg_identity,
+            intent=rec.intent,
+        )
     existing = await session.get(ExecutionPlanRecordV2, execution_plan_hash)
     if existing is None:
         session.add(
@@ -642,3 +656,145 @@ async def get_execution_plan_v2(
         status=rec.status,
     )
     return out
+
+
+class RefineRequest(BuildSoTRevisionRequest):
+    """Natural language refinement request for the Build SoT."""
+    feedback: str = ""
+
+
+@router.post("/build-sot/{build_sot_hash}/refine", response_model=BuildSoTEnvelope)
+async def refine_build_sot(
+    build_sot_hash: str,
+    body: RefineRequest,
+    session: AsyncSession = Depends(get_session),
+):
+    """Accept natural language feedback and apply it as a patch to the Build SoT.
+
+    When OPENAI_CONTENT_ENABLED is true and a feedback string is provided,
+    OpenAI interprets the feedback and returns a patch. Otherwise, delegates
+    to the standard revise flow with body.patch.
+    """
+    _ensure_v2_enabled()
+    _trace("build_sot.refine.start", build_sot_hash=build_sot_hash, feedback=body.feedback[:100] if body.feedback else None)
+
+    rec = await session.get(BuildSoTRecord, build_sot_hash)
+    if rec is None:
+        raise DUDEXError(ErrorCode.INVALID_SPEC, "Build SoT not found", details={"build_sot_hash": build_sot_hash})
+
+    trace_id = normalize_trace_id(body.trace_id) if body.trace_id else rec.trace_id
+
+    patch = body.patch
+    if settings.openai_content_enabled and body.feedback and settings.openai_api_key:
+        try:
+            import json as _json
+            existing = BuildSoTV1.model_validate(rec.payload)
+            _refine_result = await _call_openai_refine(existing, body.feedback)
+            if _refine_result:
+                patch = {**patch, **_refine_result}
+        except Exception:
+            logger.exception("governed_v2.refine.openai_failed")
+
+    existing = BuildSoTV1.model_validate(rec.payload)
+    revised = apply_build_sot_patch(existing, patch)
+    revised_hash = hash_payload(revised.model_dump(mode="python"))
+
+    existing_rev = await session.get(BuildSoTRecord, revised_hash)
+    if existing_rev is None:
+        session.add(
+            BuildSoTRecord(
+                build_sot_hash=revised_hash,
+                trace_id=trace_id,
+                raw_intent_hash=rec.raw_intent_hash,
+                parent_build_sot_hash=build_sot_hash,
+                ocgg_identity=rec.ocgg_identity,
+                intent=rec.intent,
+                status=revised.status.value,
+                approval_required=True,
+                approval_status="NOT_REQUESTED",
+                payload=revised.model_dump(mode="python"),
+            )
+        )
+    session.add(
+        _event(
+            stage="BUILD_SOT",
+            event_type="BUILD_SOT_REFINED",
+            status=revised.status.value,
+            trace_id=trace_id,
+            artifact_hash=revised_hash,
+            metadata={"parent_build_sot_hash": build_sot_hash, "feedback": body.feedback[:200] if body.feedback else ""},
+        )
+    )
+    await session.commit()
+
+    _trace(
+        "build_sot.refine.done",
+        trace_id=trace_id,
+        parent_build_sot_hash=build_sot_hash,
+        revised_build_sot_hash=revised_hash,
+        status=revised.status.value,
+    )
+
+    return BuildSoTEnvelope(
+        stage_linkage=StageLinkage(
+            trace_id=trace_id,
+            raw_intent_hash=rec.raw_intent_hash,
+            build_sot_hash=revised_hash,
+            artifact_hash=revised_hash,
+        ),
+        build_sot=revised,
+        cognitive_outcome=_build_sot_outcome(revised),
+    )
+
+
+async def _call_openai_refine(build_sot: BuildSoTV1, feedback: str) -> dict[str, Any] | None:
+    """Call OpenAI to interpret natural language feedback into a Build SoT patch."""
+    import json as _json
+    import httpx as _httpx
+
+    system = (
+        "You are a web project manager. The user wants to refine their website project. "
+        "Given the current Build SoT and user feedback, return a JSON patch object with "
+        "only the fields that should be updated. Valid patch fields: "
+        "project_name, site_purpose, target_audience (list), desired_tone, page_list (list), "
+        "integrations (list), content_blocks (dict), brand_constraints (list). "
+        "Return ONLY valid JSON, no prose."
+    )
+
+    context = {
+        "current_project": build_sot.project_name,
+        "current_purpose": build_sot.site_purpose,
+        "current_tone": build_sot.desired_tone,
+        "current_pages": build_sot.page_list,
+        "current_audience": build_sot.target_audience,
+        "feedback": feedback,
+    }
+
+    payload = {
+        "model": settings.openai_content_model,
+        "temperature": 0.3,
+        "messages": [
+            {"role": "system", "content": system},
+            {"role": "user", "content": _json.dumps(context, indent=2)},
+        ],
+    }
+
+    timeout = _httpx.Timeout(30.0)
+    async with _httpx.AsyncClient(timeout=timeout) as client:
+        resp = await client.post(
+            "https://api.openai.com/v1/chat/completions",
+            headers={
+                "Authorization": f"Bearer {settings.openai_api_key}",
+                "Content-Type": "application/json",
+            },
+            json=payload,
+        )
+    resp.raise_for_status()
+    raw = resp.json()
+    content_str = raw["choices"][0]["message"]["content"]
+    content_str = content_str.strip()
+    if content_str.startswith("```"):
+        content_str = content_str.split("\n", 1)[1] if "\n" in content_str else content_str[3:]
+    if content_str.endswith("```"):
+        content_str = content_str[:-3]
+    return _json.loads(content_str.strip())

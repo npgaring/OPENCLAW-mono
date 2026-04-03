@@ -57,3 +57,18 @@ export function compileExecutionPlan(
     token,
   );
 }
+
+export function refineBuildSot(
+  base: string,
+  token: string,
+  buildSotHash: string,
+  payload: JsonMap,
+): Promise<BuildSoTEnvelope> {
+  return request<BuildSoTEnvelope>(
+    base,
+    `/v2/build-sot/${encodeURIComponent(buildSotHash)}/refine`,
+    'POST',
+    token,
+    payload,
+  );
+}

@@ -81,6 +81,30 @@ class Settings(BaseSettings):
         default=True,
         description="Enable verbose governed v2 tracing logs for debugging.",
     )
+    openai_content_enabled: bool = Field(
+        default=False,
+        description="Enable OpenAI content enrichment in cognitive mode.",
+    )
+    openai_api_key: str = Field(
+        default="",
+        description="OpenAI API key for content enrichment and skills engine.",
+    )
+    openai_content_model: str = Field(
+        default="gpt-4.1-mini",
+        description="OpenAI model for content enrichment.",
+    )
+    openai_content_timeout_seconds: int = Field(
+        default=60,
+        description="Timeout for OpenAI content enrichment calls.",
+    )
+    skills_engine_enabled: bool = Field(
+        default=False,
+        description="Enable skills engine for real code generation in compiler.",
+    )
+    skills_engine_model: str = Field(
+        default="gpt-4.1-mini",
+        description="OpenAI model used by the skills engine.",
+    )
 
 
 settings = Settings()

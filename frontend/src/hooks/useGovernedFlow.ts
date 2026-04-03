@@ -67,6 +67,10 @@ export function useGovernedFlow() {
   ]);
   const [busyAction, setBusyAction] = useState('');
 
+  const [selectedFilePath, setSelectedFilePath] = useState<string | null>(null);
+  const [activeTab, setActiveTab] = useState<'artifacts' | 'preview' | 'code'>('artifacts');
+  const [refinementHistory, setRefinementHistory] = useState<{ role: 'user' | 'system'; text: string }[]>([]);
+
   const operations = executionPlan?.operations ?? [];
 
   const planChecks: PlanChecks = useMemo(() => {
@@ -239,6 +243,75 @@ export function useGovernedFlow() {
     setEventLog([{ at: new Date().toLocaleTimeString(), level: 'info', message: 'Session cleared.' }]);
   }
 
+  const generatedFiles = useMemo(() => {
+    if (!executionPlan?.operations) return [];
+    return (executionPlan.operations as JsonMap[])
+      .filter((op) => op.type === 'create_file' || op.type === 'write_config')
+      .map((op) => {
+        const inputs = (op.inputs ?? {}) as Record<string, string>;
+        return { path: inputs.path ?? '', content: inputs.content ?? '' };
+      })
+      .filter((f) => f.path);
+  }, [executionPlan]);
+
+  const previewUrl = taskResult?.deployment_url as string | undefined
+    ?? taskResult?.preview_url as string | undefined
+    ?? null;
+
+  function onFileContentChange(path: string, newContent: string) {
+    if (!executionPlan?.operations) return;
+    const ops = [...(executionPlan.operations as JsonMap[])];
+    const idx = ops.findIndex(
+      (op) => (op.type === 'create_file' || op.type === 'write_config') && ((op.inputs as Record<string, string>)?.path === path),
+    );
+    if (idx >= 0) {
+      const updated = { ...ops[idx], inputs: { ...(ops[idx].inputs as Record<string, string>), content: newContent } };
+      ops[idx] = updated;
+      setExecutionPlan({ ...executionPlan, operations: ops });
+    }
+  }
+
+  async function onRefineAsync(message: string) {
+    setRefinementHistory((prev) => [...prev, { role: 'user', text: message }]);
+
+    if (!buildSotHash) {
+      setRefinementHistory((prev) => [...prev, { role: 'system', text: 'Run cognitive mode first to generate a Build SoT.' }]);
+      return;
+    }
+
+    try {
+      const payload: JsonMap = {
+        feedback: message,
+        trace_id: traceId ?? undefined,
+      };
+      const data = await dudex.refineBuildSot(dudexBase, apiToken, buildSotHash, payload);
+      const nextHash = data.stage_linkage?.build_sot_hash ?? buildSotHash;
+
+      setBuildSotEnvelope(data);
+      setBuildSotHash(nextHash);
+      setBuildSotGovernance(null);
+      setBuildSotApproval(null);
+      setExecutionPlan(null);
+      setExecutionPlanHash(null);
+      setExecutionLock(null);
+      setTaskResult(null);
+
+      setRefinementHistory((prev) => [
+        ...prev,
+        { role: 'system', text: `Refinement applied. New SoT hash: ${nextHash?.slice(0, 12)}... Re-run steps 2-6 to proceed.` },
+      ]);
+      addLog(`Refinement applied. hash=${nextHash ?? 'n/a'}`);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      setRefinementHistory((prev) => [...prev, { role: 'system', text: `Error: ${msg}` }]);
+      addLog(msg, 'error');
+    }
+  }
+
+  function onRefine(message: string) {
+    runAction('refine', () => onRefineAsync(message));
+  }
+
   const displayBuildSot = buildSotEnvelope?.build_sot ?? buildSotApproval?.build_sot ?? {};
   const displayLocks = {
     build_sot_governance: buildSotGovernance ?? {},
@@ -310,5 +383,16 @@ export function useGovernedFlow() {
     onLockExecutionPlan,
     onSubmitTask,
     onClearSession,
+
+    // Builder UI state
+    generatedFiles,
+    previewUrl,
+    selectedFilePath,
+    setSelectedFilePath,
+    activeTab,
+    setActiveTab,
+    onFileContentChange,
+    refinementHistory,
+    onRefine,
   };
 }

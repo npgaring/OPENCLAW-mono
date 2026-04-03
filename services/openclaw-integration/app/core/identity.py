@@ -7,6 +7,15 @@ IDENTITY_DOMAIN_MAP: dict[str, str] = {
 }
 
 IDENTITY_ALLOWED_OPERATIONS: dict[str, set[str]] = {
-    "W-OCGG": {"create_file", "write_config", "build", "deploy", "test", "rollback_prep"},
+    "W-OCGG": {
+        "create_file",
+        "write_config",
+        "build",
+        "deploy",
+        "test",
+        "rollback_prep",
+        "provision_repo",
+        "provision_hosting",
+    },
     "R-OCGG": {"create_file", "write_config"},
 }

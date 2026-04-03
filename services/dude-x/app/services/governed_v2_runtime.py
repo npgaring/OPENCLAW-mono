@@ -65,6 +65,31 @@ def run_cognitive_mode(body: RawIntentSubmitRequest, trace_id: str) -> Cognitive
     )
 
 
+async def run_cognitive_mode_async(body: RawIntentSubmitRequest, trace_id: str) -> CognitiveResult:
+    """Async version of run_cognitive_mode with optional OpenAI content enrichment."""
+    from app.services.content_enrichment import enrich_build_sot
+
+    result = run_cognitive_mode(body, trace_id)
+    if settings.openai_content_enabled and result.cognitive_outcome.value == "PASS":
+        enriched_sot = await enrich_build_sot(result.build_sot)
+        enriched_hash = hash_payload(enriched_sot.model_dump(mode="python"))
+        enriched_linkage = StageLinkage(
+            trace_id=trace_id,
+            raw_intent_hash=result.raw_intent_hash,
+            build_sot_hash=enriched_hash,
+            artifact_hash=enriched_hash,
+        )
+        return CognitiveResult(
+            raw_intent_hash=result.raw_intent_hash,
+            build_sot_hash=enriched_hash,
+            build_sot=enriched_sot,
+            linkage=enriched_linkage,
+            cognitive_outcome=result.cognitive_outcome,
+            raw_payload=result.raw_payload,
+        )
+    return result
+
+
 def apply_build_sot_patch(existing: BuildSoTV1, patch: dict[str, Any]) -> BuildSoTV1:
     merged = existing.model_dump(mode="python")
     for k, v in (patch or {}).items():
@@ -634,3 +659,100 @@ def _env_vars_for_integrations(integrations: list[str]) -> list[str]:
         if key:
             out.append(key)
     return sorted(set(out))
+
+
+async def compile_execution_plan_async(
+    *,
+    trace_id: str,
+    build_sot_hash: str,
+    build_sot: BuildSoTV1,
+    ocgg_identity: str,
+    intent: str,
+    compiler_version: str = "governed-v2-compiler-2-skills",
+) -> tuple[ExecutionPlanV1, str]:
+    """Async compiler that uses the skills engine to generate real code."""
+    from app.skills.engine import SkillsEngine
+
+    engine = SkillsEngine(build_sot)
+    file_ops = await engine.run()
+    operations = engine.to_operations(file_ops)
+    governance_plan_hash = integration_hash_payload({"domain": "web", "operations": operations})
+
+    schema_blocks = []
+    for form in build_sot.forms_ctas:
+        schema_blocks.append({"name": form, "kind": "form_or_cta", "required_fields": ["name", "email"]})
+
+    template_family = _template_family(build_sot.page_list)
+    routes = [_route_for_page(page) for page in build_sot.page_list]
+    file_tree = [fop.path for fop in file_ops]
+
+    commands = [
+        ExecutionPlanCommand(id="cmd-001", type="scaffold", command="scaffold_nextjs_typescript_app", target="repo"),
+        ExecutionPlanCommand(id="cmd-002", type="provision_repo", command="create_github_repo", target="repo"),
+        ExecutionPlanCommand(id="cmd-003", type="provision_hosting", command="create_vercel_project", target="hosting"),
+        ExecutionPlanCommand(id="cmd-004", type="write_files", command="write_generated_files", target="repo"),
+        ExecutionPlanCommand(id="cmd-005", type="smoke", command="run_smoke_checks", target="repo"),
+        ExecutionPlanCommand(
+            id="cmd-006",
+            type="deploy",
+            command="deploy_production" if build_sot.deployment_target == "production" else "deploy_preview",
+            target="hosting",
+        ),
+    ]
+
+    governance_projection = {
+        "ocgg_identity": ocgg_identity,
+        "plan_hash": governance_plan_hash,
+        "operations": operations,
+        "deployment_target": build_sot.deployment_target,
+        "goal": build_sot.site_purpose,
+        "context": f"{build_sot.project_name} | tone={build_sot.desired_tone}",
+        "acceptance_criteria": list(build_sot.acceptance_criteria),
+        "trace_id": trace_id,
+        "build_sot_hash": build_sot_hash,
+    }
+
+    lineage = StageLinkage(
+        trace_id=trace_id,
+        build_sot_hash=build_sot_hash,
+        governance_plan_hash=governance_plan_hash,
+    )
+
+    plan = ExecutionPlanV1(
+        template_family=template_family,
+        scaffold_type="nextjs_app_router",
+        framework=settings.governed_v2_stack_preset,
+        routes=routes,
+        components=[{"id": f"cmp-{i + 1:03d}", "name": s.section, "page": s.page} for i, s in enumerate(build_sot.section_definitions)],
+        file_tree=file_tree,
+        content_blocks=build_sot.content_blocks,
+        schema_blocks=schema_blocks,
+        integrations=list(build_sot.integrations),
+        env_vars=_env_vars_for_integrations(build_sot.integrations),
+        commands=commands,
+        smoke_expectations=[
+            "all_routes_render",
+            "navigation_links_resolve",
+            "primary_cta_present",
+        ],
+        deploy_target=build_sot.deployment_target,
+        rollback_strategy={"type": "artifact_redeploy", "target": "site"},
+        operations=operations,
+        governance_projection=governance_projection,
+        stage_linkage=lineage.model_copy(update={"artifact_hash": None}),
+        status=ArtifactStatus.compiled,
+        compiler_version=compiler_version,
+        ocgg_identity=ocgg_identity,
+        intent=intent,
+        build_sot_hash=build_sot_hash,
+    )
+
+    execution_plan_hash = hash_payload(plan.model_dump(mode="python"))
+    plan.stage_linkage = plan.stage_linkage.model_copy(
+        update={
+            "execution_plan_hash": execution_plan_hash,
+            "artifact_hash": execution_plan_hash,
+        }
+    )
+    plan.governance_projection["execution_plan_hash"] = execution_plan_hash
+    return plan, execution_plan_hash
