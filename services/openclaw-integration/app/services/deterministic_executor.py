@@ -145,6 +145,14 @@ class GeneratedFile:
     content: str
 
 
+@dataclass
+class TemplateReference:
+    source_repo: str = ""
+    source_branch: str = ""
+    package_json: dict[str, Any] = field(default_factory=dict)
+    key_files: dict[str, str] = field(default_factory=dict)
+
+
 class DeterministicWebExecutor:
     """Multi-phase executor: repo → codegen → commit → deploy."""
 
@@ -178,6 +186,7 @@ class DeterministicWebExecutor:
         deploy_target = "production" if (deployment_target or "").lower() == "production" else "preview"
 
         steps_completed: list[str] = []
+        template_reference = TemplateReference()
 
         # ── Phase 1: Provision GitHub Repository ──────────────────────
         logger.info(
@@ -195,6 +204,13 @@ class DeterministicWebExecutor:
                 target_branch=repo_spec.branch,
                 default_branch=repo.default_branch,
             )
+            template_reference = await self._github_collect_template_reference(
+                gh_client,
+                github_installation_token,
+                owner=repo.owner,
+                repo=repo.name,
+                ref=repo.default_branch or "main",
+            )
         steps_completed.append("provision_repo")
         logger.info(
             "deterministic.executor.phase1_done task_id=%s repo_url=%s",
@@ -203,7 +219,12 @@ class DeterministicWebExecutor:
 
         # ── Phase 2: Generate Code via OpenAI ─────────────────────────
         logger.info("deterministic.executor.phase2_start task_id=%s", task_id)
-        generated_files = await self._generate_code_via_openai(plan, operations, trace_id=trace_id)
+        generated_files = await self._generate_code_via_openai(
+            plan,
+            operations,
+            trace_id=trace_id,
+            template_reference=template_reference,
+        )
         steps_completed.append("generate_code")
         tsconfig_content = next((gf.content[:300] for gf in generated_files if gf.path == "tsconfig.json"), "MISSING")
         postcss_content = next((gf.content[:200] for gf in generated_files if gf.path == "postcss.config.mjs"), "MISSING")
@@ -389,6 +410,7 @@ class DeterministicWebExecutor:
         operations: list[dict[str, Any]],
         *,
         trace_id: Optional[str] = None,
+        template_reference: Optional[TemplateReference] = None,
     ) -> list[GeneratedFile]:
         """Use OpenAI to generate production-quality website code from the execution plan.
 
@@ -397,12 +419,18 @@ class DeterministicWebExecutor:
         api_key = (settings.openai_api_key or "").strip()
         if not api_key:
             logger.warning("deterministic.executor.codegen.no_api_key falling back to plan content")
-            return self._ensure_scaffold_integrity(self._extract_files_from_operations(operations))
+            return self._ensure_scaffold_integrity(
+                self._extract_files_from_operations(operations),
+                template_reference=template_reference,
+            )
 
         file_specs = self._collect_file_specs(operations, plan)
         if not file_specs:
             logger.warning("deterministic.executor.codegen.no_files falling back to plan content")
-            return self._ensure_scaffold_integrity(self._extract_files_from_operations(operations))
+            return self._ensure_scaffold_integrity(
+                self._extract_files_from_operations(operations),
+                template_reference=template_reference,
+            )
 
         project_context = self._build_project_context(plan, operations)
         generated: list[GeneratedFile] = []
@@ -414,7 +442,11 @@ class DeterministicWebExecutor:
             or "gpt-4o-mini"
         )
 
-        batch_prompt = self._build_codegen_prompt(project_context, file_specs)
+        batch_prompt = self._build_codegen_prompt(
+            project_context,
+            file_specs,
+            template_reference=template_reference,
+        )
 
         try:
             async with httpx.AsyncClient(timeout=CODEGEN_TIMEOUT_SECONDS) as client:
@@ -441,7 +473,10 @@ class DeterministicWebExecutor:
                     "deterministic.executor.codegen.openai_error status=%s body=%s",
                     resp.status_code, str(data)[:300],
                 )
-                return self._extract_files_from_operations(operations)
+                return self._ensure_scaffold_integrity(
+                    self._extract_files_from_operations(operations),
+                    template_reference=template_reference,
+                )
 
             content = ""
             if isinstance(data, dict):
@@ -457,23 +492,27 @@ class DeterministicWebExecutor:
             )
         except Exception:
             logger.exception("deterministic.executor.codegen.exception")
-            return self._ensure_scaffold_integrity(self._extract_files_from_operations(operations))
+            return self._ensure_scaffold_integrity(
+                self._extract_files_from_operations(operations),
+                template_reference=template_reference,
+            )
 
         if not generated:
             generated = self._extract_files_from_operations(operations)
-        return self._ensure_scaffold_integrity(generated)
+        return self._ensure_scaffold_integrity(generated, template_reference=template_reference)
 
     def _codegen_system_prompt(self) -> str:
         return (
-            "You are an expert full-stack web developer specializing in Next.js 16+, React 19, TypeScript, and Tailwind CSS v4.\n"
+            "You are an expert full-stack web developer specializing in Next.js App Router, React 19, TypeScript, and Tailwind CSS v4.\n"
             "You generate production-quality code for complete websites.\n\n"
             "CRITICAL REQUIREMENTS:\n"
-            "- Use Next.js App Router (src/app/ directory structure)\n"
+            "- Use Next.js App Router and match the existing template layout (app/ or src/app/).\n"
             "- Tailwind CSS v4 does NOT use tailwind.config.ts — it uses CSS-based configuration.\n"
             "  In globals.css, use: @import \"tailwindcss\";\n"
             "- PostCSS config (postcss.config.mjs) MUST use @tailwindcss/postcss, NOT tailwindcss:\n"
             "  export default { plugins: { \"@tailwindcss/postcss\": {} } };\n"
             "- package.json MUST include @tailwindcss/postcss as a dependency.\n"
+            "- For MetadataRoute.Robots, use lowercase rule keys only: userAgent, allow, disallow, crawlDelay.\n"
             "- Do NOT generate tailwind.config.ts or tailwind.config.js — Tailwind v4 does not use them.\n"
             "- EVERY component imported in any file MUST be generated as a separate file.\n"
             "  For example, if layout.tsx imports NavBar and Footer, you MUST generate src/components/NavBar.tsx and src/components/Footer.tsx.\n"
@@ -519,7 +558,13 @@ class DeterministicWebExecutor:
             specs.append({"path": path, "hint": str(inputs.get("content") or "")[:200]})
         return specs
 
-    def _build_codegen_prompt(self, context: dict[str, Any], file_specs: list[dict[str, str]]) -> str:
+    def _build_codegen_prompt(
+        self,
+        context: dict[str, Any],
+        file_specs: list[dict[str, str]],
+        *,
+        template_reference: Optional[TemplateReference] = None,
+    ) -> str:
         parts: list[str] = []
         parts.append("Generate production-quality code for a Next.js website with the following specifications:\n")
 
@@ -540,6 +585,24 @@ class DeterministicWebExecutor:
         if context.get("acceptance_criteria"):
             parts.append(f"**Acceptance Criteria:** {json.dumps(context['acceptance_criteria'])}\n")
 
+        if template_reference and template_reference.source_repo:
+            parts.append(
+                f"**Template Reference:** {template_reference.source_repo}@{template_reference.source_branch or 'main'}\n"
+            )
+            pkg = template_reference.package_json if isinstance(template_reference.package_json, dict) else {}
+            template_deps = pkg.get("dependencies") if isinstance(pkg.get("dependencies"), dict) else {}
+            template_dev_deps = pkg.get("devDependencies") if isinstance(pkg.get("devDependencies"), dict) else {}
+            if template_deps:
+                parts.append(f"**Template Dependencies:** {json.dumps(template_deps)}\n")
+            if template_dev_deps:
+                parts.append(f"**Template DevDependencies:** {json.dumps(template_dev_deps)}\n")
+            if template_reference.key_files:
+                parts.append(
+                    "**Template Baseline Files Present:** "
+                    + json.dumps(sorted(template_reference.key_files.keys()))
+                    + "\n"
+                )
+
         parts.append("\n**Files to generate:**\n")
         for spec in file_specs:
             hint_note = f" (hint: {spec['hint']})" if spec["hint"] and "generated for" not in spec["hint"] else ""
@@ -555,7 +618,10 @@ class DeterministicWebExecutor:
         parts.append("4. Do NOT include tailwind.config.ts or tailwind.config.js\n")
         parts.append("5. EVERY component referenced via import MUST have its own generated file\n")
         parts.append("6. Use Tailwind CSS utility classes for all styling\n")
-        parts.append("7. Make the website beautiful, modern, and responsive with real content relevant to the project goal.")
+        parts.append("7. In robots.ts rules, use lowercase keys only: userAgent/allow/disallow/crawlDelay.\n")
+        parts.append("8. Preserve template conventions and module choices where possible.\n")
+        parts.append("9. If new external libraries are required by imports, update package.json accordingly.")
+        parts.append("10. Make the website beautiful, modern, and responsive with real content relevant to the project goal.")
 
         return "\n".join(parts)
 
@@ -592,15 +658,23 @@ class DeterministicWebExecutor:
             )
         return files
 
-    def _ensure_scaffold_integrity(self, files: list[GeneratedFile]) -> list[GeneratedFile]:
+    def _ensure_scaffold_integrity(
+        self,
+        files: list[GeneratedFile],
+        *,
+        template_reference: Optional[TemplateReference] = None,
+    ) -> list[GeneratedFile]:
         """Validate and fix critical scaffold files to guarantee a buildable project.
 
         Forces known-good content for tsconfig, postcss, and globals.css.
-        Ensures package.json has all required deps.
+        Ensures package.json preserves template baseline deps and adds missing ones.
         Strips legacy tailwind config files.
         Fills any missing component files referenced by imports.
         """
         file_map = {f.path: f for f in files}
+        uses_src_layout = any(path.startswith("src/") for path in file_map)
+        app_root = "src/app" if any(path.startswith("src/app/") for path in file_map) else "app"
+        alias_target = "./src/*" if uses_src_layout else "./*"
 
         # ── tsconfig.json: must have @/* path alias ──────────────────────
         tsconfig_path = "tsconfig.json"
@@ -623,7 +697,7 @@ class DeterministicWebExecutor:
                 co.setdefault("jsx", "preserve")
                 co.setdefault("incremental", True)
                 co.setdefault("baseUrl", ".")
-                co["paths"] = {"@/*": ["./src/*"]}
+                co["paths"] = {"@/*": [alias_target]}
                 plugins = co.get("plugins", [])
                 if not any(p.get("name") == "next" for p in plugins if isinstance(p, dict)):
                     plugins.append({"name": "next"})
@@ -632,9 +706,9 @@ class DeterministicWebExecutor:
                 ts.setdefault("exclude", ["node_modules"])
                 file_map[tsconfig_path] = GeneratedFile(path=tsconfig_path, content=json.dumps(ts, indent=2) + "\n")
             except (json.JSONDecodeError, TypeError):
-                file_map[tsconfig_path] = GeneratedFile(path=tsconfig_path, content=self._TSCONFIG_FALLBACK)
+                file_map[tsconfig_path] = GeneratedFile(path=tsconfig_path, content=self._tsconfig_fallback(alias_target))
         else:
-            file_map[tsconfig_path] = GeneratedFile(path=tsconfig_path, content=self._TSCONFIG_FALLBACK)
+            file_map[tsconfig_path] = GeneratedFile(path=tsconfig_path, content=self._tsconfig_fallback(alias_target))
 
         # ── postcss.config.mjs: must use @tailwindcss/postcss ────────────
         file_map["postcss.config.mjs"] = GeneratedFile(
@@ -650,7 +724,7 @@ class DeterministicWebExecutor:
             )
 
         # ── globals.css: must use @import "tailwindcss" ──────────────────
-        globals_path = "src/app/globals.css"
+        globals_path = f"{app_root}/globals.css"
         existing_globals = file_map.get(globals_path)
         if existing_globals:
             content = existing_globals.content
@@ -665,39 +739,94 @@ class DeterministicWebExecutor:
                 content='@import "tailwindcss";\n\n:root {\n  --background: #ffffff;\n  --foreground: #171717;\n}\n\nbody {\n  color: var(--foreground);\n  background: var(--background);\n  font-family: Arial, Helvetica, sans-serif;\n}\n',
             )
 
-        # ── package.json: ensure required dependencies ───────────────────
+        # ── package.json: ensure template-aware dependencies ──────────────
+        template_pkg = (
+            template_reference.package_json
+            if template_reference and isinstance(template_reference.package_json, dict)
+            else {}
+        )
+        template_deps = template_pkg.get("dependencies") if isinstance(template_pkg.get("dependencies"), dict) else {}
+        template_dev_deps = (
+            template_pkg.get("devDependencies") if isinstance(template_pkg.get("devDependencies"), dict) else {}
+        )
+        template_scripts = template_pkg.get("scripts") if isinstance(template_pkg.get("scripts"), dict) else {}
+
         REQUIRED_DEPS = {
-            "next": "^16.0.0",
+            "next": "^15.5.14",
             "react": "^19.0.0",
             "react-dom": "^19.0.0",
-            "tailwindcss": "^4.0.0",
-            "@tailwindcss/postcss": "^4.0.0",
+            "tailwindcss": "^4.2.2",
+            "@tailwindcss/postcss": "^4.2.2",
         }
         REQUIRED_DEV_DEPS = {
-            "typescript": "^5",
+            "typescript": "^5.8.3",
             "@types/node": "^22",
             "@types/react": "^19",
             "@types/react-dom": "^19",
+            "eslint": "^9.39.1",
+            "eslint-config-next": str(template_deps.get("next") or template_dev_deps.get("eslint-config-next") or "^15"),
         }
+        for dep_name in list(REQUIRED_DEPS.keys()):
+            template_version = template_deps.get(dep_name) or template_dev_deps.get(dep_name)
+            if isinstance(template_version, str) and template_version.strip():
+                REQUIRED_DEPS[dep_name] = template_version
+        for dep_name in list(REQUIRED_DEV_DEPS.keys()):
+            template_version = template_dev_deps.get(dep_name)
+            if isinstance(template_version, str) and template_version.strip():
+                REQUIRED_DEV_DEPS[dep_name] = template_version
+
         pkg_path = "package.json"
         existing_pkg = file_map.get(pkg_path)
+        pkg: dict[str, Any] = {}
         if existing_pkg:
             try:
-                pkg = json.loads(existing_pkg.content)
-                deps = pkg.setdefault("dependencies", {})
-                for k, v in REQUIRED_DEPS.items():
-                    deps.setdefault(k, v)
-                dev = pkg.setdefault("devDependencies", {})
-                for k, v in REQUIRED_DEV_DEPS.items():
-                    dev.setdefault(k, v)
-                scripts = pkg.setdefault("scripts", {})
-                scripts.setdefault("dev", "next dev --turbopack")
-                scripts.setdefault("build", "next build")
-                scripts.setdefault("start", "next start")
-                scripts.setdefault("lint", "next lint")
-                file_map[pkg_path] = GeneratedFile(path=pkg_path, content=json.dumps(pkg, indent=2) + "\n")
+                loaded = json.loads(existing_pkg.content)
+                if isinstance(loaded, dict):
+                    pkg = loaded
             except (json.JSONDecodeError, TypeError):
-                pass
+                pkg = {}
+        if not pkg and template_pkg:
+            pkg = dict(template_pkg)
+
+        deps = pkg.setdefault("dependencies", {})
+        if not isinstance(deps, dict):
+            deps = {}
+            pkg["dependencies"] = deps
+        for k, v in template_deps.items():
+            if isinstance(v, str):
+                deps.setdefault(k, v)
+        for k, v in REQUIRED_DEPS.items():
+            deps.setdefault(k, v)
+
+        dev = pkg.setdefault("devDependencies", {})
+        if not isinstance(dev, dict):
+            dev = {}
+            pkg["devDependencies"] = dev
+        for k, v in template_dev_deps.items():
+            if isinstance(v, str):
+                dev.setdefault(k, v)
+        for k, v in REQUIRED_DEV_DEPS.items():
+            dev.setdefault(k, v)
+
+        scripts = pkg.setdefault("scripts", {})
+        if not isinstance(scripts, dict):
+            scripts = {}
+            pkg["scripts"] = scripts
+        for k, v in template_scripts.items():
+            if isinstance(v, str):
+                scripts.setdefault(k, v)
+        scripts.setdefault("dev", "next dev")
+        scripts.setdefault("build", "next build")
+        scripts.setdefault("start", "next start")
+        scripts.setdefault("lint", "next lint")
+
+        self._augment_package_dependencies_from_imports(
+            file_map,
+            deps=deps,
+            dev_deps=dev,
+            template_reference=template_reference,
+        )
+        file_map[pkg_path] = GeneratedFile(path=pkg_path, content=json.dumps(pkg, indent=2) + "\n")
 
         # ── Remove legacy tailwind config files ──────────────────────────
         for path in ("tailwind.config.ts", "tailwind.config.js", "tailwind.config.mjs"):
@@ -709,30 +838,123 @@ class DeterministicWebExecutor:
         # ── Auto-fix missing standard imports in all tsx/ts files ────────
         self._fix_missing_standard_imports(file_map)
 
+        # ── Normalize MetadataRoute.Robots key casing ────────────────────
+        self._normalize_robots_metadata_keys(file_map)
+
         return list(file_map.values())
 
-    _TSCONFIG_FALLBACK = json.dumps({
-        "compilerOptions": {
-            "target": "ES2017",
-            "lib": ["dom", "dom.iterable", "esnext"],
-            "allowJs": True,
-            "skipLibCheck": True,
-            "strict": True,
-            "noEmit": True,
-            "esModuleInterop": True,
-            "module": "esnext",
-            "moduleResolution": "bundler",
-            "resolveJsonModule": True,
-            "isolatedModules": True,
-            "jsx": "preserve",
-            "incremental": True,
-            "baseUrl": ".",
-            "paths": {"@/*": ["./src/*"]},
-            "plugins": [{"name": "next"}],
-        },
-        "include": ["next-env.d.ts", "**/*.ts", "**/*.tsx", ".next/types/**/*.ts"],
-        "exclude": ["node_modules"],
-    }, indent=2) + "\n"
+    @staticmethod
+    def _tsconfig_fallback(alias_target: str) -> str:
+        payload = {
+            "compilerOptions": {
+                "target": "ES2017",
+                "lib": ["dom", "dom.iterable", "esnext"],
+                "allowJs": True,
+                "skipLibCheck": True,
+                "strict": True,
+                "noEmit": True,
+                "esModuleInterop": True,
+                "module": "esnext",
+                "moduleResolution": "bundler",
+                "resolveJsonModule": True,
+                "isolatedModules": True,
+                "jsx": "preserve",
+                "incremental": True,
+                "baseUrl": ".",
+                "paths": {"@/*": [alias_target]},
+                "plugins": [{"name": "next"}],
+            },
+            "include": ["next-env.d.ts", "**/*.ts", "**/*.tsx", ".next/types/**/*.ts"],
+            "exclude": ["node_modules"],
+        }
+        return json.dumps(payload, indent=2) + "\n"
+
+    @staticmethod
+    def _augment_package_dependencies_from_imports(
+        file_map: dict[str, GeneratedFile],
+        *,
+        deps: dict[str, str],
+        dev_deps: dict[str, str],
+        template_reference: Optional[TemplateReference] = None,
+    ) -> None:
+        import re
+
+        import_patterns = [
+            re.compile(r"""(?:from|import)\s+["']([^"']+)["']"""),
+            re.compile(r"""require\(\s*["']([^"']+)["']\s*\)"""),
+            re.compile(r"""import\(\s*["']([^"']+)["']\s*\)"""),
+        ]
+        builtin_modules = {
+            "assert", "buffer", "child_process", "cluster", "console", "constants", "crypto", "dgram", "dns",
+            "domain", "events", "fs", "http", "https", "module", "net", "os", "path", "perf_hooks", "process",
+            "querystring", "readline", "stream", "string_decoder", "timers", "tls", "tty", "url", "util", "v8",
+            "vm", "worker_threads", "zlib",
+        }
+
+        template_versions: dict[str, str] = {}
+        if template_reference and isinstance(template_reference.package_json, dict):
+            for section in ("dependencies", "devDependencies"):
+                bucket = template_reference.package_json.get(section)
+                if isinstance(bucket, dict):
+                    for k, v in bucket.items():
+                        if isinstance(v, str) and v.strip():
+                            template_versions[k] = v
+
+        inferred: set[str] = set()
+        for f in file_map.values():
+            if not (f.path.endswith(".ts") or f.path.endswith(".tsx") or f.path.endswith(".js") or f.path.endswith(".jsx")):
+                continue
+            for pattern in import_patterns:
+                for m in pattern.finditer(f.content):
+                    raw_mod = str(m.group(1) or "").strip()
+                    if not raw_mod:
+                        continue
+                    if raw_mod.startswith((".", "/", "@/")) or raw_mod.startswith("node:"):
+                        continue
+                    if raw_mod.startswith("@"):
+                        parts = raw_mod.split("/")
+                        if len(parts) < 2:
+                            continue
+                        pkg_name = "/".join(parts[:2])
+                    else:
+                        pkg_name = raw_mod.split("/")[0]
+                    if (
+                        not pkg_name
+                        or pkg_name in builtin_modules
+                        or pkg_name in {"next", "react", "react-dom"}
+                    ):
+                        continue
+                    inferred.add(pkg_name)
+
+        for pkg_name in sorted(inferred):
+            if pkg_name in deps or pkg_name in dev_deps:
+                continue
+            resolved_version = template_versions.get(pkg_name) or "latest"
+            if pkg_name.startswith("@types/"):
+                dev_deps[pkg_name] = resolved_version
+            else:
+                deps[pkg_name] = resolved_version
+
+    @staticmethod
+    def _normalize_robots_metadata_keys(file_map: dict[str, GeneratedFile]) -> None:
+        import re
+
+        key_map = {
+            "UserAgent": "userAgent",
+            "Allow": "allow",
+            "Disallow": "disallow",
+            "CrawlDelay": "crawlDelay",
+        }
+        robots_paths = [p for p in file_map if p.endswith("/robots.ts") or p == "robots.ts"]
+        for path in robots_paths:
+            content = file_map[path].content
+            updated = content
+            for bad, good in key_map.items():
+                updated = re.sub(rf'(?m)^(\s*){bad}(\s*:)', rf"\1{good}\2", updated)
+                updated = re.sub(rf'(?m)^(\s*)[\'"]{bad}[\'"](\s*:)', rf"\1{good}\2", updated)
+            if updated != content:
+                file_map[path] = GeneratedFile(path=path, content=updated)
+                logger.info("deterministic.executor.scaffold.robots_keys_normalized file=%s", path)
 
     @staticmethod
     def _fill_missing_component_imports(file_map: dict[str, GeneratedFile]) -> None:
@@ -965,9 +1187,9 @@ class DeterministicWebExecutor:
         """Fallback: create a regular empty repo when template is unavailable.
 
         Tries multiple strategies in order:
-        1. PAT via POST /user/repos (works for personal accounts)
-        2. Installation token via POST /user/repos
-        3. If repo already exists (409/422), reuse it
+        1. For each token, attempt POST /orgs/{owner}/repos to preserve explicit org owner.
+        2. Then attempt POST /user/repos for personal-owner cases.
+        3. If repo already exists (409/422), reuse it.
         """
         create_payload = {
             "name": spec.name,
@@ -993,32 +1215,43 @@ class DeterministicWebExecutor:
         last_status = 0
         last_data: Any = {}
         for token_type, _, headers in strategies:
-            create_url = f"{GITHUB_API_BASE}/user/repos"
-            resp, data = await self._request(client, "POST", create_url, headers=headers, payload=create_payload)
-            last_status, last_data = resp.status_code, data
-            logger.info(
-                "deterministic.executor.empty_repo_attempt token_type=%s status=%s",
-                token_type, resp.status_code,
-            )
-            if resp.status_code in (200, 201):
-                return RepoProvisionResult(
-                    owner=str(data.get("owner", {}).get("login", spec.owner)),
-                    name=spec.name,
-                    branch=spec.branch,
-                    html_url=str(data.get("html_url") or f"https://github.com/{spec.owner}/{spec.name}"),
-                    default_branch=str(data.get("default_branch") or "main"),
+            attempts = [
+                ("org", f"{GITHUB_API_BASE}/orgs/{spec.owner}/repos"),
+                ("user", f"{GITHUB_API_BASE}/user/repos"),
+            ]
+            for endpoint_kind, create_url in attempts:
+                resp, data = await self._request(client, "POST", create_url, headers=headers, payload=create_payload)
+                last_status, last_data = resp.status_code, data
+                logger.info(
+                    "deterministic.executor.empty_repo_attempt token_type=%s endpoint=%s owner=%s status=%s",
+                    token_type, endpoint_kind, spec.owner, resp.status_code,
                 )
-            if resp.status_code in (409, 422):
-                get_url = f"{GITHUB_API_BASE}/repos/{spec.owner}/{spec.name}"
-                get_resp, get_data = await self._request(client, "GET", get_url, headers=headers)
-                if get_resp.status_code == 200:
+                if resp.status_code in (200, 201):
+                    resolved_owner = str(data.get("owner", {}).get("login") or spec.owner) if isinstance(data, dict) else spec.owner
+                    if resolved_owner.lower() != spec.owner.lower():
+                        logger.warning(
+                            "deterministic.executor.empty_repo_owner_mismatch requested_owner=%s created_owner=%s token_type=%s endpoint=%s",
+                            spec.owner, resolved_owner, token_type, endpoint_kind,
+                        )
+                        continue
                     return RepoProvisionResult(
-                        owner=spec.owner,
+                        owner=resolved_owner,
                         name=spec.name,
                         branch=spec.branch,
-                        html_url=str(get_data.get("html_url") or f"https://github.com/{spec.owner}/{spec.name}"),
-                        default_branch=str(get_data.get("default_branch") or "main"),
+                        html_url=str(data.get("html_url") or f"https://github.com/{resolved_owner}/{spec.name}"),
+                        default_branch=str(data.get("default_branch") or "main"),
                     )
+                if resp.status_code in (409, 422):
+                    get_url = f"{GITHUB_API_BASE}/repos/{spec.owner}/{spec.name}"
+                    get_resp, get_data = await self._request(client, "GET", get_url, headers=headers)
+                    if get_resp.status_code == 200:
+                        return RepoProvisionResult(
+                            owner=spec.owner,
+                            name=spec.name,
+                            branch=spec.branch,
+                            html_url=str(get_data.get("html_url") or f"https://github.com/{spec.owner}/{spec.name}"),
+                            default_branch=str(get_data.get("default_branch") or "main"),
+                        )
 
         logger.error(
             "deterministic.executor.empty_repo_create_failed status=%s body=%s",
@@ -1105,6 +1338,105 @@ class DeterministicWebExecutor:
                 resp=create_resp,
                 data=create_data,
             )
+
+    async def _github_collect_template_reference(
+        self,
+        client: httpx.AsyncClient,
+        installation_token: str,
+        *,
+        owner: str,
+        repo: str,
+        ref: str,
+    ) -> TemplateReference:
+        headers = {
+            "Accept": "application/vnd.github+json",
+            "Authorization": f"Bearer {installation_token}",
+            "X-GitHub-Api-Version": "2022-11-28",
+        }
+        key_paths = (
+            "package.json",
+            "tsconfig.json",
+            "next.config.ts",
+            "next.config.js",
+            "postcss.config.mjs",
+            "app/layout.tsx",
+            "app/globals.css",
+            "src/app/layout.tsx",
+            "src/app/globals.css",
+        )
+        key_files: dict[str, str] = {}
+        for path in key_paths:
+            text = await self._github_fetch_text_file(
+                client,
+                headers=headers,
+                owner=owner,
+                repo=repo,
+                path=path,
+                ref=ref,
+            )
+            if text is not None:
+                key_files[path] = text
+
+        package_json: dict[str, Any] = {}
+        raw_package = key_files.get("package.json")
+        if raw_package:
+            try:
+                parsed = json.loads(raw_package)
+                if isinstance(parsed, dict):
+                    package_json = parsed
+            except json.JSONDecodeError:
+                logger.warning("deterministic.executor.template_ref.invalid_package_json repo=%s/%s", owner, repo)
+        logger.info(
+            "deterministic.executor.template_ref.loaded repo=%s/%s ref=%s files=%d deps=%d dev_deps=%d",
+            owner,
+            repo,
+            ref,
+            len(key_files),
+            len(package_json.get("dependencies", {}) if isinstance(package_json.get("dependencies"), dict) else {}),
+            len(package_json.get("devDependencies", {}) if isinstance(package_json.get("devDependencies"), dict) else {}),
+        )
+        return TemplateReference(
+            source_repo=f"{owner}/{repo}",
+            source_branch=ref,
+            package_json=package_json,
+            key_files=key_files,
+        )
+
+    async def _github_fetch_text_file(
+        self,
+        client: httpx.AsyncClient,
+        *,
+        headers: dict[str, str],
+        owner: str,
+        repo: str,
+        path: str,
+        ref: str,
+    ) -> Optional[str]:
+        url = f"{GITHUB_API_BASE}/repos/{owner}/{repo}/contents/{quote(path, safe='/')}"
+        resp, data = await self._request(client, "GET", url, headers=headers, params={"ref": ref})
+        if resp.status_code == 404:
+            return None
+        if resp.status_code != 200:
+            logger.warning(
+                "deterministic.executor.template_ref.fetch_failed repo=%s/%s path=%s ref=%s status=%s",
+                owner, repo, path, ref, resp.status_code,
+            )
+            return None
+        if not isinstance(data, dict):
+            return None
+        content = data.get("content")
+        if not isinstance(content, str):
+            return None
+        try:
+            if str(data.get("encoding") or "").lower() == "base64":
+                return base64.b64decode(content.encode("utf-8"), validate=False).decode("utf-8", errors="ignore")
+            return content
+        except Exception:
+            logger.warning(
+                "deterministic.executor.template_ref.decode_failed repo=%s/%s path=%s ref=%s",
+                owner, repo, path, ref,
+            )
+            return None
 
     # ------------------------------------------------------------------
     # GitHub: Batch Commit via Trees API

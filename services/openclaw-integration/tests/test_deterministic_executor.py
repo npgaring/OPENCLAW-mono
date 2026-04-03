@@ -1,15 +1,20 @@
 """Unit tests for deterministic in-service GitHub/Vercel executor."""
 from __future__ import annotations
 
+import json
+
 import pytest
 
 from app.services.deterministic_executor import (
     DeterministicExecutionError,
     DeterministicWebExecutor,
+    GeneratedFile,
     REASON_GITHUB_AUTH_FAILED,
     REASON_GITHUB_REPO_CREATE_FAILED,
     REASON_VERCEL_DEPLOY_FAILED,
     REASON_VERCEL_PROJECT_CREATE_FAILED,
+    RepoSpec,
+    TemplateReference,
 )
 
 
@@ -239,3 +244,174 @@ async def test_deterministic_execute_vercel_deploy_failure_maps_reason_code(monk
     with pytest.raises(DeterministicExecutionError) as err:
         await DeterministicWebExecutor().execute(plan, task_id="task-5", trace_id="trace-5", deployment_target="preview")
     assert err.value.reason_code == REASON_VERCEL_DEPLOY_FAILED
+
+
+@pytest.mark.asyncio
+async def test_github_create_empty_repo_prefers_org_endpoint_for_explicit_owner(monkeypatch):
+    _configure_settings(monkeypatch)
+    monkeypatch.setattr("app.services.deterministic_executor.settings.github_token", None)
+    calls: list[str] = []
+
+    async def _fake_request(client, method, url, *, headers, params=None, payload=None):
+        calls.append(f"{method} {url}")
+        if method == "POST" and url.endswith("/orgs/test-owner/repos"):
+            return _Resp(
+                201,
+                {
+                    "owner": {"login": "test-owner"},
+                    "html_url": "https://github.com/test-owner/test-site",
+                    "default_branch": "main",
+                },
+            ), {
+                "owner": {"login": "test-owner"},
+                "html_url": "https://github.com/test-owner/test-site",
+                "default_branch": "main",
+            }
+        return _Resp(500, {"message": "unexpected"}), {"message": "unexpected"}
+
+    monkeypatch.setattr(
+        "app.services.deterministic_executor.DeterministicWebExecutor._request",
+        staticmethod(_fake_request),
+    )
+    result = await DeterministicWebExecutor()._github_create_empty_repo(
+        client=None,  # type: ignore[arg-type]
+        installation_token="ghs_installation_token",
+        spec=RepoSpec(owner="test-owner", name="test-site", branch="main", private=True),
+    )
+
+    assert result is not None
+    assert result.owner == "test-owner"
+    assert any(url.endswith("/orgs/test-owner/repos") for url in calls)
+    assert not any(url.endswith("/user/repos") for url in calls)
+
+
+@pytest.mark.asyncio
+async def test_github_create_empty_repo_rejects_owner_mismatch(monkeypatch):
+    _configure_settings(monkeypatch)
+    monkeypatch.setattr("app.services.deterministic_executor.settings.github_token", "pat_123")
+
+    async def _fake_request(client, method, url, *, headers, params=None, payload=None):
+        if method == "POST" and url.endswith("/orgs/target-org/repos"):
+            return _Resp(403, {"message": "forbidden"}), {"message": "forbidden"}
+        if method == "POST" and url.endswith("/user/repos"):
+            return _Resp(
+                201,
+                {
+                    "owner": {"login": "different-owner"},
+                    "html_url": "https://github.com/different-owner/test-site",
+                    "default_branch": "main",
+                },
+            ), {
+                "owner": {"login": "different-owner"},
+                "html_url": "https://github.com/different-owner/test-site",
+                "default_branch": "main",
+            }
+        return _Resp(500, {"message": "unexpected"}), {"message": "unexpected"}
+
+    monkeypatch.setattr(
+        "app.services.deterministic_executor.DeterministicWebExecutor._request",
+        staticmethod(_fake_request),
+    )
+    result = await DeterministicWebExecutor()._github_create_empty_repo(
+        client=None,  # type: ignore[arg-type]
+        installation_token="ghs_installation_token",
+        spec=RepoSpec(owner="target-org", name="test-site", branch="main", private=True),
+    )
+
+    assert result is None
+
+
+def test_ensure_scaffold_integrity_preserves_template_packages_and_adds_missing_import_deps():
+    files = [
+        GeneratedFile(
+            path="app/page.tsx",
+            content=(
+                'import { motion } from "framer-motion";\n'
+                "export default function Page(){return <motion.div />;}\n"
+            ),
+        ),
+        GeneratedFile(
+            path="package.json",
+            content='{"name":"demo","private":true,"dependencies":{"react":"19.0.0"}}',
+        ),
+    ]
+    template_reference = TemplateReference(
+        source_repo="braieswabe/Dudex-Projects",
+        source_branch="main",
+        package_json={
+            "dependencies": {
+                "next": "15.5.14",
+                "react": "19.0.0",
+                "react-dom": "19.0.0",
+                "tailwindcss": "^4.2.2",
+                "@tailwindcss/postcss": "^4.2.2",
+                "clsx": "^2.1.1",
+            },
+            "devDependencies": {
+                "typescript": "^5.8.3",
+                "eslint": "^9.39.1",
+                "eslint-config-next": "15.5.14",
+            },
+        },
+    )
+
+    out = DeterministicWebExecutor()._ensure_scaffold_integrity(files, template_reference=template_reference)
+    package_file = next(f for f in out if f.path == "package.json")
+    pkg = json.loads(package_file.content)
+
+    assert pkg["dependencies"]["next"] == "15.5.14"
+    assert pkg["dependencies"]["clsx"] == "^2.1.1"
+    assert pkg["dependencies"]["framer-motion"] == "latest"
+    assert pkg["devDependencies"]["eslint-config-next"] == "15.5.14"
+    assert any(f.path == "app/globals.css" for f in out)
+
+
+def test_build_codegen_prompt_includes_template_reference():
+    template_reference = TemplateReference(
+        source_repo="braieswabe/Dudex-Projects",
+        source_branch="main",
+        package_json={
+            "dependencies": {"next": "15.5.14", "react": "19.0.0"},
+            "devDependencies": {"typescript": "^5.8.3"},
+        },
+        key_files={"app/layout.tsx": "export default function Layout(){}"},
+    )
+
+    prompt = DeterministicWebExecutor()._build_codegen_prompt(
+        context={"goal": "Launch site"},
+        file_specs=[{"path": "app/page.tsx", "hint": ""}],
+        template_reference=template_reference,
+    )
+
+    assert "Template Reference" in prompt
+    assert "braieswabe/Dudex-Projects@main" in prompt
+    assert "Template Dependencies" in prompt
+    assert "Template Baseline Files Present" in prompt
+
+
+def test_ensure_scaffold_integrity_normalizes_robots_metadata_key_casing():
+    files = [
+        GeneratedFile(
+            path="src/app/robots.ts",
+            content=(
+                'import type { MetadataRoute } from "next";\n\n'
+                "export default function robots(): MetadataRoute.Robots {\n"
+                "  return {\n"
+                "    rules: {\n"
+                '      UserAgent: "*",\n'
+                '      Disallow: "/api/",\n'
+                "    },\n"
+                "  };\n"
+                "}\n"
+            ),
+        ),
+        GeneratedFile(path="package.json", content='{"name":"demo","private":true}'),
+    ]
+
+    out = DeterministicWebExecutor()._ensure_scaffold_integrity(files)
+    robots = next(f for f in out if f.path == "src/app/robots.ts").content
+
+    assert "UserAgent:" not in robots
+    assert "Disallow:" not in robots
+    assert "userAgent:" in robots
+    assert "disallow:" in robots
