@@ -69,6 +69,9 @@ async def record_deployment(
         vercel_deploy_target="preview" if preview_url else "production",
         status=status,
         error_message=_str(result.get("message")) if status != "success" else None,
+        build_logs=_str(result.get("build_logs")) or None,
+        fix_attempts=int(result.get("fix_attempts") or 0),
+        vercel_ready_state=_str(result.get("vercel_ready_state")) or None,
         created_at=datetime.now(timezone.utc),
         updated_at=datetime.now(timezone.utc),
     )
@@ -112,6 +115,40 @@ async def get_deployment_by_id(
     deployment_id: str,
 ) -> Optional[DeploymentRecord]:
     return await session.get(DeploymentRecord, deployment_id)
+
+
+async def list_all_deployments(
+    session: AsyncSession,
+    *,
+    limit: int = 50,
+    offset: int = 0,
+) -> list[DeploymentRecord]:
+    """Paginated listing of all deployments, newest first."""
+    stmt = (
+        select(DeploymentRecord)
+        .order_by(DeploymentRecord.created_at.desc())
+        .offset(offset)
+        .limit(limit)
+    )
+    results = await session.execute(stmt)
+    return list(results.scalars().all())
+
+
+async def update_deployment_fields(
+    session: AsyncSession,
+    deployment_id: str,
+    **fields: Any,
+) -> Optional[DeploymentRecord]:
+    """Update specific fields on a deployment record."""
+    rec = await session.get(DeploymentRecord, deployment_id)
+    if rec is None:
+        return None
+    for k, v in fields.items():
+        if hasattr(rec, k):
+            setattr(rec, k, v)
+    rec.updated_at = datetime.now(timezone.utc)
+    session.add(rec)
+    return rec
 
 
 def _str(val: Any) -> str:

@@ -45,9 +45,19 @@ const defaultPages = 'home, services, case studies, contact';
 const defaultIntegrations = '';
 
 export function useGovernedFlow() {
-  const [dudexBase, setDudexBase] = useState(initialDudexBase);
-  const [integrationBase, setIntegrationBase] = useState(initialIntegrationBase);
-  const [apiToken, setApiToken] = useState(initialApiToken);
+  const [dudexBase, setDudexBase] = useState(
+    () => localStorage.getItem('oc_dudex_base') || initialDudexBase,
+  );
+  const [integrationBase, _setIntegrationBase] = useState(
+    () => localStorage.getItem('oc_integration_base') || initialIntegrationBase,
+  );
+  const [apiToken, _setApiToken] = useState(
+    () => localStorage.getItem('oc_api_token') || initialApiToken,
+  );
+
+  const setIntegrationBase = (v: string) => { localStorage.setItem('oc_integration_base', v); _setIntegrationBase(v); };
+  const setApiToken = (v: string) => { localStorage.setItem('oc_api_token', v); _setApiToken(v); };
+  const setDudexBaseWrapped = (v: string) => { localStorage.setItem('oc_dudex_base', v); setDudexBase(v); };
 
   const [identity, setIdentity] = useState<OcggIdentity>('W-OCGG');
   const [intent, setIntent] = useState<Intent>('web-build');
@@ -371,7 +381,7 @@ export function useGovernedFlow() {
 
   return {
     // Connection config
-    dudexBase, setDudexBase,
+    dudexBase, setDudexBase: setDudexBaseWrapped,
     integrationBase, setIntegrationBase,
     apiToken, setApiToken,
 

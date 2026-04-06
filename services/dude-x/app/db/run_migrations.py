@@ -1,4 +1,5 @@
 """Run idempotent SQL migration files on startup (PostgreSQL only)."""
+import asyncio
 import logging
 from pathlib import Path
 
@@ -84,8 +85,19 @@ async def run_migration_files(
             stmt = stmt.strip()
             if not stmt:
                 continue
-            try:
-                await conn.execute(text(stmt))
-            except Exception as e:
-                logger.warning("Migration statement failed (may be idempotent no-op): %s", e)
-                raise
+            max_retries = 3
+            for attempt in range(max_retries):
+                try:
+                    await conn.execute(text(stmt))
+                    break
+                except Exception as e:
+                    err_str = str(e).lower()
+                    is_transient = "deadlock" in err_str or "lock" in err_str
+                    if is_transient and attempt < max_retries - 1:
+                        wait = 2 ** attempt
+                        logger.warning("Transient DB error (retry %d/%d in %ds): %s",
+                                       attempt + 1, max_retries, wait, e)
+                        await asyncio.sleep(wait)
+                        continue
+                    logger.warning("Migration statement failed (may be idempotent no-op): %s", e)
+                    raise

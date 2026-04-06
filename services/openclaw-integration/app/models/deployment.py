@@ -38,5 +38,9 @@ class DeploymentRecord(SQLModel, table=True):
     status: str = Field(default="pending", max_length=64)
     error_message: Optional[str] = Field(default=None, sa_column=Column(Text, nullable=True))
 
+    build_logs: Optional[str] = Field(default=None, sa_column=Column(Text, nullable=True))
+    fix_attempts: int = Field(default=0)
+    vercel_ready_state: Optional[str] = Field(default=None, max_length=64)
+
     created_at: datetime = Field(default_factory=_utc_now, sa_column=Column(DateTime(timezone=True), nullable=False))
     updated_at: datetime = Field(default_factory=_utc_now, sa_column=Column(DateTime(timezone=True), nullable=False))

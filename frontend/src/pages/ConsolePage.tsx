@@ -8,6 +8,7 @@ import { PreviewPanel } from '../components/PreviewPanel';
 import { FileTree } from '../components/FileTree';
 import { CodeEditor } from '../components/CodeEditor';
 import { RefinementChat } from '../components/RefinementChat';
+import { ProgressBar, type ProgressStep, type StepStatus } from '../components/ProgressBar';
 
 export function ConsolePage() {
   const flow = useGovernedFlow();
@@ -69,60 +70,6 @@ export function ConsolePage() {
             stepRows={flow.stepRows}
           />
 
-          {hasFiles && (
-            <div className="builder-tabs">
-              <button
-                className={`tab-btn${flow.activeTab === 'artifacts' ? ' active' : ''}`}
-                onClick={() => flow.setActiveTab('artifacts')}
-              >
-                Artifacts
-              </button>
-              <button
-                className={`tab-btn${flow.activeTab === 'preview' ? ' active' : ''}`}
-                onClick={() => flow.setActiveTab('preview')}
-              >
-                Preview
-              </button>
-              <button
-                className={`tab-btn${flow.activeTab === 'code' ? ' active' : ''}`}
-                onClick={() => flow.setActiveTab('code')}
-              >
-                Code ({flow.generatedFiles.length} files)
-              </button>
-            </div>
-          )}
-
-          {(!hasFiles || flow.activeTab === 'artifacts') && (
-            <ArtifactsPanel
-              displayBuildSot={flow.displayBuildSot}
-              displayLocks={flow.displayLocks}
-              executionPlan={flow.executionPlan}
-              taskResult={flow.taskResult}
-            />
-          )}
-
-          {hasFiles && flow.activeTab === 'preview' && (
-            <PreviewPanel
-              files={flow.generatedFiles}
-              previewUrl={flow.previewUrl}
-            />
-          )}
-
-          {hasFiles && flow.activeTab === 'code' && (
-            <div className="builder-code-layout">
-              <FileTree
-                files={flow.generatedFiles}
-                selectedPath={flow.selectedFilePath}
-                onSelect={flow.setSelectedFilePath}
-              />
-              <CodeEditor
-                files={flow.generatedFiles}
-                selectedPath={flow.selectedFilePath}
-                onContentChange={flow.onFileContentChange}
-              />
-            </div>
-          )}
-
           <section className="deployment-results">
             <div className="deployment-header">
               <h3>Deployment Pipeline</h3>
@@ -136,43 +83,65 @@ export function ConsolePage() {
             </div>
             {(() => {
               const execResp = flow.taskResult?.execution_response ?? {};
-              const steps = (execResp as Record<string, unknown>).steps_completed as string[] | undefined;
-              const filesGen = (execResp as Record<string, unknown>).files_generated as number | undefined;
+              const respMap = execResp as Record<string, unknown>;
+              const steps = respMap.steps_completed as string[] | undefined;
+              const filesGen = respMap.files_generated as number | undefined;
+              const readyState = (respMap.vercel_ready_state as string) || '';
+              const reasonCodes = (flow.taskResult as Record<string, unknown> | null)?.reason_codes as string[] | undefined;
               const hasSteps = steps && steps.length > 0;
-              return (
-                <div className="pipeline-phases">
-                  <div className={`pipeline-phase ${hasSteps && steps.includes('provision_repo') ? 'done' : ''}`}>
-                    <span className="phase-indicator">{hasSteps && steps.includes('provision_repo') ? '\u2713' : '\u2022'}</span>
-                    <span>Create Repository</span>
-                  </div>
-                  <div className={`pipeline-phase ${hasSteps && steps.includes('generate_code') ? 'done' : ''}`}>
-                    <span className="phase-indicator">{hasSteps && steps.includes('generate_code') ? '\u2713' : '\u2022'}</span>
-                    <span>Generate Code{filesGen ? ` (${filesGen} files)` : ''}</span>
-                    {hasSteps && steps.includes('generate_code') && filesGen && (
-                      <div className="phase-sub-steps">
-                        <span className="phase-sub-step done">Architect</span>
-                        <span className="phase-sub-step done">Builder</span>
-                        <span className="phase-sub-step done">Inspector</span>
-                      </div>
-                    )}
-                    {!hasSteps && flow.taskStatus === 'pending' && (
-                      <div className="phase-sub-steps">
-                        <span className="phase-sub-step">Architect</span>
-                        <span className="phase-sub-step">Builder</span>
-                        <span className="phase-sub-step">Inspector</span>
-                      </div>
-                    )}
-                  </div>
-                  <div className={`pipeline-phase ${hasSteps && steps.includes('write_files') ? 'done' : ''}`}>
-                    <span className="phase-indicator">{hasSteps && steps.includes('write_files') ? '\u2713' : '\u2022'}</span>
-                    <span>Commit to GitHub</span>
-                  </div>
-                  <div className={`pipeline-phase ${hasSteps && steps.includes('deploy') ? 'done' : ''}`}>
-                    <span className="phase-indicator">{hasSteps && steps.includes('deploy') ? '\u2713' : '\u2022'}</span>
-                    <span>Deploy to Vercel</span>
-                  </div>
-                </div>
-              );
+              const isBusy = flow.busyAction === 'task';
+              const hasFailed = flow.taskStatus === 'needs_review' || (reasonCodes && reasonCodes.length > 0);
+
+              function stepStatus(stepKey: string, prevDone: boolean): StepStatus {
+                if (hasSteps && steps!.includes(stepKey)) return 'done';
+                if (hasFailed && prevDone) return 'error';
+                if (isBusy && prevDone) return 'active';
+                return 'pending';
+              }
+
+              const cogDone = flow.cognitiveOutcome !== '-';
+              const govDone = flow.sotLockOutcome !== '-';
+
+              const progressSteps: ProgressStep[] = [
+                {
+                  label: 'Cognitive Mode',
+                  status: cogDone ? 'done' : (flow.busyAction === 'cognitive' ? 'active' : 'pending'),
+                },
+                {
+                  label: 'Governance',
+                  status: govDone ? 'done' : (cogDone && (flow.busyAction === 'sot-lock' || flow.busyAction === 'approve' || flow.busyAction === 'compile' || flow.busyAction === 'plan-lock') ? 'active' : 'pending'),
+                },
+                {
+                  label: 'Create Repo',
+                  status: stepStatus('provision_repo', govDone && isBusy),
+                },
+                {
+                  label: 'Generate Code',
+                  status: stepStatus('generate_code', hasSteps ? steps!.includes('provision_repo') : false),
+                  subLabel: filesGen ? `${filesGen} files — Architect / Builder / Inspector` : 'Architect / Builder / Inspector',
+                },
+                {
+                  label: 'Commit Code',
+                  status: stepStatus('write_files', hasSteps ? steps!.includes('generate_code') : false),
+                },
+                {
+                  label: 'Deploy',
+                  status: readyState === 'READY'
+                    ? 'done'
+                    : readyState === 'ERROR'
+                      ? 'error'
+                      : stepStatus('deploy', hasSteps ? steps!.includes('write_files') : false),
+                  subLabel: readyState === 'READY'
+                    ? 'Ready'
+                    : readyState === 'ERROR'
+                      ? 'Build Error'
+                      : hasSteps && steps!.includes('deploy')
+                        ? 'Building...'
+                        : undefined,
+                },
+              ];
+
+              return <ProgressBar steps={progressSteps} />;
             })()}
             {hasDeployment && (
               <div className="deployment-links">
@@ -199,6 +168,62 @@ export function ConsolePage() {
               </div>
             )}
           </section>
+
+          {hasFiles && (
+            <div className="builder-tabs">
+              <button
+                className={`tab-btn${flow.activeTab === 'artifacts' ? ' active' : ''}`}
+                onClick={() => flow.setActiveTab('artifacts')}
+              >
+                Artifacts
+              </button>
+              <button
+                className={`tab-btn${flow.activeTab === 'preview' ? ' active' : ''}`}
+                onClick={() => flow.setActiveTab('preview')}
+              >
+                Preview
+              </button>
+              <button
+                className={`tab-btn${flow.activeTab === 'code' ? ' active' : ''}`}
+                onClick={() => flow.setActiveTab('code')}
+              >
+                Code ({flow.generatedFiles.length} files)
+              </button>
+            </div>
+          )}
+
+          <div className="tab-content-container">
+            {(!hasFiles || flow.activeTab === 'artifacts') && (
+              <ArtifactsPanel
+                displayBuildSot={flow.displayBuildSot}
+                displayLocks={flow.displayLocks}
+                executionPlan={flow.executionPlan}
+                taskResult={flow.taskResult}
+              />
+            )}
+
+            {hasFiles && flow.activeTab === 'preview' && (
+              <PreviewPanel
+                files={flow.generatedFiles}
+                previewUrl={flow.previewUrl}
+              />
+            )}
+
+            {hasFiles && flow.activeTab === 'code' && (
+              <div className="builder-code-layout">
+                <FileTree
+                  files={flow.generatedFiles}
+                  selectedPath={flow.selectedFilePath}
+                  onSelect={flow.setSelectedFilePath}
+                />
+                <CodeEditor
+                  files={flow.generatedFiles}
+                  selectedPath={flow.selectedFilePath}
+                  onContentChange={flow.onFileContentChange}
+                />
+              </div>
+            )}
+          </div>
 
           {hasFiles && (
             <RefinementChat

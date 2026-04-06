@@ -28,6 +28,7 @@ from app.services.deployment_tracker import (
     get_deployment_by_id,
     get_deployment_for_task,
     get_deployments_for_trace,
+    list_all_deployments,
 )
 from app.services.governed_v2_continuity import (
     continuity_id_for_lock,
@@ -300,6 +301,9 @@ class DeploymentResponse(BaseModel):
     vercel_deploy_target: Optional[str] = None
     status: str
     error_message: Optional[str] = None
+    build_logs: Optional[str] = None
+    fix_attempts: int = 0
+    vercel_ready_state: Optional[str] = None
     created_at: str
     updated_at: str
 
@@ -325,6 +329,9 @@ def _deployment_to_response(rec: Any) -> DeploymentResponse:
         vercel_deploy_target=rec.vercel_deploy_target,
         status=rec.status,
         error_message=rec.error_message,
+        build_logs=getattr(rec, "build_logs", None),
+        fix_attempts=getattr(rec, "fix_attempts", 0) or 0,
+        vercel_ready_state=getattr(rec, "vercel_ready_state", None),
         created_at=rec.created_at.isoformat() if rec.created_at else "",
         updated_at=rec.updated_at.isoformat() if rec.updated_at else "",
     )
@@ -361,3 +368,126 @@ async def get_deployment_by_task(
     if rec is None:
         raise HTTPException(status_code=404, detail="No deployment found for this task")
     return _deployment_to_response(rec)
+
+
+@router.get("/projects", response_model=list[DeploymentResponse])
+async def list_projects(
+    limit: int = Query(default=50, ge=1, le=200),
+    offset: int = Query(default=0, ge=0),
+    session: AsyncSession = Depends(get_session),
+):
+    """List all deployments (acts as project history), newest first."""
+    records = await list_all_deployments(session, limit=limit, offset=offset)
+    return [_deployment_to_response(r) for r in records]
+
+
+class RetriggerResponse(BaseModel):
+    status: str
+    message: str
+    new_deployment_id: Optional[str] = None
+    deployment_url: Optional[str] = None
+
+
+@router.post("/deployments/{deployment_id}/retrigger", response_model=RetriggerResponse)
+async def retrigger_deployment(
+    deployment_id: str,
+    session: AsyncSession = Depends(get_session),
+):
+    """Re-deploy an existing deployment by re-triggering the Vercel file upload."""
+    import httpx
+    from app.services.deterministic_executor import (
+        DeterministicWebExecutor,
+        GeneratedFile,
+        VERCEL_TIMEOUT_SECONDS,
+        VERCEL_API_BASE,
+    )
+
+    rec = await get_deployment_by_id(session, deployment_id)
+    if rec is None:
+        raise HTTPException(status_code=404, detail="Deployment not found")
+
+    vercel_token = (settings.vercel_token or "").strip()
+    if not vercel_token:
+        raise HTTPException(status_code=500, detail="Vercel token not configured")
+
+    executor = DeterministicWebExecutor()
+
+    try:
+        async with httpx.AsyncClient(timeout=VERCEL_TIMEOUT_SECONDS) as vc_client:
+            team_id = ""
+            headers = {"Authorization": f"Bearer {vercel_token}"}
+            resp, data = await executor._request(
+                vc_client, "GET",
+                f"{VERCEL_API_BASE}/v9/projects/{rec.vercel_project_name or rec.project_name}",
+                headers=headers, params={"teamId": team_id} if team_id else None,
+            )
+            if resp.status_code != 200:
+                raise HTTPException(
+                    status_code=502,
+                    detail=f"Could not resolve Vercel project: {resp.status_code}",
+                )
+
+            vercel_project_id = data.get("id", "")
+
+            redeploy_resp, redeploy_data = await executor._request(
+                vc_client, "POST",
+                f"{VERCEL_API_BASE}/v13/deployments",
+                headers=headers,
+                params={"teamId": team_id} if team_id else None,
+                payload={
+                    "name": rec.vercel_project_name or rec.project_name,
+                    "project": vercel_project_id,
+                    "target": rec.vercel_deploy_target if rec.vercel_deploy_target in ("production", "staging") else "production",
+                    "gitSource": {
+                        "type": "github",
+                        "org": rec.github_owner,
+                        "repo": rec.github_repo_name,
+                        "ref": rec.github_branch or "main",
+                    },
+                },
+            )
+
+            if redeploy_resp.status_code not in (200, 201):
+                vercel_err = redeploy_data if isinstance(redeploy_data, dict) else {}
+                logger.error("retrigger_deployment.vercel_error status=%s body=%s",
+                             redeploy_resp.status_code, vercel_err)
+                raise HTTPException(
+                    status_code=502,
+                    detail=f"Vercel re-deploy failed ({redeploy_resp.status_code}): "
+                           f"{vercel_err.get('error', {}).get('message', redeploy_data)}",
+                )
+
+            new_deployment_id = redeploy_data.get("id", "")
+            new_url = redeploy_data.get("url", "")
+            if new_url and not new_url.startswith("http"):
+                new_url = f"https://{new_url}"
+
+            from app.services.deployment_tracker import record_deployment
+            await record_deployment(
+                session,
+                result={
+                    "status": "pending",
+                    "message": f"Retriggered from {deployment_id}",
+                    "deployment_url": new_url,
+                    "deployment_id": new_deployment_id,
+                    "repository_url": rec.github_repo_url,
+                    "provider_ids": {"vercel_project_id": vercel_project_id},
+                },
+                task_id=rec.task_id or "",
+                trace_id=rec.trace_id,
+                project_name=rec.project_name,
+            )
+            await session.commit()
+
+            return RetriggerResponse(
+                status="triggered",
+                message=f"Re-deployment triggered from {deployment_id}",
+                new_deployment_id=new_deployment_id,
+                deployment_url=new_url,
+            )
+
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.exception("retrigger_deployment.error deployment_id=%s", deployment_id)
+        raise HTTPException(status_code=500, detail=str(exc))

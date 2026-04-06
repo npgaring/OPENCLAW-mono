@@ -121,6 +121,18 @@ class Settings(BaseSettings):
         default=3,
         description="Number of pages per batch in Phase 2 code generation.",
     )
+    vercel_poll_interval_seconds: int = Field(
+        default=10,
+        description="Seconds between Vercel deployment status polls.",
+    )
+    vercel_poll_max_wait_seconds: int = Field(
+        default=300,
+        description="Max seconds to wait for Vercel build to finish before timing out.",
+    )
+    codegen_max_fix_retries: int = Field(
+        default=3,
+        description="Max AI auto-fix attempts when Vercel build fails.",
+    )
     governed_v2_enabled: bool = Field(
         default=True,
         description="Enable governed dual-engine v2 lock endpoints and continuity enforcement hooks.",
