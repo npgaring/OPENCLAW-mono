@@ -358,15 +358,6 @@ class DeterministicWebExecutor:
                     "deterministic.executor.auto_fix_logs task_id=%s log_len=%d",
                     task_id, len(build_logs),
                 )
-                # #region agent log
-                try:
-                    import json as _json_dbg3, time as _time_dbg3
-                    with open("/Users/braiebook/CDHQ Projects/OpenClaw-Mono/OPENCLAW-mono/.cursor/debug-20305c.log", "a") as _df5:
-                        _df5.write(_json_dbg3.dumps({"sessionId":"20305c","hypothesisId":"F","location":"deterministic_executor.py:auto_fix_loop","message":"build_logs_content","data":{"task_id":task_id,"attempt":fix_attempts,"log_len":len(build_logs),"log_tail":build_logs[-2000:] if build_logs else ""},"timestamp":int(_time_dbg3.time()*1000)}) + "\n")
-                except Exception:
-                    pass
-                # #endregion
-
                 current_files = await self._auto_fix_build_errors(
                     api_key, model, build_logs, current_files,
                     template_reference=template_reference,
@@ -1412,20 +1403,8 @@ class DeterministicWebExecutor:
         for k, v in template_deps.items():
             if isinstance(v, str):
                 deps.setdefault(k, v)
-        # #region agent log
-        _pre_req_deps = {k: deps.get(k) for k in ("next","react","react-dom") if k in deps}
-        # #endregion
         for k, v in REQUIRED_DEPS.items():
             deps[k] = v
-        # #region agent log
-        try:
-            import json as _json_dbg2, time as _time_dbg2
-            _post_req_deps = {k: deps.get(k) for k in ("next","react","react-dom")}
-            with open("/Users/braiebook/CDHQ Projects/OpenClaw-Mono/OPENCLAW-mono/.cursor/debug-20305c.log", "a") as _df3:
-                _df3.write(_json_dbg2.dumps({"sessionId":"20305c","hypothesisId":"E","location":"deterministic_executor.py:_ensure_scaffold_integrity:REQUIRED_DEPS","message":"deps_enforcement","data":{"pre_existing":_pre_req_deps,"post_applied":_post_req_deps,"required":{"next":"^15.5.14","react":"^19.0.0","react-dom":"^19.0.0"}},"timestamp":int(_time_dbg2.time()*1000)}) + "\n")
-        except Exception:
-            pass
-        # #endregion
 
         dev = pkg.setdefault("devDependencies", {})
         if not isinstance(dev, dict):
@@ -1868,22 +1847,6 @@ class DeterministicWebExecutor:
                 content = stale_re.sub("", content)
                 changed = True
 
-            # #region agent log
-            import json as _json_dbg, time as _time_dbg
-            _dbg_branch = "none"
-            _dbg_has_default_func = bool(default_func_re.search(content))
-            _dbg_has_default_kw = bool(has_default_re.search(content))
-            _dbg_named_funcs = named_func_re.findall(content)
-            _dbg_named_consts = named_const_re.findall(content)
-            _dbg_dc_match = default_const_re.search(content)
-            _dbg_first_80 = content[:200].replace("\n", "\\n")
-            try:
-                with open("/Users/braiebook/CDHQ Projects/OpenClaw-Mono/OPENCLAW-mono/.cursor/debug-20305c.log", "a") as _df:
-                    _df.write(_json_dbg.dumps({"sessionId":"20305c","hypothesisId":"B","location":"deterministic_executor.py:_fix_export_import_mismatches:loop","message":"component_inspect","data":{"path":path,"component_name":component_name,"has_default_func":_dbg_has_default_func,"has_default_kw":_dbg_has_default_kw,"named_funcs":_dbg_named_funcs,"named_consts":_dbg_named_consts,"dc_match_name":_dbg_dc_match.group(1) if _dbg_dc_match else None,"content_head":_dbg_first_80},"timestamp":int(_time_dbg.time()*1000)}) + "\n")
-            except Exception:
-                pass
-            # #endregion
-
             m_default_func = default_func_re.search(content)
             if m_default_func:
                 ai_name = m_default_func.group(1)
@@ -1903,14 +1866,6 @@ class DeterministicWebExecutor:
                 named_funcs = named_func_re.findall(content)
                 named_consts = named_const_re.findall(content)
                 all_named = set(named_funcs) | set(named_consts)
-                # #region agent log
-                try:
-                    with open("/Users/braiebook/CDHQ Projects/OpenClaw-Mono/OPENCLAW-mono/.cursor/debug-20305c.log", "a") as _df2:
-                        _m_dc2 = default_const_re.search(content)
-                        _df2.write(_json_dbg.dumps({"sessionId":"20305c","hypothesisId":"D","location":"deterministic_executor.py:_fix_export_import_mismatches:elif_branch","message":"has_default_branch","data":{"path":path,"component_name":component_name,"all_named":list(all_named),"dc_name":_m_dc2.group(1) if _m_dc2 else None,"name_eq_component":(_m_dc2.group(1)==component_name) if _m_dc2 else None},"timestamp":int(_time_dbg.time()*1000)}) + "\n")
-                except Exception:
-                    pass
-                # #endregion
                 if component_name in all_named:
                     pass
                 elif all_named:
@@ -1942,13 +1897,6 @@ class DeterministicWebExecutor:
                     content = content.rstrip() + f"\n\nexport default {main_export};\n"
                     changed = True
 
-            # #region agent log
-            try:
-                with open("/Users/braiebook/CDHQ Projects/OpenClaw-Mono/OPENCLAW-mono/.cursor/debug-20305c.log", "a") as _df4:
-                    _df4.write(_json_dbg.dumps({"sessionId":"20305c","hypothesisId":"B","location":"deterministic_executor.py:_fix_export_import_mismatches:result","message":"component_result","data":{"path":path,"component_name":component_name,"changed":changed,"final_has_named_export":bool(named_func_re.search(content) or named_const_re.search(content)),"final_has_default":bool(has_default_re.search(content))},"timestamp":int(_time_dbg.time()*1000)}) + "\n")
-            except Exception:
-                pass
-            # #endregion
             if changed:
                 file_map[path] = GeneratedFile(path=path, content=content)
                 logger.info(
@@ -2015,9 +1963,18 @@ class DeterministicWebExecutor:
                         if name in child_names:
                             extra_lines.append(f"export * from './{name}';")
                         else:
-                            extra_lines.append(
-                                f"export function {name}() {{ return <div>{name}</div>; }}"
-                            )
+                            child_stub_path = f"{dir_prefix}{name}.tsx"
+                            if child_stub_path not in file_map:
+                                file_map[child_stub_path] = GeneratedFile(
+                                    path=child_stub_path,
+                                    content=(
+                                        f'"use client";\n\n'
+                                        f"export function {name}() {{\n"
+                                        f"  return <div className=\"max-w-7xl mx-auto px-4 py-6\">{name}</div>;\n"
+                                        f"}}\n"
+                                    ),
+                                )
+                            extra_lines.append(f"export * from './{name}';")
                     if extra_lines:
                         actual_path = index_path if index_path in file_map else index_path_ts
                         updated = existing_index.content.rstrip() + "\n" + "\n".join(extra_lines) + "\n"
@@ -2087,6 +2044,13 @@ class DeterministicWebExecutor:
             module_name = parts[-1]
             is_component = "component" in import_path.lower() or module_name[0:1].isupper()
             stub_path = f"src/{import_path}.tsx" if is_component else f"src/{import_path}.ts"
+
+            if stub_path in file_map:
+                logger.info(
+                    "verify_import_graph.skip_existing module=%s path=%s",
+                    import_path, stub_path,
+                )
+                continue
 
             if names and is_component:
                 lines: list[str] = []
@@ -2796,7 +2760,7 @@ class DeterministicWebExecutor:
                 "framework": "nextjs",
                 "buildCommand": "next build",
                 "outputDirectory": ".next",
-                "installCommand": "npm install",
+                "installCommand": "npm install --legacy-peer-deps",
             },
         }
         if target == "production":
@@ -2944,6 +2908,7 @@ class DeterministicWebExecutor:
         if stubs_created:
             logger.info("deterministic.executor.auto_fix.deterministic_stubs created=%d", stubs_created)
 
+        approved_list = ", ".join(sorted(APPROVED_PACKAGES.keys()))
         system_prompt = (
             "You are an expert Next.js/TypeScript debugger. You are given Vercel build error logs and the project's source files.\n"
             "Your job is to fix ONLY the files that are causing the build errors.\n\n"
@@ -2955,7 +2920,16 @@ class DeterministicWebExecutor:
             "- If a 'Module not found' error references @/components/Foo, CREATE that file with a proper React component.\n"
             "- @/ imports are LOCAL project files (mapped to src/), NOT npm packages. Create the component file, do NOT add to package.json.\n"
             "- For Next.js App Router: pages are default exports, components are named exports.\n"
-            "- Tailwind CSS v4: use @import \"tailwindcss\" in globals.css, @tailwindcss/postcss in postcss.\n"
+            "- Tailwind CSS v4: use @import \"tailwindcss\" in globals.css, @tailwindcss/postcss in postcss.\n\n"
+            "DEPENDENCY RULES (STRICT):\n"
+            "- Do NOT output package.json. Dependency management is handled externally.\n"
+            "- Do NOT add import statements for packages not in this approved list: " + approved_list + ".\n"
+            "- Do NOT modify dependency versions. The existing versions are immutable and correct.\n"
+            "- If a build error mentions a missing npm package NOT in the approved list, remove the import and inline a fallback — do NOT add the package.\n\n"
+            "EXPORT RULES:\n"
+            "- All components MUST use named exports: `export function Foo()` or `export const Foo =`.\n"
+            "- Do NOT use `export default function Foo` as the sole export. Always include a named export.\n"
+            "- Do NOT generate tailwind.config.ts or tailwind.config.js — Tailwind v4 does not use config files.\n"
         )
 
         error_section = f"BUILD ERROR LOGS:\n```\n{error_logs}\n```\n\n"
@@ -2978,6 +2952,7 @@ class DeterministicWebExecutor:
         )
 
         fixed_files = self._parse_codegen_response(content, []) if content else []
+        fixed_files = [ff for ff in fixed_files if ff.path != "package.json"]
         for ff in fixed_files:
             if ff.path in file_map:
                 logger.info("deterministic.executor.auto_fix.patched file=%s", ff.path)
@@ -3117,7 +3092,7 @@ class DeterministicWebExecutor:
                         )
                         content = content.rstrip() + f"\n\nexport default {ai_name};\n"
                         if name != ai_name:
-                            content = content.rstrip() + f"\nexport {{ {ai_name} as {name} }};\n"
+                            content = content.rstrip() + f"\nexport const {name} = {ai_name};\n"
                         changed = True
                     else:
                         content = content.rstrip() + (
