@@ -892,6 +892,7 @@ async def run_task_submission(
         uato_decision=uato_res.decision,
         reason_codes=list(decision.reason_codes),
     )
+    deterministic_mode = _is_deterministic_plan(plan_json)
     governance_continuity_verified = False
     _trace(
         "task.submit.governance_evaluation_id",
@@ -918,6 +919,32 @@ async def run_task_submission(
         )
     if body.governance_evaluation_id:
         governance_continuity_verified = True
+
+    if deterministic_mode:
+        missing_lineage_fields: list[str] = []
+        if not body.build_sot_hash:
+            missing_lineage_fields.append("build_sot_hash")
+        if not body.execution_plan_hash:
+            missing_lineage_fields.append("execution_plan_hash")
+        if not body.v2_continuity_id:
+            missing_lineage_fields.append("v2_continuity_id")
+        if missing_lineage_fields:
+            _trace(
+                "task.submit.v2_lineage.required_missing",
+                trace_id=trace_id,
+                missing_fields=missing_lineage_fields,
+            )
+            raise HTTPException(
+                status_code=422,
+                detail={
+                    "code": "V2_LINEAGE_REQUIRED",
+                    "message": (
+                        "Deterministic compiler submissions require build_sot_hash, "
+                        "execution_plan_hash, and v2_continuity_id."
+                    ),
+                    "missing_fields": missing_lineage_fields,
+                },
+            )
 
     continuity_record = None
     if body.v2_continuity_id:
@@ -1345,7 +1372,6 @@ async def run_task_submission(
         flag_modified(task, "audit_history")
     await session.commit()
 
-    deterministic_mode = _is_deterministic_plan(plan_json)
     try:
         if deterministic_mode:
             client = DeterministicWebExecutor(timeout_seconds=300.0)

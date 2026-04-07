@@ -159,6 +159,20 @@ class Settings(BaseSettings):
             "Governance escape hatch; keep false for strict deploy quality."
         ),
     )
+    codegen_conflict_mode: str = Field(
+        default="log",
+        description=(
+            "Cross-batch conflict handling in deterministic inspector. "
+            "Use 'log' to continue with warnings, or 'block' to fail finalize."
+        ),
+    )
+    codegen_strict_package_pinning_enabled: bool = Field(
+        default=True,
+        description=(
+            "Pin every approved package present in generated package.json to canonical versions. "
+            "Disable only for debugging version drift."
+        ),
+    )
     governed_v2_enabled: bool = Field(
         default=True,
         description="Enable governed dual-engine v2 lock endpoints and continuity enforcement hooks.",
@@ -230,6 +244,13 @@ class Settings(BaseSettings):
         if self.codegen_deploy_static_gate_enabled is not None:
             return bool(self.codegen_deploy_static_gate_enabled)
         return True
+
+    def normalized_codegen_conflict_mode(self) -> str:
+        """Normalize conflict handling mode to log|block (default log on invalid values)."""
+        mode = (self.codegen_conflict_mode or "").strip().lower()
+        if mode not in ("log", "block"):
+            return "log"
+        return mode
 
 
 settings = Settings()

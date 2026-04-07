@@ -10,9 +10,11 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import hashlib
 import json
 import logging
 import os
+import re
 import subprocess
 import tempfile
 import time
@@ -36,6 +38,8 @@ REASON_VERCEL_PROJECT_CREATE_FAILED = "EXECUTION_VERCEL_PROJECT_CREATE_FAILED"
 REASON_VERCEL_DEPLOY_FAILED = "EXECUTION_VERCEL_DEPLOY_FAILED"
 REASON_DEPLOY_QUALITY_GATE_FAILED = "EXECUTION_DEPLOY_QUALITY_GATE_FAILED"
 REASON_CODE_GENERATION_FAILED = "EXECUTION_CODE_GENERATION_FAILED"
+REASON_CODEGEN_CONFLICT_DETECTED = "EXECUTION_CODEGEN_CONFLICT_DETECTED"
+REASON_CODEGEN_AUTOFIX_STALLED = "EXECUTION_CODEGEN_AUTOFIX_STALLED"
 
 CODEGEN_TIMEOUT_SECONDS = 180
 GITHUB_TIMEOUT_SECONDS = 60
@@ -209,6 +213,102 @@ class LocalPreflightResult:
     logs: str
 
 
+@dataclass
+class BuildManifest:
+    """Runtime continuity ledger for deterministic compiler calls.
+
+    This state is strictly execution-runtime continuity and must never be
+    treated as Build SoT or any canonical product artifact.
+    """
+
+    packages: dict[str, str] = field(default_factory=dict)
+    files_created: list[str] = field(default_factory=list)
+    exports_registered: dict[str, str] = field(default_factory=dict)
+    css_variables: list[str] = field(default_factory=list)
+    routes_created: list[str] = field(default_factory=list)
+    utility_modules: dict[str, str] = field(default_factory=dict)
+
+    @classmethod
+    def from_runtime_json(cls, data: Optional[dict[str, Any]]) -> "BuildManifest":
+        if not isinstance(data, dict):
+            return cls()
+        return cls(
+            packages=dict(data.get("packages") or {}),
+            files_created=[str(x) for x in (data.get("files_created") or []) if str(x).strip()],
+            exports_registered={str(k): str(v) for k, v in dict(data.get("exports_registered") or {}).items()},
+            css_variables=[str(x) for x in (data.get("css_variables") or []) if str(x).strip()],
+            routes_created=[str(x) for x in (data.get("routes_created") or []) if str(x).strip()],
+            utility_modules={str(k): str(v) for k, v in dict(data.get("utility_modules") or {}).items()},
+        )
+
+    def to_runtime_json(self) -> dict[str, Any]:
+        return {
+            "packages": dict(self.packages),
+            "files_created": list(dict.fromkeys(self.files_created)),
+            "exports_registered": dict(self.exports_registered),
+            "css_variables": list(dict.fromkeys(self.css_variables)),
+            "routes_created": list(dict.fromkeys(self.routes_created)),
+            "utility_modules": dict(self.utility_modules),
+        }
+
+    def update_from_files(self, files: list[GeneratedFile]) -> None:
+        for f in files:
+            if f.path not in self.files_created:
+                self.files_created.append(f.path)
+            if f.path.endswith("package.json"):
+                try:
+                    pkg = json.loads(f.content)
+                except Exception:
+                    pkg = {}
+                if isinstance(pkg, dict):
+                    for bucket_name in ("dependencies", "devDependencies"):
+                        bucket = pkg.get(bucket_name)
+                        if isinstance(bucket, dict):
+                            for name, version in bucket.items():
+                                if isinstance(name, str) and isinstance(version, str):
+                                    self.packages[name] = version
+            if f.path.endswith((".ts", ".tsx", ".js", ".jsx")):
+                for match in re.finditer(r"export\s+(?:async\s+)?(?:function|const|class)\s+(\w+)", f.content):
+                    self.exports_registered[match.group(1)] = f.path
+                if f.path.endswith((".css",)):
+                    continue
+                if "/lib/" in f.path or "/utils/" in f.path:
+                    module_name = f.path.rsplit("/", 1)[-1].split(".")[0]
+                    self.utility_modules[module_name] = f.path
+            if f.path.endswith(".css"):
+                for match in re.finditer(r"--([a-zA-Z0-9_-]+)\s*:", f.content):
+                    var_name = f"--{match.group(1)}"
+                    if var_name not in self.css_variables:
+                        self.css_variables.append(var_name)
+
+    def add_routes(self, routes: list[str]) -> None:
+        for route in routes:
+            route_s = str(route or "").strip()
+            if route_s and route_s not in self.routes_created:
+                self.routes_created.append(route_s)
+
+    def prompt_context(self) -> str:
+        parts: list[str] = [
+            "=== BUILD MANIFEST (RUNTIME CONTINUITY ONLY) ===",
+            "This is execution continuity state, not product-level source of truth.",
+        ]
+        if self.routes_created:
+            parts.append("Routes already planned: " + json.dumps(self.routes_created))
+        if self.packages:
+            parts.append("Packages already present: " + json.dumps(self.packages, sort_keys=True))
+        if self.files_created:
+            parts.append("Files already created: " + json.dumps(self.files_created[:200]))
+        if self.exports_registered:
+            parts.append("Named exports available: " + json.dumps(self.exports_registered, sort_keys=True))
+        if self.css_variables:
+            parts.append("CSS variables already defined: " + json.dumps(sorted(self.css_variables)))
+        if self.utility_modules:
+            parts.append("Utility modules already present: " + json.dumps(self.utility_modules, sort_keys=True))
+        parts.append("DO NOT recreate, rename, or contradict these artifacts. Reuse/import them.")
+        parts.append("=== END BUILD MANIFEST ===")
+        return "\n".join(parts) + "\n\n"
+
+
 class DeterministicWebExecutor:
     """Multi-phase executor: repo → codegen → commit → deploy."""
 
@@ -301,12 +401,15 @@ class DeterministicWebExecutor:
         api_key = (settings.openai_api_key or "").strip()
         context = self._build_project_context(plan, operations)
         model = self._resolve_codegen_model()
+        runtime_manifest = BuildManifest()
+        runtime_manifest.add_routes([str(r) for r in (context.get("routes") or []) if str(r).strip()])
 
         logger.info("deterministic.executor.codegen.phase1_architect_start model=%s", model)
         if api_key:
             blueprint = await self._phase1_architect(
                 api_key, model, context, plan, operations,
                 template_reference=template_reference,
+                manifest=runtime_manifest,
             )
         else:
             blueprint = self._default_blueprint(context, operations)
@@ -315,6 +418,8 @@ class DeterministicWebExecutor:
             len(blueprint.get("pages", [])), len(blueprint.get("shared_components", [])),
         )
         steps_completed.append("architect")
+        runtime_manifest = BuildManifest()
+        runtime_manifest.add_routes([p.get("slug", "") for p in (blueprint.get("pages") or []) if isinstance(p, dict)])
 
         build_state = {
             "blueprint": blueprint,
@@ -341,6 +446,7 @@ class DeterministicWebExecutor:
                 "deploy_branch": deploy_branch,
                 "execution_id": execution_id,
                 "plan_json": plan,
+                "runtime_manifest": runtime_manifest.to_runtime_json(),
             },
         }
 
@@ -366,13 +472,16 @@ class DeterministicWebExecutor:
         context: dict[str, Any],
         template_reference: TemplateReference,
         task_id: str,
-    ) -> list[GeneratedFile]:
+        runtime_manifest_json: Optional[dict[str, Any]] = None,
+    ) -> tuple[list[GeneratedFile], dict[str, Any]]:
         """Phase 2: Generate foundation files (configs, layout, shared components)."""
         api_key = (settings.openai_api_key or "").strip()
         model = self._resolve_codegen_model()
+        runtime_manifest = BuildManifest.from_runtime_json(runtime_manifest_json)
+        runtime_manifest.add_routes([p.get("slug", "") for p in (blueprint.get("pages") or []) if isinstance(p, dict)])
 
         if not api_key:
-            return []
+            return [], runtime_manifest.to_runtime_json()
 
         pages = blueprint.get("pages") or []
         shared_components = blueprint.get("shared_components") or []
@@ -395,10 +504,12 @@ class DeterministicWebExecutor:
         config_content = await self._openai_chat(
             api_key, model, self._BUILDER_SYSTEM_PROMPT, config_layout_prompt,
             temperature=0.3, max_tokens=max_tokens,
+            manifest=runtime_manifest,
         )
         if config_content:
             config_files = self._parse_codegen_response(config_content, [])
             all_files.extend(config_files)
+            runtime_manifest.update_from_files(config_files)
             logger.info("deterministic.executor.codegen.foundation_config_done files=%d", len(config_files))
 
         # Call 2+: Shared components in batches of 5
@@ -416,17 +527,19 @@ class DeterministicWebExecutor:
             comp_content = await self._openai_chat(
                 api_key, model, self._BUILDER_SYSTEM_PROMPT, comp_prompt,
                 temperature=0.3, max_tokens=max_tokens,
+                manifest=runtime_manifest,
             )
             if comp_content:
                 comp_files = self._parse_codegen_response(comp_content, [])
                 all_files.extend(comp_files)
+                runtime_manifest.update_from_files(comp_files)
                 logger.info(
                     "deterministic.executor.codegen.foundation_components_done batch=%d-%d files=%d",
                     batch_start, batch_start + len(batch), len(comp_files),
                 )
 
         logger.info("deterministic.executor.codegen.foundation_done task_id=%s total_files=%d", task_id, len(all_files))
-        return all_files
+        return all_files, runtime_manifest.to_runtime_json()
 
     # ------------------------------------------------------------------
     # Phased execution: Pages
@@ -438,13 +551,17 @@ class DeterministicWebExecutor:
         context: dict[str, Any],
         foundation_files: list[GeneratedFile],
         task_id: str,
-    ) -> list[GeneratedFile]:
-        """Phase 3: Generate page files in parallel batches."""
+        runtime_manifest_json: Optional[dict[str, Any]] = None,
+    ) -> tuple[list[GeneratedFile], dict[str, Any]]:
+        """Phase 3: Generate page files in deterministic sequential batches."""
         api_key = (settings.openai_api_key or "").strip()
         model = self._resolve_codegen_model()
+        runtime_manifest = BuildManifest.from_runtime_json(runtime_manifest_json)
+        runtime_manifest.add_routes([p.get("slug", "") for p in (blueprint.get("pages") or []) if isinstance(p, dict)])
+        runtime_manifest.update_from_files(foundation_files)
 
         if not api_key:
-            return foundation_files
+            return foundation_files, runtime_manifest.to_runtime_json()
 
         pages = blueprint.get("pages") or []
         design_notes = blueprint.get("design_notes", "")
@@ -467,6 +584,7 @@ class DeterministicWebExecutor:
             page_content = await self._openai_chat(
                 api_key, model, self._BUILDER_SYSTEM_PROMPT, page_prompt,
                 temperature=0.3, max_tokens=max_tokens,
+                manifest=runtime_manifest,
             )
             if page_content:
                 pf = self._parse_codegen_response(page_content, [])
@@ -477,17 +595,15 @@ class DeterministicWebExecutor:
                 return pf
             return []
 
-        batch_tasks = [
-            _build_page_batch(i, pages[i:i + batch_size])
-            for i in range(0, len(pages), batch_size)
-        ]
-        batch_results = await asyncio.gather(*batch_tasks)
-        for pf in batch_results:
+        for i in range(0, len(pages), batch_size):
+            batch = pages[i:i + batch_size]
+            pf = await _build_page_batch(i, batch)
+            runtime_manifest.update_from_files(pf)
             page_files.extend(pf)
 
         all_files = foundation_files + page_files
         logger.info("deterministic.executor.codegen.pages_done task_id=%s total_files=%d", task_id, len(all_files))
-        return all_files
+        return all_files, runtime_manifest.to_runtime_json()
 
     # ------------------------------------------------------------------
     # Phased execution: Finalize (inspect, commit, deploy)
@@ -779,7 +895,11 @@ class DeterministicWebExecutor:
         *,
         temperature: float = 0.3,
         max_tokens: int = 16000,
+        manifest: Optional[BuildManifest] = None,
     ) -> Optional[str]:
+        effective_user_prompt = user_prompt
+        if manifest is not None:
+            effective_user_prompt = manifest.prompt_context() + user_prompt
         try:
             async with httpx.AsyncClient(timeout=CODEGEN_TIMEOUT_SECONDS) as client:
                 resp, data = await self._request(
@@ -789,7 +909,7 @@ class DeterministicWebExecutor:
                         "model": model,
                         "messages": [
                             {"role": "system", "content": system_prompt},
-                            {"role": "user", "content": user_prompt},
+                            {"role": "user", "content": effective_user_prompt},
                         ],
                         "temperature": temperature,
                         "max_completion_tokens": max_tokens,
@@ -826,10 +946,20 @@ class DeterministicWebExecutor:
 
         context = self._build_project_context(plan, operations)
         model = self._resolve_codegen_model()
+        runtime_manifest = BuildManifest()
+        runtime_manifest.add_routes([str(r) for r in (context.get("routes") or []) if str(r).strip()])
 
         # ── Phase 1: Architect ───────────────────────────────────────────
         logger.info("deterministic.executor.codegen.phase1_architect_start model=%s", model)
-        blueprint = await self._phase1_architect(api_key, model, context, plan, operations, template_reference=template_reference)
+        blueprint = await self._phase1_architect(
+            api_key,
+            model,
+            context,
+            plan,
+            operations,
+            template_reference=template_reference,
+            manifest=runtime_manifest,
+        )
         logger.info(
             "deterministic.executor.codegen.phase1_architect_done pages=%d components=%d",
             len(blueprint.get("pages", [])), len(blueprint.get("shared_components", [])),
@@ -837,7 +967,14 @@ class DeterministicWebExecutor:
 
         # ── Phase 2: Builder ─────────────────────────────────────────────
         logger.info("deterministic.executor.codegen.phase2_builder_start")
-        generated_files = await self._phase2_build(api_key, model, blueprint, context, template_reference=template_reference)
+        generated_files = await self._phase2_build(
+            api_key,
+            model,
+            blueprint,
+            context,
+            template_reference=template_reference,
+            manifest=runtime_manifest,
+        )
         logger.info("deterministic.executor.codegen.phase2_builder_done files=%d", len(generated_files))
 
         if not generated_files:
@@ -846,8 +983,14 @@ class DeterministicWebExecutor:
 
         # ── Phase 3: Inspector ───────────────────────────────────────────
         logger.info("deterministic.executor.codegen.phase3_inspector_start")
-        validated_files = self._phase3_inspect(generated_files, blueprint, template_reference=template_reference)
+        validated_files, conflicts = self._phase3_inspect(generated_files, blueprint, template_reference=template_reference)
         logger.info("deterministic.executor.codegen.phase3_inspector_done files=%d", len(validated_files))
+        if conflicts:
+            logger.warning(
+                "deterministic.executor.codegen.phase3_conflicts_detected count=%d sample=%s",
+                len(conflicts),
+                conflicts[:10],
+            )
 
         return validated_files
 
@@ -863,6 +1006,7 @@ class DeterministicWebExecutor:
         operations: list[dict[str, Any]],
         *,
         template_reference: Optional[TemplateReference] = None,
+        manifest: Optional[BuildManifest] = None,
     ) -> dict[str, Any]:
         system_prompt = (
             "You are an expert web architect specializing in planning production-quality websites.\n"
@@ -908,6 +1052,7 @@ class DeterministicWebExecutor:
             api_key, model, system_prompt, "\n".join(user_parts),
             temperature=0.4,
             max_tokens=getattr(settings, "codegen_phase1_max_tokens", 4000),
+            manifest=manifest,
         )
         if not content:
             return self._default_blueprint(context, operations)

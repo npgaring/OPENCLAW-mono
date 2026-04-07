@@ -41,6 +41,7 @@ _MIGRATION_FILES = [
     "013_governed_v2_execution_locks.sql",
     "014_uuid_columns_to_text.sql",
     "015_deployments_table.sql",
+    "016_deployment_build_logs.sql",
     "017_task_build_state.sql",
 ]
 
