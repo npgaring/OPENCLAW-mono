@@ -145,6 +145,20 @@ class Settings(BaseSettings):
         default=300,
         description="Timeout in seconds for each local preflight command (npm install / npm run build).",
     )
+    codegen_deploy_static_gate_enabled: Optional[bool] = Field(
+        default=None,
+        description=(
+            "When true, block commit/deploy if static quality checks fail (layout, root page, internal <a> to / routes). "
+            "Defaults to true in production and true when unset (strict). Set false only for debugging."
+        ),
+    )
+    codegen_next_eslint_ignore_during_build: bool = Field(
+        default=False,
+        description=(
+            "If true, generated next.config sets eslint.ignoreDuringBuilds=true (Vercel may succeed even with ESLint errors). "
+            "Governance escape hatch; keep false for strict deploy quality."
+        ),
+    )
     governed_v2_enabled: bool = Field(
         default=True,
         description="Enable governed dual-engine v2 lock endpoints and continuity enforcement hooks.",
@@ -206,11 +220,16 @@ class Settings(BaseSettings):
         return env in ("development", "dev", "local")
 
     def enable_codegen_strict_import_graph(self) -> bool:
-        """Strict import graph validation defaults on in development unless explicitly set."""
+        """Strict @/ import binding validation; defaults on everywhere when unset (stricter governance)."""
         if self.codegen_strict_import_graph_enabled is not None:
             return bool(self.codegen_strict_import_graph_enabled)
-        env = (self.app_env or "").lower()
-        return env in ("development", "dev", "local")
+        return True
+
+    def enable_codegen_deploy_static_gate(self) -> bool:
+        """Static pre-commit deploy quality gate; on by default (CODEGEN_DEPLOY_STATIC_GATE_ENABLED=false to disable)."""
+        if self.codegen_deploy_static_gate_enabled is not None:
+            return bool(self.codegen_deploy_static_gate_enabled)
+        return True
 
 
 settings = Settings()

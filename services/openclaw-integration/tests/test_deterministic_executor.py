@@ -735,6 +735,53 @@ def test_serialize_and_deserialize_template_reference_roundtrip():
     assert restored.package_json["dependencies"]["next"] == "15"
 
 
+def test_relocate_misplaced_app_components():
+    fm = {
+        "src/app/components/NavBar.tsx": GeneratedFile(
+            path="src/app/components/NavBar.tsx",
+            content='import { Foo } from "@/app/components/Foo";\nexport function NavBar() { return null; }\n',
+        ),
+    }
+    DeterministicWebExecutor._relocate_misplaced_app_components(fm)
+    assert "src/components/NavBar.tsx" in fm
+    assert "src/app/components/NavBar.tsx" not in fm
+    assert "@/components/Foo" in fm["src/components/NavBar.tsx"].content
+
+
+def test_collect_deploy_quality_violations_detects_internal_anchor():
+    fm = {
+        "package.json": GeneratedFile(path="package.json", content='{"name":"x","private":true}'),
+        "src/app/layout.tsx": GeneratedFile(path="src/app/layout.tsx", content="export default function RootLayout(){return null}"),
+        "src/app/page.tsx": GeneratedFile(path="src/app/page.tsx", content="export default function Page(){return null}"),
+        "src/bad.tsx": GeneratedFile(path="src/bad.tsx", content='<a href="/">x</a>'),
+    }
+    v = DeterministicWebExecutor._collect_deploy_quality_violations(fm)
+    assert any(x.startswith("internal_html_link:") for x in v)
+
+
+def test_rewrite_internal_anchors_to_next_link():
+    """Internal / hrefs become Link to satisfy @next/next/no-html-link-for-pages."""
+    fm = {
+        "src/app/components/NavBar.tsx": GeneratedFile(
+            path="src/app/components/NavBar.tsx",
+            content='<nav><a href="/">Home</a><a className="x" href="/about">About</a></nav>',
+        ),
+        "src/x.tsx": GeneratedFile(
+            path="src/x.tsx",
+            content='<a href="https://example.com">Ext</a><a href="/pricing">Price</a>',
+        ),
+    }
+    DeterministicWebExecutor._rewrite_internal_anchors_to_next_link(fm)
+    nav = fm["src/app/components/NavBar.tsx"].content
+    assert "<Link" in nav
+    assert "</Link>" in nav
+    assert '<a href="/"' not in nav
+    x = fm["src/x.tsx"].content
+    assert 'href="https://example.com"' in x
+    assert "<Link" in x
+    assert "Price</Link>" in x
+
+
 def test_ensure_scaffold_integrity_deduplicates_dev_deps():
     """Dev-only packages must not remain in dependencies after scaffold integrity."""
     files = [

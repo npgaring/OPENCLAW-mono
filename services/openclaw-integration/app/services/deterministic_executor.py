@@ -34,6 +34,7 @@ REASON_GITHUB_AUTH_FAILED = "EXECUTION_GITHUB_AUTH_FAILED"
 REASON_GITHUB_REPO_CREATE_FAILED = "EXECUTION_GITHUB_REPO_CREATE_FAILED"
 REASON_VERCEL_PROJECT_CREATE_FAILED = "EXECUTION_VERCEL_PROJECT_CREATE_FAILED"
 REASON_VERCEL_DEPLOY_FAILED = "EXECUTION_VERCEL_DEPLOY_FAILED"
+REASON_DEPLOY_QUALITY_GATE_FAILED = "EXECUTION_DEPLOY_QUALITY_GATE_FAILED"
 REASON_CODE_GENERATION_FAILED = "EXECUTION_CODE_GENERATION_FAILED"
 
 CODEGEN_TIMEOUT_SECONDS = 180
@@ -524,6 +525,24 @@ class DeterministicWebExecutor:
         logger.info("deterministic.executor.codegen.phase3_inspector_done task_id=%s files=%d", task_id, len(validated_files))
         steps_completed.append("generate_code")
 
+        if settings.enable_codegen_deploy_static_gate():
+            qmap = {f.path: f for f in validated_files}
+            qviol = self._collect_deploy_quality_violations(qmap)
+            if qviol:
+                logger.warning(
+                    "deterministic.executor.deploy_quality_gate.failed task_id=%s violations=%s",
+                    task_id, qviol[:12],
+                )
+                raise DeterministicExecutionError(
+                    reason_code=REASON_DEPLOY_QUALITY_GATE_FAILED,
+                    message=(
+                        "Deploy quality gate blocked commit: fix generated output before shipping. "
+                        + "; ".join(qviol[:8])
+                    ),
+                    provider="openclaw_codegen",
+                    extra={"quality_violations": qviol},
+                )
+
         # Local preflight (if enabled)
         api_key = (settings.openai_api_key or "").strip()
         model = self._resolve_codegen_model()
@@ -955,10 +974,16 @@ class DeterministicWebExecutor:
         "You generate production-quality code: beautiful, responsive, accessible, with REAL content (no Lorem Ipsum).\n\n"
         "CRITICAL TECHNICAL RULES:\n"
         "- Use Next.js App Router with src/app/ directory structure.\n"
+        "- Place shared UI under src/components/ only — NEVER under src/app/components/ (breaks imports and deploy gates).\n"
         "- Tailwind CSS v4: use @import \"tailwindcss\" in globals.css. NO tailwind.config files.\n"
         "- PostCSS: export default { plugins: { \"@tailwindcss/postcss\": {} } };\n"
         "- EVERY component imported MUST be generated. All components use named exports.\n"
         "- ALWAYS import identifiers: Link from next/link, Image from next/image, etc.\n"
+        "- INTERNAL navigation (href starting with \"/\", same-site): NEVER use raw <a>. "
+        "Use: import Link from \"next/link\"; and <Link href=\"/path\">...</Link>. "
+        "External URLs (https://, mailto:, tel:) may use <a> with rel=\"noopener noreferrer\".\n"
+        "- Remove unused imports and unused variables so ESLint passes (no-unused-vars).\n"
+        "- Avoid default-exporting anonymous objects from lib files; use named exports or: const x = { ... }; export default x;\n"
         "- For MetadataRoute.Robots use lowercase keys: userAgent, allow, disallow, crawlDelay.\n"
         "- Use proper TypeScript types throughout.\n\n"
         "DEPENDENCY RULES (STRICTLY ENFORCED):\n"
@@ -1096,8 +1121,14 @@ class DeterministicWebExecutor:
             else:
                 parts.append(f"- src/components/{comp}.tsx — Reusable {comp} component with appropriate props.")
 
-        parts.append(f"\n13. src/components/NavBar.tsx — Sticky navigation: logo/brand '{goal.split('|')[0].strip()}', links for {json.dumps(nav_links)}, mobile hamburger menu, backdrop blur.")
-        parts.append(f"14. src/components/Footer.tsx — Multi-column: brand + tagline, page links, social placeholders, newsletter signup form, copyright.")
+        parts.append(
+            f"\n13. src/components/NavBar.tsx — Sticky navigation: logo/brand '{goal.split('|')[0].strip()}', "
+            f"links for {json.dumps(nav_links)}, mobile hamburger menu, backdrop blur. "
+            "Use import Link from \"next/link\" and <Link href=\"/path\"> for internal routes (never <a href=\"/\">).",
+        )
+        parts.append(
+            "14. src/components/Footer.tsx — Multi-column: brand + tagline; use Link for internal page links, <a> only for external URLs.",
+        )
 
         if template_reference and template_reference.source_repo:
             parts.append(f"\nTemplate Reference: {template_reference.source_repo}")
@@ -1184,6 +1215,7 @@ class DeterministicWebExecutor:
         parts.append("IMPORTANT: Write compelling, real content (not placeholder text). Each page should have 3-6 sections minimum.")
         parts.append("Use Tailwind CSS for styling. Make pages responsive. Export pages as default exports.")
         parts.append("If a page needs interactivity (forms, toggles, accordions), add 'use client' at the top and use useState.")
+        parts.append("For links to other pages on this site use import Link from \"next/link\" and <Link href=\"/slug\"> — never <a href=\"/\"> for internal routes.")
 
         return "\n".join(parts)
 
@@ -1218,8 +1250,9 @@ class DeterministicWebExecutor:
             "4. next.config.ts — minimal NextConfig = {}",
             f'5. src/app/globals.css — @import "tailwindcss" + CSS variables for primary={primary}, secondary={secondary}, accent={accent}',
             f"6. src/app/layout.tsx — RootLayout importing NavBar + Footer from @/components, metadata with title related to '{goal}'",
-            f"7. src/components/NavBar.tsx — Sticky navigation: logo/brand text, links for {json.dumps(nav_links)}, mobile hamburger menu with useState, backdrop blur. Use 'use client'. Rich implementation with transitions.",
-            f"8. src/components/Footer.tsx — Multi-column: brand + tagline, page links, social placeholders, newsletter signup form, copyright year.",
+            f"7. src/components/NavBar.tsx — Sticky navigation: logo/brand text, links for {json.dumps(nav_links)}, mobile hamburger menu with useState, backdrop blur. Use 'use client'. "
+            "MUST use import Link from \"next/link\" and <Link href=\"/path\"> for every internal route (NOT <a href=\"/\">). Rich implementation with transitions.",
+            f"8. src/components/Footer.tsx — Multi-column: brand + tagline, page links (Link for internal, <a> only for external), social placeholders, newsletter signup form, copyright year.",
         ]
         if template_reference and template_reference.source_repo:
             parts.append(f"\nTemplate Reference: {template_reference.source_repo}")
@@ -1325,6 +1358,20 @@ class DeterministicWebExecutor:
             file_map["src/app/layout.tsx"] = GeneratedFile(
                 path="src/app/layout.tsx",
                 content=self._generate_fallback_layout(blueprint),
+            )
+
+        # Check 2b: Root page required for App Router (governed deploy gate + Next build)
+        if "src/app/layout.tsx" in file_map and "src/app/page.tsx" not in file_map:
+            issues.append("missing_root_page")
+            file_map["src/app/page.tsx"] = GeneratedFile(
+                path="src/app/page.tsx",
+                content=self._generate_fallback_page("home", "Home", "home"),
+            )
+        elif "app/layout.tsx" in file_map and "app/page.tsx" not in file_map:
+            issues.append("missing_root_page")
+            file_map["app/page.tsx"] = GeneratedFile(
+                path="app/page.tsx",
+                content=self._generate_fallback_page("home", "Home", "home"),
             )
 
         # Check 3: Validate component exports match imports
@@ -1579,6 +1626,7 @@ class DeterministicWebExecutor:
         Fills any missing component files referenced by imports.
         """
         file_map = {f.path: f for f in files}
+        self._relocate_misplaced_app_components(file_map)
         uses_src_layout = any(path.startswith("src/") for path in file_map)
         app_root = "src/app" if any(path.startswith("src/app/") for path in file_map) else "app"
         alias_target = "./src/*" if uses_src_layout else "./*"
@@ -1626,9 +1674,18 @@ class DeterministicWebExecutor:
         # ── next.config.ts: always force known-good to prevent build failure ─
         for stale_config in ("next.config.js", "next.config.mjs"):
             file_map.pop(stale_config, None)
+        eslint_lines = ""
+        if settings.codegen_next_eslint_ignore_during_build:
+            eslint_lines = "  eslint: { ignoreDuringBuilds: true },\n"
         file_map["next.config.ts"] = GeneratedFile(
             path="next.config.ts",
-            content='import type { NextConfig } from "next";\n\nconst nextConfig: NextConfig = {};\n\nexport default nextConfig;\n',
+            content=(
+                'import type { NextConfig } from "next";\n\n'
+                "const nextConfig: NextConfig = {\n"
+                f"{eslint_lines}"
+                "  reactStrictMode: true,\n"
+                "};\n\nexport default nextConfig;\n"
+            ),
         )
 
         # ── globals.css: must use @import "tailwindcss" ──────────────────
@@ -1758,6 +1815,9 @@ class DeterministicWebExecutor:
         # ── Ensure barrel index files for directory imports ──────────────
         self._ensure_barrel_exports(file_map)
 
+        # ── Rewrite internal <a href="/..."> to Next.js <Link> (ESLint no-html-link-for-pages)
+        self._rewrite_internal_anchors_to_next_link(file_map)
+
         # ── Auto-fix missing standard imports in all tsx/ts files ────────
         self._fix_missing_standard_imports(file_map)
 
@@ -1769,6 +1829,10 @@ class DeterministicWebExecutor:
             file_map,
             strict_bindings=settings.enable_codegen_strict_import_graph(),
         )
+
+        # Second pass: stubs / import fixes may introduce new anchors or pages
+        self._rewrite_internal_anchors_to_next_link(file_map)
+        self._fix_missing_standard_imports(file_map)
 
         return list(file_map.values())
 
@@ -2617,6 +2681,109 @@ class DeterministicWebExecutor:
                 "verify_import_graph.unresolved_stub_created module=%s names=%s path=%s",
                 import_path, sorted(names) if names else "default", stub_path,
             )
+
+    @staticmethod
+    def _relocate_misplaced_app_components(file_map: dict[str, GeneratedFile]) -> None:
+        """Move src/app/components/* to src/components/* and fix @/app/components imports."""
+        wrong_prefix = "src/app/components/"
+        right_prefix = "src/components/"
+        for path in list(file_map.keys()):
+            if not path.startswith(wrong_prefix):
+                continue
+            if not path.endswith((".tsx", ".ts", ".jsx")):
+                continue
+            rest = path[len(wrong_prefix) :]
+            canonical = right_prefix + rest
+            gf = file_map.pop(path)
+            if canonical in file_map:
+                logger.warning(
+                    "deterministic.executor.scaffold.drop_duplicate_wrong_path kept=%s dropped=%s",
+                    canonical, path,
+                )
+                continue
+            file_map[canonical] = gf
+            logger.info("deterministic.executor.scaffold.relocate_component %s -> %s", path, canonical)
+        for p, f in list(file_map.items()):
+            if not p.endswith((".tsx", ".ts", ".jsx", ".css", ".mjs")):
+                continue
+            c = f.content
+            c2 = (
+                c.replace("@/app/components/", "@/components/")
+                .replace("'@/app/components/", "'@/components/")
+                .replace('"@/app/components/', '"@/components/')
+            )
+            if c2 != c:
+                file_map[p] = GeneratedFile(path=p, content=c2)
+
+    @staticmethod
+    def _collect_deploy_quality_violations(file_map: dict[str, GeneratedFile]) -> list[str]:
+        """Static checks that correlate with Vercel next build / ESLint (no npm required)."""
+        import re
+
+        violations: list[str] = []
+        paths = set(file_map.keys())
+        if "src/app/layout.tsx" not in paths and "app/layout.tsx" not in paths:
+            violations.append("missing_root_layout")
+        if "src/app/page.tsx" not in paths and "app/page.tsx" not in paths:
+            violations.append("missing_root_page")
+        internal_a = re.compile(
+            r"<a(\s[^>]*?)\bhref\s*=\s*"
+            r'(["\'])((?:/[^/"\'?#][^"\'?#]*|/))\2',
+            re.IGNORECASE,
+        )
+        for path, f in file_map.items():
+            if not (path.endswith(".tsx") or path.endswith(".jsx")):
+                continue
+            norm = path.replace("\\", "/").lstrip("./")
+            if not (norm.startswith("src/") or norm.startswith("app/")):
+                continue
+            if internal_a.search(f.content):
+                violations.append(f"internal_html_link:{path}")
+        pkg = file_map.get("package.json")
+        if not pkg:
+            violations.append("missing_package_json")
+        else:
+            try:
+                data = json.loads(pkg.content)
+                if not isinstance(data, dict) or not str(data.get("name", "")).strip():
+                    violations.append("invalid_package_json_name")
+            except (json.JSONDecodeError, TypeError):
+                violations.append("invalid_package_json_parse")
+        return violations
+
+    @staticmethod
+    def _rewrite_internal_anchors_to_next_link(file_map: dict[str, GeneratedFile]) -> None:
+        """Replace <a href=\"/...\">...</a> with <Link> for same-site routes (Next.js ESLint rule)."""
+        import re
+
+        pattern = re.compile(
+            r"<a(\s[^>]*?)\bhref\s*=\s*"
+            r'(["\'])((?:/[^/"\'?#][^"\'?#]*|/))\2'
+            r"([^>]*?)>(.*?)</a>",
+            re.IGNORECASE | re.DOTALL,
+        )
+
+        for path, f in list(file_map.items()):
+            if not (path.endswith(".tsx") or path.endswith(".jsx")):
+                continue
+            normalized = path.replace("\\", "/").lstrip("./")
+            if not (normalized.startswith("src/") or normalized.startswith("app/")):
+                continue
+            new_content = f.content
+            safety = 0
+            while safety < 500:
+                safety += 1
+                m = pattern.search(new_content)
+                if not m:
+                    break
+                repl = (
+                    f"<Link{m.group(1)}href={m.group(2)}{m.group(3)}{m.group(2)}"
+                    f"{m.group(4)}>{m.group(5)}</Link>"
+                )
+                new_content = new_content[: m.start()] + repl + new_content[m.end() :]
+            if new_content != f.content:
+                file_map[path] = GeneratedFile(path=path, content=new_content)
+                logger.info("deterministic.executor.scaffold.rewrite_internal_links file=%s", path)
 
     @staticmethod
     def _fix_missing_standard_imports(file_map: dict[str, GeneratedFile]) -> None:
