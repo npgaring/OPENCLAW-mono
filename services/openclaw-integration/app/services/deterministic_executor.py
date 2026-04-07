@@ -165,6 +165,15 @@ APPROVED_PACKAGES: dict[str, str] = {
     "eslint-config-next": "^15",
 }
 
+APPROVED_PACKAGE_SUBPATHS: dict[str, set[str]] = {
+    "next": {"", "link", "image", "navigation", "font/google", "script", "headers"},
+    "react": {""},
+    "react-dom": {"", "client"},
+    "react-icons": {"*"},
+    "date-fns": {"*"},
+    "@hookform/resolvers": {"zod"},
+}
+
 
 def _strip_markdown_fences(content: str) -> str:
     """Remove wrapping markdown code fences that AI models sometimes emit."""
@@ -191,6 +200,12 @@ class TemplateReference:
     source_branch: str = ""
     package_json: dict[str, Any] = field(default_factory=dict)
     key_files: dict[str, str] = field(default_factory=dict)
+
+
+@dataclass
+class LocalPreflightResult:
+    success: bool
+    logs: str
 
 
 class DeterministicWebExecutor:
@@ -265,6 +280,57 @@ class DeterministicWebExecutor:
             trace_id=trace_id,
             template_reference=template_reference,
         )
+        api_key = (settings.openai_api_key or "").strip()
+        model = self._resolve_codegen_model()
+        max_fix_retries = getattr(settings, "codegen_max_fix_retries", 2)
+        local_preflight_fix_attempts = 0
+        preflight_logs = ""
+
+        if settings.enable_codegen_local_preflight():
+            while True:
+                preflight = await self._run_local_preflight(generated_files)
+                preflight_logs = preflight.logs
+                if preflight.success:
+                    steps_completed.append("local_preflight")
+                    break
+                if local_preflight_fix_attempts >= max_fix_retries or not api_key:
+                    artifacts = [
+                        {
+                            "path": repo.html_url,
+                            "type": "repository",
+                            "summary": "GitHub repository created; local preflight failed before commit/deploy.",
+                        },
+                    ]
+                    return {
+                        "execution_id": execution_id,
+                        "status": "needs_review",
+                        "message": f"Local preflight build failed after {local_preflight_fix_attempts} auto-fix attempt(s).",
+                        "artifacts": artifacts,
+                        "steps_completed": steps_completed,
+                        "repository_url": repo.html_url,
+                        "repo_commit_sha": None,
+                        "deployment_id": None,
+                        "deployment_url": None,
+                        "files_generated": len(generated_files),
+                        "provider_ids": {},
+                        "vercel_ready_state": "SKIPPED_LOCAL_PREFLIGHT_FAILED",
+                        "fix_attempts": 0,
+                        "local_preflight_fix_attempts": local_preflight_fix_attempts,
+                        "build_logs": preflight_logs,
+                    }
+                local_preflight_fix_attempts += 1
+                logger.info(
+                    "deterministic.executor.local_preflight_fix_start task_id=%s attempt=%d/%d",
+                    task_id, local_preflight_fix_attempts, max_fix_retries,
+                )
+                generated_files = await self._auto_fix_build_errors(
+                    api_key,
+                    model,
+                    preflight_logs,
+                    generated_files,
+                    template_reference=template_reference,
+                )
+
         steps_completed.append("generate_code")
         tsconfig_content = next((gf.content[:300] for gf in generated_files if gf.path == "tsconfig.json"), "MISSING")
         postcss_content = next((gf.content[:200] for gf in generated_files if gf.path == "postcss.config.mjs"), "MISSING")
@@ -307,7 +373,6 @@ class DeterministicWebExecutor:
 
         # ── Phase 4: Create Vercel Project, Deploy, Poll, Auto-Fix ──
         logger.info("deterministic.executor.phase4_start task_id=%s", task_id)
-        max_fix_retries = getattr(settings, "codegen_max_fix_retries", 2)
         fix_attempts = 0
         build_logs = ""
         vercel_ready_state = ""
@@ -427,6 +492,7 @@ class DeterministicWebExecutor:
             "provider_ids": {"vercel_project_id": vercel_project.id},
             "vercel_ready_state": vercel_ready_state,
             "fix_attempts": fix_attempts,
+            "local_preflight_fix_attempts": local_preflight_fix_attempts,
             "build_logs": build_logs if not is_success else "",
         }
         if deploy_target == "preview":
@@ -1381,7 +1447,6 @@ class DeterministicWebExecutor:
             "eslint": "^9.39.1",
             "eslint-config-next": str(template_deps.get("next") or template_dev_deps.get("eslint-config-next") or "^15"),
         }
-        pass
 
         pkg_path = "package.json"
         existing_pkg = file_map.get(pkg_path)
@@ -1466,7 +1531,10 @@ class DeterministicWebExecutor:
         self._normalize_robots_metadata_keys(file_map)
 
         # ── Final import graph verification + safety-net stubs ───────────
-        self._verify_import_graph(file_map)
+        self._verify_import_graph(
+            file_map,
+            strict_bindings=settings.enable_codegen_strict_import_graph(),
+        )
 
         return list(file_map.values())
 
@@ -1584,6 +1652,160 @@ class DeterministicWebExecutor:
                 logger.info("deterministic.executor.scaffold.robots_keys_normalized file=%s", path)
 
     @staticmethod
+    def _parse_package_import(raw_mod: str) -> tuple[str, str]:
+        if raw_mod.startswith("@"):
+            parts = raw_mod.split("/")
+            pkg_name = "/".join(parts[:2]) if len(parts) >= 2 else raw_mod
+            subpath = "/".join(parts[2:]) if len(parts) > 2 else ""
+            return pkg_name, subpath
+        parts = raw_mod.split("/")
+        pkg_name = parts[0]
+        subpath = "/".join(parts[1:]) if len(parts) > 1 else ""
+        return pkg_name, subpath
+
+    @staticmethod
+    def _is_allowed_package_import(
+        raw_mod: str,
+        template_reference: Optional["TemplateReference"] = None,
+    ) -> bool:
+        template_pkgs: set[str] = set()
+        if template_reference and isinstance(template_reference.package_json, dict):
+            for section in ("dependencies", "devDependencies"):
+                bucket = template_reference.package_json.get(section)
+                if isinstance(bucket, dict):
+                    template_pkgs.update(bucket.keys())
+
+        pkg_name, subpath = DeterministicWebExecutor._parse_package_import(raw_mod)
+        if pkg_name in template_pkgs and pkg_name not in APPROVED_PACKAGES:
+            return True
+        if pkg_name not in APPROVED_PACKAGES:
+            return False
+
+        allowed_subpaths = APPROVED_PACKAGE_SUBPATHS.get(pkg_name)
+        if not allowed_subpaths:
+            return subpath == ""
+        if "*" in allowed_subpaths:
+            return True
+        return subpath in allowed_subpaths
+
+    @staticmethod
+    def _resolve_relative_module(file_map: dict[str, GeneratedFile], current_path: str, source: str) -> str | None:
+        if source.startswith("@/"):
+            target = source[2:]
+            base_candidates = [f"src/{target}", target]
+        elif source.startswith("."):
+            current_dir = os.path.dirname(current_path)
+            normalized = os.path.normpath(os.path.join(current_dir, source)).replace("\\", "/")
+            base_candidates = [normalized]
+        else:
+            return None
+
+        ext_candidates = (".tsx", ".ts", ".jsx", ".js")
+        for base in base_candidates:
+            for ext in ext_candidates:
+                candidate = f"{base}{ext}"
+                if candidate in file_map:
+                    return candidate
+            for index_name in ("index.tsx", "index.ts", "index.jsx", "index.js"):
+                candidate = f"{base}/{index_name}"
+                if candidate in file_map:
+                    return candidate
+        return None
+
+    @staticmethod
+    def _analyze_exports(
+        file_map: dict[str, GeneratedFile],
+        path: str,
+        visited: Optional[set[str]] = None,
+    ) -> dict[str, Any]:
+        import re
+
+        if visited is None:
+            visited = set()
+        if path in visited or path not in file_map:
+            return {"named": set(), "has_default": False, "default_identifier": None}
+        visited.add(path)
+
+        content = file_map[path].content
+        named: set[str] = set()
+        has_default = False
+        default_identifier: Optional[str] = None
+
+        for regex in (
+            re.compile(r"^export\s+(?:async\s+)?function\s+(\w+)", re.MULTILINE),
+            re.compile(r"^export\s+const\s+(\w+)", re.MULTILINE),
+            re.compile(r"^export\s+class\s+(\w+)", re.MULTILINE),
+        ):
+            named.update(regex.findall(content))
+
+        m_default_func = re.search(r"^export\s+default\s+function\s+(\w+)", content, re.MULTILINE)
+        if m_default_func:
+            has_default = True
+            default_identifier = m_default_func.group(1)
+            named.add(default_identifier)
+
+        m_default_ident = re.search(r"^export\s+default\s+(\w+)\s*;", content, re.MULTILINE)
+        if m_default_ident:
+            has_default = True
+            default_identifier = m_default_ident.group(1)
+
+        export_list_re = re.compile(
+            r"^export\s*\{([^}]+)\}\s*(?:from\s+['\"]([^'\"]+)['\"])?",
+            re.MULTILINE,
+        )
+        for match in export_list_re.finditer(content):
+            spec_blob = match.group(1)
+            reexport_source = match.group(2)
+            child_analysis = None
+            child_path = None
+            if reexport_source:
+                child_path = DeterministicWebExecutor._resolve_relative_module(file_map, path, reexport_source)
+                if child_path:
+                    child_analysis = DeterministicWebExecutor._analyze_exports(file_map, child_path, visited)
+            for raw_spec in spec_blob.split(","):
+                spec = raw_spec.strip()
+                if not spec:
+                    continue
+                if " as " in spec:
+                    local_name, exported_name = [part.strip() for part in spec.split(" as ", 1)]
+                else:
+                    local_name = exported_name = spec
+                if exported_name == "default":
+                    has_default = True
+                    if local_name == "default" and child_analysis:
+                        default_identifier = child_analysis.get("default_identifier")
+                    else:
+                        default_identifier = local_name
+                    continue
+                named.add(exported_name)
+                if local_name == "default" and child_analysis and child_analysis.get("default_identifier"):
+                    named.add(exported_name)
+
+            if child_analysis:
+                named.update(child_analysis.get("named", set()))
+
+        export_star_re = re.compile(r"^export\s+\*\s+from\s+['\"]([^'\"]+)['\"]", re.MULTILINE)
+        for match in export_star_re.finditer(content):
+            child_path = DeterministicWebExecutor._resolve_relative_module(file_map, path, match.group(1))
+            if not child_path:
+                continue
+            child_analysis = DeterministicWebExecutor._analyze_exports(file_map, child_path, visited)
+            named.update(child_analysis.get("named", set()))
+
+        return {"named": named, "has_default": has_default, "default_identifier": default_identifier}
+
+    @staticmethod
+    def _append_named_export_stub(path: str, export_name: str) -> str:
+        is_component = path.endswith((".tsx", ".jsx")) or export_name[:1].isupper()
+        if is_component:
+            return (
+                f"\nexport function {export_name}() {{\n"
+                f"  return <div className=\"max-w-7xl mx-auto px-4 py-6\">{export_name}</div>;\n"
+                f"}}\n"
+            )
+        return f"\nexport const {export_name} = null;\n"
+
+    @staticmethod
     def _rewrite_unapproved_imports(
         file_map: dict[str, GeneratedFile],
         template_reference: Optional["TemplateReference"] = None,
@@ -1596,14 +1818,6 @@ class DeterministicWebExecutor:
         """
         import re
 
-        template_pkgs: set[str] = set()
-        if template_reference and isinstance(template_reference.package_json, dict):
-            for section in ("dependencies", "devDependencies"):
-                bucket = template_reference.package_json.get(section)
-                if isinstance(bucket, dict):
-                    template_pkgs.update(bucket.keys())
-
-        allowed = set(APPROVED_PACKAGES.keys()) | template_pkgs
         builtin_modules = {
             "assert", "buffer", "child_process", "cluster", "console", "constants",
             "crypto", "dgram", "dns", "domain", "events", "fs", "http", "https",
@@ -1627,16 +1841,16 @@ class DeterministicWebExecutor:
                 if m:
                     raw_mod = (m.group(1) or m.group(2) or m.group(3) or "").strip()
                     if raw_mod and not raw_mod.startswith((".", "/", "@/", "node:")):
-                        if raw_mod.startswith("@"):
-                            parts = raw_mod.split("/")
-                            pkg_name = "/".join(parts[:2]) if len(parts) >= 2 else raw_mod
-                        else:
-                            pkg_name = raw_mod.split("/")[0]
+                        pkg_name, _ = DeterministicWebExecutor._parse_package_import(raw_mod)
 
-                        if pkg_name and pkg_name not in builtin_modules and pkg_name not in allowed:
+                        if (
+                            pkg_name
+                            and pkg_name not in builtin_modules
+                            and not DeterministicWebExecutor._is_allowed_package_import(raw_mod, template_reference)
+                        ):
                             logger.info(
-                                "deterministic.executor.allowlist.stripped_import pkg=%s file=%s",
-                                pkg_name, f.path,
+                                "deterministic.executor.allowlist.stripped_import pkg=%s import=%s file=%s",
+                                pkg_name, raw_mod, f.path,
                             )
                             new_lines.append(f"// [ALLOWLIST] removed: {line.rstrip()}\n")
                             changed = True
@@ -1997,7 +2211,11 @@ class DeterministicWebExecutor:
                 )
 
     @staticmethod
-    def _verify_import_graph(file_map: dict[str, GeneratedFile]) -> None:
+    def _verify_import_graph(
+        file_map: dict[str, GeneratedFile],
+        *,
+        strict_bindings: bool = False,
+    ) -> None:
         """Final validation pass: verify all @/ imports resolve and create safety-net stubs.
 
         Runs after all other fix-up passes. For any import that still cannot be
@@ -2005,9 +2223,11 @@ class DeterministicWebExecutor:
         fail with 'Module not found'.
         """
         import re
-        full_import_re = re.compile(
-            r"""(?:import\s+\{([^}]*)\}\s+from|import\s+(\w+)\s+from|from)\s+['"]@/([\w/]+)['"]"""
+        named_import_re = re.compile(r"""import\s+\{([^}]*)\}\s+from\s+['"]@/([\w/]+)['"]""")
+        default_and_named_import_re = re.compile(
+            r"""import\s+(\w+)\s*,\s*\{([^}]*)\}\s+from\s+['"]@/([\w/]+)['"]"""
         )
+        default_import_re = re.compile(r"""import\s+(\w+)\s+from\s+['"]@/([\w/]+)['"]""")
 
         _EXT_CANDIDATES = (".tsx", ".ts", ".js", ".jsx")
 
@@ -2024,22 +2244,106 @@ class DeterministicWebExecutor:
                     return f"{import_path}{ext}"
             return None
 
-        unresolved: dict[str, set[str]] = {}
+        requests: dict[str, dict[str, Any]] = {}
+
+        def _record(import_path: str, *, named: set[str], wants_default: bool) -> None:
+            bucket = requests.setdefault(import_path, {"named": set(), "default": False})
+            bucket["named"].update(named)
+            bucket["default"] = bucket["default"] or wants_default
 
         for f in file_map.values():
             if not any(f.path.endswith(ext) for ext in _EXT_CANDIDATES):
                 continue
-            for m in full_import_re.finditer(f.content):
-                import_path = m.group(3)
-                resolved = _resolve(import_path)
-                if resolved is None:
-                    names = set()
-                    if m.group(1):
-                        names = {n.strip().split(" as ")[0].strip()
-                                 for n in m.group(1).split(",") if n.strip()}
-                    unresolved.setdefault(import_path, set()).update(names)
+            for m in default_and_named_import_re.finditer(f.content):
+                names = {
+                    n.strip().split(" as ")[-1].strip()
+                    for n in m.group(2).split(",")
+                    if n.strip()
+                }
+                _record(m.group(3), named=names, wants_default=True)
+            for m in named_import_re.finditer(f.content):
+                names = {
+                    n.strip().split(" as ")[-1].strip()
+                    for n in m.group(1).split(",")
+                    if n.strip()
+                }
+                _record(m.group(2), named=names, wants_default=False)
+            for m in default_import_re.finditer(f.content):
+                if default_and_named_import_re.search(m.group(0)):
+                    continue
+                _record(m.group(2), named=set(), wants_default=True)
 
-        for import_path, names in unresolved.items():
+        for import_path, request in requests.items():
+            names = set(request["named"])
+            wants_default = bool(request["default"])
+            resolved = _resolve(import_path)
+            if resolved is not None and strict_bindings:
+                export_info = DeterministicWebExecutor._analyze_exports(file_map, resolved)
+                updates: list[str] = []
+                basename = resolved.rsplit("/", 1)[-1].split(".")[0]
+                is_component = resolved.endswith((".tsx", ".jsx")) or basename[:1].isupper()
+                is_barrel = basename == "index"
+
+                if wants_default and not export_info["has_default"]:
+                    candidate = export_info["default_identifier"]
+                    if not candidate:
+                        if basename != "index" and basename in export_info["named"]:
+                            candidate = basename
+                        elif export_info["named"]:
+                            candidate = sorted(export_info["named"])[0]
+                    if candidate:
+                        updates.append(f"\nexport default {candidate};\n")
+                    elif is_component:
+                        component_name = basename if basename != "index" else "ModuleDefault"
+                        updates.append(
+                            f"\nexport function {component_name}() {{\n"
+                            f"  return <div className=\"max-w-7xl mx-auto px-4 py-6\">{component_name}</div>;\n"
+                            f"}}\n"
+                            f"\nexport default {component_name};\n"
+                        )
+                    else:
+                        updates.append("\nconst moduleDefault = {};\nexport default moduleDefault;\n")
+
+                missing_named = sorted(name for name in names if name not in export_info["named"])
+                for missing in missing_named:
+                    if is_barrel:
+                        dir_prefix = resolved.rsplit("/", 1)[0]
+                        child_base = f"{dir_prefix}/{missing}"
+                        child_path = None
+                        for ext in _EXT_CANDIDATES:
+                            if f"{child_base}{ext}" in file_map:
+                                child_path = f"{child_base}{ext}"
+                                break
+                        if child_path is None:
+                            child_path = f"{child_base}.tsx"
+                            file_map[child_path] = GeneratedFile(
+                                path=child_path,
+                                content=DeterministicWebExecutor._append_named_export_stub(child_path, missing),
+                            )
+                        export_line = f"export * from './{missing}';"
+                        if export_line not in file_map[resolved].content and export_line not in "".join(updates):
+                            updates.append("\n" + export_line + "\n")
+                        continue
+
+                    default_identifier = export_info.get("default_identifier")
+                    if default_identifier:
+                        updates.append(f"\nexport const {missing} = {default_identifier};\n")
+                    else:
+                        updates.append(DeterministicWebExecutor._append_named_export_stub(resolved, missing))
+
+                if updates:
+                    file_map[resolved] = GeneratedFile(
+                        path=resolved,
+                        content=file_map[resolved].content.rstrip() + "".join(updates),
+                    )
+                    logger.info(
+                        "verify_import_graph.repaired_bindings module=%s path=%s default=%s named=%s",
+                        import_path, resolved, wants_default, missing_named,
+                    )
+                continue
+            if resolved is not None:
+                continue
+
             parts = import_path.split("/")
             module_name = parts[-1]
             is_component = "component" in import_path.lower() or module_name[0:1].isupper()
@@ -2143,6 +2447,66 @@ class DeterministicWebExecutor:
                 content = json.dumps(content_value, ensure_ascii=False)
             files.append(GeneratedFile(path=path, content=content))
         return files
+
+    async def _run_local_preflight(self, files: list[GeneratedFile]) -> LocalPreflightResult:
+        """Materialize generated files locally and run install/build before commit or deploy."""
+        timeout_seconds = max(30, int(getattr(settings, "codegen_local_preflight_timeout_seconds", 300)))
+        with tempfile.TemporaryDirectory(prefix="openclaw-preflight-") as temp_dir:
+            skipped_paths: list[str] = []
+            for generated in files:
+                normalized = os.path.normpath(generated.path).replace("\\", "/").lstrip("./")
+                if not normalized or normalized.startswith("../") or os.path.isabs(normalized):
+                    skipped_paths.append(generated.path)
+                    continue
+                abs_path = os.path.join(temp_dir, normalized)
+                os.makedirs(os.path.dirname(abs_path), exist_ok=True)
+                with open(abs_path, "w", encoding="utf-8") as handle:
+                    handle.write(generated.content)
+
+            log_parts: list[str] = []
+            if skipped_paths:
+                log_parts.append("Skipped unsafe paths:\n" + "\n".join(sorted(skipped_paths)))
+
+            install_code, install_logs = await self._run_local_command(
+                ["npm", "install", "--legacy-peer-deps"],
+                cwd=temp_dir,
+                timeout_seconds=timeout_seconds,
+            )
+            log_parts.append("$ npm install --legacy-peer-deps\n" + install_logs)
+            if install_code != 0:
+                return LocalPreflightResult(success=False, logs="\n\n".join(log_parts))
+
+            build_code, build_logs = await self._run_local_command(
+                ["npm", "run", "build"],
+                cwd=temp_dir,
+                timeout_seconds=timeout_seconds,
+            )
+            log_parts.append("$ npm run build\n" + build_logs)
+            return LocalPreflightResult(success=build_code == 0, logs="\n\n".join(log_parts))
+
+    async def _run_local_command(
+        self,
+        argv: list[str],
+        *,
+        cwd: str,
+        timeout_seconds: int,
+    ) -> tuple[int, str]:
+        proc = await asyncio.create_subprocess_exec(
+            *argv,
+            cwd=cwd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT,
+        )
+        try:
+            stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=timeout_seconds)
+            output = (stdout or b"").decode("utf-8", errors="ignore")
+            return proc.returncode or 0, output
+        except asyncio.TimeoutError:
+            proc.kill()
+            stdout, _ = await proc.communicate()
+            output = (stdout or b"").decode("utf-8", errors="ignore")
+            timeout_msg = f"\n[local-preflight-timeout after {timeout_seconds}s]\n"
+            return 124, output + timeout_msg
 
     # ------------------------------------------------------------------
     # GitHub: Authentication
@@ -3221,6 +3585,9 @@ class DeterministicWebExecutor:
 
     @staticmethod
     def _sign_rs256(payload: bytes, private_key_pem: str) -> bytes:
+        from cryptography.hazmat.primitives import hashes, serialization
+        from cryptography.hazmat.primitives.asymmetric import padding
+
         key_text = _normalize_private_key(private_key_pem)
         if "BEGIN" not in key_text:
             raise DeterministicExecutionError(
@@ -3228,32 +3595,18 @@ class DeterministicWebExecutor:
                 message="Invalid GitHub private key format.",
                 provider="github",
             )
-        path = ""
         try:
-            with tempfile.NamedTemporaryFile("w", delete=False) as key_file:
-                path = key_file.name
-                key_file.write(key_text)
-            proc = subprocess.run(
-                ["openssl", "dgst", "-sha256", "-sign", path],
-                input=payload,
-                capture_output=True,
-                check=False,
+            private_key = serialization.load_pem_private_key(
+                key_text.encode("utf-8"), password=None,
             )
-            if proc.returncode != 0:
-                stderr = (proc.stderr or b"").decode("utf-8", errors="ignore")
-                raise DeterministicExecutionError(
-                    reason_code=REASON_GITHUB_AUTH_FAILED,
-                    message="Failed signing GitHub App JWT with private key.",
-                    provider="github",
-                    snippet=" ".join(stderr.split())[:240] or None,
-                )
-            return proc.stdout
-        finally:
-            if path and os.path.exists(path):
-                try:
-                    os.remove(path)
-                except OSError:
-                    logger.warning("deterministic.executor.jwt.cleanup_failed", extra={"path": path})
+            return private_key.sign(payload, padding.PKCS1v15(), hashes.SHA256())
+        except Exception as exc:
+            raise DeterministicExecutionError(
+                reason_code=REASON_GITHUB_AUTH_FAILED,
+                message="Failed signing GitHub App JWT with private key.",
+                provider="github",
+                snippet=str(exc)[:240] or None,
+            ) from exc
 
 
 __all__ = [

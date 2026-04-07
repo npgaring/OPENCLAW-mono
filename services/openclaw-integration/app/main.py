@@ -19,7 +19,7 @@ from app.api import approvals, audit, evaluation_frame, gate, governed_v2, healt
 from app.api import openai_flow
 from app.core.config import settings
 from app.core.auth import require_integration_auth
-from app.db.init_db import init_db
+from app.db.init_db import ensure_db_ready
 from app.logging.logger import configure_logging
 
 logger = logging.getLogger(__name__)
@@ -35,7 +35,7 @@ async def lifespan(app: FastAPI):
     """Run on every cold start (Vercel serverless). Migrations also run on first request if this fails."""
     configure_logging()
     try:
-        await init_db()
+        await ensure_db_ready()
     except Exception as e:
         logger.warning("Startup init_db failed (migrations will run on first request): %s", e)
     # H4: Recover tasks orphaned by gate restart (token consumed, no execution_id)

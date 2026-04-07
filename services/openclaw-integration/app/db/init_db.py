@@ -53,9 +53,9 @@ async def init_db() -> None:
     engine = get_engine()
     url = (settings.get_database_url_normalized() or "").lower()
     is_pg = "postgresql" in url and "asyncpg" in url
+    if is_pg:
+        await run_migration_files(engine, _MIGRATION_FILES)
     async with engine.begin() as conn:
-        if is_pg:
-            await run_migration_files(conn, _MIGRATION_FILES)
         await conn.run_sync(SQLModel.metadata.create_all, checkfirst=True)
 
 

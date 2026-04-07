@@ -133,6 +133,18 @@ class Settings(BaseSettings):
         default=3,
         description="Max AI auto-fix attempts when Vercel build fails.",
     )
+    codegen_local_preflight_enabled: Optional[bool] = Field(
+        default=None,
+        description="Enable local npm install + next build preflight before commit/deploy. Defaults to true in development, false otherwise.",
+    )
+    codegen_strict_import_graph_enabled: Optional[bool] = Field(
+        default=None,
+        description="Enable strict @/ import binding validation and deterministic export repair. Defaults to true in development, false otherwise.",
+    )
+    codegen_local_preflight_timeout_seconds: int = Field(
+        default=300,
+        description="Timeout in seconds for each local preflight command (npm install / npm run build).",
+    )
     governed_v2_enabled: bool = Field(
         default=True,
         description="Enable governed dual-engine v2 lock endpoints and continuity enforcement hooks.",
@@ -185,6 +197,20 @@ class Settings(BaseSettings):
         if explicit is not None:
             return explicit.strip().lower() not in ("0", "false", "no", "off")
         return True
+
+    def enable_codegen_local_preflight(self) -> bool:
+        """Local preflight defaults on in development unless explicitly set."""
+        if self.codegen_local_preflight_enabled is not None:
+            return bool(self.codegen_local_preflight_enabled)
+        env = (self.app_env or "").lower()
+        return env in ("development", "dev", "local")
+
+    def enable_codegen_strict_import_graph(self) -> bool:
+        """Strict import graph validation defaults on in development unless explicitly set."""
+        if self.codegen_strict_import_graph_enabled is not None:
+            return bool(self.codegen_strict_import_graph_enabled)
+        env = (self.app_env or "").lower()
+        return env in ("development", "dev", "local")
 
 
 settings = Settings()
