@@ -371,11 +371,11 @@ class DeterministicWebExecutor:
             task_id, commit_sha,
         )
 
-        # ── Phase 4: Create Vercel Project, Deploy, Poll, Auto-Fix ──
+        # ── Phase 4: Create Vercel Project & Deploy (no polling) ─────
         logger.info("deterministic.executor.phase4_start task_id=%s", task_id)
         fix_attempts = 0
         build_logs = ""
-        vercel_ready_state = ""
+        vercel_ready_state = "DEPLOYING"
         current_files = generated_files
 
         async with httpx.AsyncClient(timeout=VERCEL_TIMEOUT_SECONDS) as vc_client:
@@ -403,61 +403,6 @@ class DeterministicWebExecutor:
                 task_id, deployment.id,
             )
 
-            # ── Poll deployment status ──
-            poll_result = await self._vercel_poll_deployment(vc_client, hosting_team_id, deployment.id)
-            vercel_ready_state = poll_result.get("readyState", "UNKNOWN")
-            steps_completed.append("poll_status")
-
-            # ── Auto-fix loop on ERROR ──
-            api_key = (settings.openai_api_key or "").strip()
-            model = self._resolve_codegen_model()
-            while vercel_ready_state == "ERROR" and fix_attempts < max_fix_retries and api_key:
-                fix_attempts += 1
-                logger.info(
-                    "deterministic.executor.auto_fix_start task_id=%s attempt=%d/%d",
-                    task_id, fix_attempts, max_fix_retries,
-                )
-
-                build_logs = await self._vercel_fetch_build_logs(vc_client, hosting_team_id, deployment.id)
-                logger.info(
-                    "deterministic.executor.auto_fix_logs task_id=%s log_len=%d",
-                    task_id, len(build_logs),
-                )
-                current_files = await self._auto_fix_build_errors(
-                    api_key, model, build_logs, current_files,
-                    template_reference=template_reference,
-                )
-
-                async with httpx.AsyncClient(timeout=GITHUB_TIMEOUT_SECONDS) as gh_fix_client:
-                    github_installation_token = await self._github_installation_token(gh_fix_client)
-                    commit_sha = await self._github_batch_commit(
-                        gh_fix_client,
-                        github_installation_token,
-                        owner=repo.owner,
-                        repo=repo.name,
-                        branch=repo_spec.branch,
-                        files=current_files,
-                        message=f"fix: auto-fix build errors (attempt {fix_attempts})\n\nTask: {task_id}",
-                    )
-
-                deployment = await self._vercel_deploy_files(
-                    vc_client,
-                    team_id=hosting_team_id,
-                    project_name=vercel_project.name,
-                    files=current_files,
-                    target=deploy_target,
-                )
-
-                poll_result = await self._vercel_poll_deployment(vc_client, hosting_team_id, deployment.id)
-                vercel_ready_state = poll_result.get("readyState", "UNKNOWN")
-                logger.info(
-                    "deterministic.executor.auto_fix_result task_id=%s attempt=%d state=%s",
-                    task_id, fix_attempts, vercel_ready_state,
-                )
-
-            if vercel_ready_state == "ERROR":
-                build_logs = await self._vercel_fetch_build_logs(vc_client, hosting_team_id, deployment.id)
-
         logger.info(
             "deterministic.executor.phase4_done task_id=%s deployment_url=%s state=%s fixes=%d",
             task_id, deployment.url, vercel_ready_state, fix_attempts,
@@ -468,15 +413,10 @@ class DeterministicWebExecutor:
             {"path": repo.html_url, "type": "repository", "summary": "GitHub repository created and code committed."},
         ]
         if deployment_url:
-            artifacts.append({"path": deployment_url, "type": "deployment", "summary": "Vercel deployment triggered from committed code."})
+            artifacts.append({"path": deployment_url, "type": "deployment", "summary": "Vercel deployment triggered; build in progress."})
 
-        is_success = vercel_ready_state in ("READY", "")
-        status = "success" if is_success else "needs_review"
-        message = (
-            f"Pipeline completed: {len(current_files)} files generated and deployed."
-            if is_success
-            else f"Build failed after {fix_attempts} auto-fix attempt(s). Check build logs."
-        )
+        status = "success"
+        message = f"Pipeline completed: {len(current_files)} files generated, committed, and deployment triggered."
 
         result: dict[str, Any] = {
             "execution_id": execution_id,
@@ -493,7 +433,7 @@ class DeterministicWebExecutor:
             "vercel_ready_state": vercel_ready_state,
             "fix_attempts": fix_attempts,
             "local_preflight_fix_attempts": local_preflight_fix_attempts,
-            "build_logs": build_logs if not is_success else "",
+            "build_logs": build_logs,
         }
         if deploy_target == "preview":
             result["preview_url"] = deployment_url
@@ -885,9 +825,8 @@ class DeterministicWebExecutor:
 
         component_signatures = self._extract_component_signatures(all_files)
 
-        # ── Calls 2-N: Pages in batches ──────────────────────────────────
-        for batch_start in range(0, len(pages), batch_size):
-            batch = pages[batch_start:batch_start + batch_size]
+        # ── Calls 2-N: Pages in batches (parallel) ─────────────────────
+        async def _build_page_batch(batch_start: int, batch: list) -> list[GeneratedFile]:
             page_prompt = self._build_pages_prompt(
                 goal, project_context_str, batch, component_signatures, design_notes, color_palette, content_strategy,
             )
@@ -897,11 +836,20 @@ class DeterministicWebExecutor:
             )
             if page_content:
                 page_files = self._parse_codegen_response(page_content, [])
-                all_files.extend(page_files)
                 logger.info(
                     "deterministic.executor.codegen.phase2_pages batch=%d-%d files=%d",
                     batch_start, batch_start + len(batch), len(page_files),
                 )
+                return page_files
+            return []
+
+        batch_tasks = [
+            _build_page_batch(i, pages[i:i + batch_size])
+            for i in range(0, len(pages), batch_size)
+        ]
+        batch_results = await asyncio.gather(*batch_tasks)
+        for page_files in batch_results:
+            all_files.extend(page_files)
 
         return all_files
 

@@ -10,7 +10,7 @@
       "config": { "distDir": "frontend/dist" }
     },
     { "src": "services/dude-x/app/main.py", "use": "@vercel/python" },
-    { "src": "services/openclaw-integration/app/main.py", "use": "@vercel/python" }
+    { "src": "services/openclaw-integration/app/main.py", "use": "@vercel/python", "config": { "maxDuration": 300 } }
   ],
   "routes": [
     { "handle": "filesystem" },
