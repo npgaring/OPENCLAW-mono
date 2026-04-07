@@ -46,6 +46,7 @@ from app.models.task import (
     TaskSubmitResponse,
     UatoHints,
 )
+from app.models.task_build_state import TaskBuildState
 from app.models.used_token import UsedExecutionToken
 
 __all__ = [
@@ -76,6 +77,7 @@ __all__ = [
     "StepType",
     "SubstrateAdapterEvent",
     "SubstrateOperation",
+    "TaskBuildState",
     "Task",
     "TaskContinueRequest",
     "TaskOperation",

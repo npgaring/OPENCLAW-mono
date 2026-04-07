@@ -1,4 +1,4 @@
-import type { JsonMap, ExecutionPlanLockResult, TaskSubmitResult } from '../types/governed';
+import type { JsonMap, ExecutionPlanLockResult, TaskSubmitResult, BuildPhaseResult } from '../types/governed';
 import { request } from './api';
 
 export function lockExecutionPlan(
@@ -15,4 +15,12 @@ export function submitTask(
   payload: JsonMap,
 ): Promise<TaskSubmitResult> {
   return request<TaskSubmitResult>(base, '/task', 'POST', token, payload);
+}
+
+export function advanceBuildPhase(
+  base: string,
+  token: string,
+  taskId: string,
+): Promise<BuildPhaseResult> {
+  return request<BuildPhaseResult>(base, `/task/${taskId}/build-phase`, 'POST', token, {});
 }

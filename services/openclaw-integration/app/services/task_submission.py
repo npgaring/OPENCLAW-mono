@@ -1501,6 +1501,25 @@ async def run_task_submission(
             result = dict(result)
             result["status"] = "needs_review"
             result["reason_codes"] = evidence_reason_codes
+
+    # Persist phased build state when the deterministic executor returns partial
+    if deterministic_mode and isinstance(result, dict) and result.get("build_phase") == "architect_done":
+        from app.models.task_build_state import TaskBuildState
+        build_state_data = result.pop("_build_state", {})
+        if build_state_data:
+            build_state_config = build_state_data.get("config", {})
+            build_state_config["context"] = build_state_data.get("context", {})
+            build_state = TaskBuildState(
+                task_id=str(task.task_id),
+                phase="architect_done",
+                blueprint_json=build_state_data.get("blueprint"),
+                repo_info_json=build_state_data.get("repo_info"),
+                template_reference_json=build_state_data.get("template_reference"),
+                generated_files_json=None,
+                config_json=build_state_config,
+            )
+            session.add(build_state)
+
     task.execution_id = result.get("execution_id")
     s = result.get("status")
     if s == "success":

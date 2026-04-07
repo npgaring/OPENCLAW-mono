@@ -215,6 +215,30 @@ class DeterministicWebExecutor:
         self.timeout_seconds = timeout_seconds
 
     # ------------------------------------------------------------------
+    # Build-state serialization helpers
+    # ------------------------------------------------------------------
+    @staticmethod
+    def deserialize_template_reference(data: Optional[dict[str, Any]]) -> TemplateReference:
+        if not data:
+            return TemplateReference()
+        return TemplateReference(
+            source_repo=data.get("source_repo", ""),
+            source_branch=data.get("source_branch", ""),
+            package_json=data.get("package_json", {}),
+            key_files=data.get("key_files", {}),
+        )
+
+    @staticmethod
+    def deserialize_files(data: Optional[list[dict[str, str]]]) -> list[GeneratedFile]:
+        if not data:
+            return []
+        return [GeneratedFile(path=d["path"], content=d["content"]) for d in data]
+
+    @staticmethod
+    def serialize_files(files: list[GeneratedFile]) -> list[dict[str, str]]:
+        return [{"path": f.path, "content": f.content} for f in files]
+
+    # ------------------------------------------------------------------
     # Main entry point
     # ------------------------------------------------------------------
     async def execute(
@@ -272,14 +296,235 @@ class DeterministicWebExecutor:
             task_id, repo.html_url,
         )
 
-        # ── Phase 2: Generate Code via OpenAI ─────────────────────────
-        logger.info("deterministic.executor.phase2_start task_id=%s", task_id)
-        generated_files = await self._generate_code_via_openai(
-            plan,
-            operations,
-            trace_id=trace_id,
+        # ── Phase 2a: Architect blueprint ─────────────────────────────
+        api_key = (settings.openai_api_key or "").strip()
+        context = self._build_project_context(plan, operations)
+        model = self._resolve_codegen_model()
+
+        logger.info("deterministic.executor.codegen.phase1_architect_start model=%s", model)
+        if api_key:
+            blueprint = await self._phase1_architect(
+                api_key, model, context, plan, operations,
+                template_reference=template_reference,
+            )
+        else:
+            blueprint = self._default_blueprint(context, operations)
+        logger.info(
+            "deterministic.executor.codegen.phase1_architect_done pages=%d components=%d",
+            len(blueprint.get("pages", [])), len(blueprint.get("shared_components", [])),
+        )
+        steps_completed.append("architect")
+
+        build_state = {
+            "blueprint": blueprint,
+            "context": context,
+            "repo_info": {
+                "owner": repo.owner,
+                "name": repo.name,
+                "html_url": repo.html_url,
+                "default_branch": repo.default_branch,
+                "branch": repo_spec.branch,
+            },
+            "template_reference": {
+                "source_repo": template_reference.source_repo,
+                "source_branch": template_reference.source_branch,
+                "package_json": template_reference.package_json,
+                "key_files": template_reference.key_files,
+            },
+            "config": {
+                "task_id": task_id,
+                "trace_id": trace_id,
+                "deployment_target": deploy_target,
+                "hosting_team_id": hosting_team_id,
+                "project_name": project_name,
+                "deploy_branch": deploy_branch,
+                "execution_id": execution_id,
+                "plan_json": plan,
+            },
+        }
+
+        return {
+            "execution_id": execution_id,
+            "status": "partial",
+            "build_phase": "architect_done",
+            "message": "Phase 1 complete: repository provisioned and blueprint generated.",
+            "artifacts": [{"path": repo.html_url, "type": "repository", "summary": "GitHub repository created."}],
+            "steps_completed": steps_completed,
+            "repository_url": repo.html_url,
+            "files_generated": 0,
+            "_build_state": build_state,
+        }
+
+    # ------------------------------------------------------------------
+    # Phased execution: Foundation
+    # ------------------------------------------------------------------
+    async def execute_foundation(
+        self,
+        *,
+        blueprint: dict[str, Any],
+        context: dict[str, Any],
+        template_reference: TemplateReference,
+        task_id: str,
+    ) -> list[GeneratedFile]:
+        """Phase 2: Generate foundation files (configs, layout, shared components)."""
+        api_key = (settings.openai_api_key or "").strip()
+        model = self._resolve_codegen_model()
+
+        if not api_key:
+            return []
+
+        pages = blueprint.get("pages") or []
+        shared_components = blueprint.get("shared_components") or []
+        design_notes = blueprint.get("design_notes", "")
+        color_palette = blueprint.get("color_palette", {})
+        content_strategy = blueprint.get("content_strategy", "")
+        goal = context.get("goal", "Professional website")
+        project_context_str = context.get("context", "")
+
+        max_tokens = getattr(settings, "codegen_phase2_max_tokens", 16000)
+        all_files: list[GeneratedFile] = []
+
+        # Split foundation into focused sub-calls for better quality
+        # Call 1: Config + Layout + NavBar + Footer
+        config_layout_prompt = self._build_config_layout_prompt(
+            goal, project_context_str, pages, design_notes, color_palette, content_strategy,
             template_reference=template_reference,
         )
+        logger.info("deterministic.executor.codegen.foundation_config_start task_id=%s", task_id)
+        config_content = await self._openai_chat(
+            api_key, model, self._BUILDER_SYSTEM_PROMPT, config_layout_prompt,
+            temperature=0.3, max_tokens=max_tokens,
+        )
+        if config_content:
+            config_files = self._parse_codegen_response(config_content, [])
+            all_files.extend(config_files)
+            logger.info("deterministic.executor.codegen.foundation_config_done files=%d", len(config_files))
+
+        # Call 2+: Shared components in batches of 5
+        component_batch_size = 5
+        component_names = [c for c in shared_components if c not in ("NavBar", "Footer")]
+        for batch_start in range(0, len(component_names), component_batch_size):
+            batch = component_names[batch_start:batch_start + component_batch_size]
+            comp_prompt = self._build_components_prompt(
+                goal, project_context_str, batch, design_notes, color_palette, content_strategy,
+            )
+            logger.info(
+                "deterministic.executor.codegen.foundation_components_start task_id=%s batch=%d-%d",
+                task_id, batch_start, batch_start + len(batch),
+            )
+            comp_content = await self._openai_chat(
+                api_key, model, self._BUILDER_SYSTEM_PROMPT, comp_prompt,
+                temperature=0.3, max_tokens=max_tokens,
+            )
+            if comp_content:
+                comp_files = self._parse_codegen_response(comp_content, [])
+                all_files.extend(comp_files)
+                logger.info(
+                    "deterministic.executor.codegen.foundation_components_done batch=%d-%d files=%d",
+                    batch_start, batch_start + len(batch), len(comp_files),
+                )
+
+        logger.info("deterministic.executor.codegen.foundation_done task_id=%s total_files=%d", task_id, len(all_files))
+        return all_files
+
+    # ------------------------------------------------------------------
+    # Phased execution: Pages
+    # ------------------------------------------------------------------
+    async def execute_pages(
+        self,
+        *,
+        blueprint: dict[str, Any],
+        context: dict[str, Any],
+        foundation_files: list[GeneratedFile],
+        task_id: str,
+    ) -> list[GeneratedFile]:
+        """Phase 3: Generate page files in parallel batches."""
+        api_key = (settings.openai_api_key or "").strip()
+        model = self._resolve_codegen_model()
+
+        if not api_key:
+            return foundation_files
+
+        pages = blueprint.get("pages") or []
+        design_notes = blueprint.get("design_notes", "")
+        color_palette = blueprint.get("color_palette", {})
+        content_strategy = blueprint.get("content_strategy", "")
+        goal = context.get("goal", "Professional website")
+        project_context_str = context.get("context", "")
+
+        max_tokens = getattr(settings, "codegen_phase2_max_tokens", 16000)
+        batch_size = getattr(settings, "codegen_phase2_batch_size", 3)
+
+        component_signatures = self._extract_component_signatures(foundation_files)
+        page_files: list[GeneratedFile] = []
+
+        async def _build_page_batch(batch_start: int, batch: list) -> list[GeneratedFile]:
+            page_prompt = self._build_pages_prompt(
+                goal, project_context_str, batch, component_signatures,
+                design_notes, color_palette, content_strategy,
+            )
+            page_content = await self._openai_chat(
+                api_key, model, self._BUILDER_SYSTEM_PROMPT, page_prompt,
+                temperature=0.3, max_tokens=max_tokens,
+            )
+            if page_content:
+                pf = self._parse_codegen_response(page_content, [])
+                logger.info(
+                    "deterministic.executor.codegen.phase_pages batch=%d-%d files=%d",
+                    batch_start, batch_start + len(batch), len(pf),
+                )
+                return pf
+            return []
+
+        batch_tasks = [
+            _build_page_batch(i, pages[i:i + batch_size])
+            for i in range(0, len(pages), batch_size)
+        ]
+        batch_results = await asyncio.gather(*batch_tasks)
+        for pf in batch_results:
+            page_files.extend(pf)
+
+        all_files = foundation_files + page_files
+        logger.info("deterministic.executor.codegen.pages_done task_id=%s total_files=%d", task_id, len(all_files))
+        return all_files
+
+    # ------------------------------------------------------------------
+    # Phased execution: Finalize (inspect, commit, deploy)
+    # ------------------------------------------------------------------
+    async def execute_finalize(
+        self,
+        *,
+        all_files: list[GeneratedFile],
+        blueprint: dict[str, Any],
+        template_reference: TemplateReference,
+        plan: dict[str, Any],
+        operations: list[dict[str, Any]],
+        repo_info: dict[str, Any],
+        task_id: str,
+        trace_id: Optional[str],
+        deployment_target: str,
+        hosting_team_id: str,
+        project_name: str,
+        deploy_branch: str,
+    ) -> dict[str, Any]:
+        """Phase 4: Inspector, scaffold integrity, GitHub commit, Vercel deploy."""
+        execution_id = f"detexec_{task_id}"
+        steps_completed: list[str] = ["provision_repo", "architect", "generate_foundation", "generate_pages"]
+
+        owner = repo_info["owner"]
+        repo_name = repo_info["name"]
+        html_url = repo_info["html_url"]
+        branch = repo_info.get("branch", "main")
+
+        # Inspector + scaffold integrity
+        logger.info("deterministic.executor.codegen.phase3_inspector_start task_id=%s", task_id)
+        if not all_files:
+            all_files = self._extract_files_from_operations(operations)
+        validated_files = self._phase3_inspect(all_files, blueprint, template_reference=template_reference)
+        logger.info("deterministic.executor.codegen.phase3_inspector_done task_id=%s files=%d", task_id, len(validated_files))
+        steps_completed.append("generate_code")
+
+        # Local preflight (if enabled)
         api_key = (settings.openai_api_key or "").strip()
         model = self._resolve_codegen_model()
         max_fix_retries = getattr(settings, "codegen_max_fix_retries", 2)
@@ -288,30 +533,23 @@ class DeterministicWebExecutor:
 
         if settings.enable_codegen_local_preflight():
             while True:
-                preflight = await self._run_local_preflight(generated_files)
+                preflight = await self._run_local_preflight(validated_files)
                 preflight_logs = preflight.logs
                 if preflight.success:
                     steps_completed.append("local_preflight")
                     break
                 if local_preflight_fix_attempts >= max_fix_retries or not api_key:
-                    artifacts = [
-                        {
-                            "path": repo.html_url,
-                            "type": "repository",
-                            "summary": "GitHub repository created; local preflight failed before commit/deploy.",
-                        },
-                    ]
                     return {
                         "execution_id": execution_id,
                         "status": "needs_review",
                         "message": f"Local preflight build failed after {local_preflight_fix_attempts} auto-fix attempt(s).",
-                        "artifacts": artifacts,
+                        "artifacts": [{"path": html_url, "type": "repository", "summary": "GitHub repository created; local preflight failed."}],
                         "steps_completed": steps_completed,
-                        "repository_url": repo.html_url,
+                        "repository_url": html_url,
                         "repo_commit_sha": None,
                         "deployment_id": None,
                         "deployment_url": None,
-                        "files_generated": len(generated_files),
+                        "files_generated": len(validated_files),
                         "provider_ids": {},
                         "vercel_ready_state": "SKIPPED_LOCAL_PREFLIGHT_FAILED",
                         "fix_attempts": 0,
@@ -319,72 +557,34 @@ class DeterministicWebExecutor:
                         "build_logs": preflight_logs,
                     }
                 local_preflight_fix_attempts += 1
-                logger.info(
-                    "deterministic.executor.local_preflight_fix_start task_id=%s attempt=%d/%d",
-                    task_id, local_preflight_fix_attempts, max_fix_retries,
-                )
-                generated_files = await self._auto_fix_build_errors(
-                    api_key,
-                    model,
-                    preflight_logs,
-                    generated_files,
+                validated_files = await self._auto_fix_build_errors(
+                    api_key, model, preflight_logs, validated_files,
                     template_reference=template_reference,
                 )
 
-        steps_completed.append("generate_code")
-        tsconfig_content = next((gf.content[:300] for gf in generated_files if gf.path == "tsconfig.json"), "MISSING")
-        postcss_content = next((gf.content[:200] for gf in generated_files if gf.path == "postcss.config.mjs"), "MISSING")
-        logger.info(
-            "deterministic.executor.phase2_debug task_id=%s file_count=%d has_at_alias=%s",
-            task_id,
-            len(generated_files),
-            "@/*" in tsconfig_content,
-        )
-        logger.debug(
-            "deterministic.executor.phase2_files task_id=%s paths=%s tsconfig_snippet=%s postcss_snippet=%s",
-            task_id,
-            [gf.path for gf in generated_files],
-            tsconfig_content,
-            postcss_content,
-        )
-        logger.info(
-            "deterministic.executor.phase2_done task_id=%s files_generated=%d",
-            task_id, len(generated_files),
-        )
-
-        # ── Phase 3: Batch Commit Files to GitHub ─────────────────────
+        # Batch commit to GitHub
         logger.info("deterministic.executor.phase3_start task_id=%s", task_id)
         async with httpx.AsyncClient(timeout=GITHUB_TIMEOUT_SECONDS) as gh_client:
             github_installation_token = await self._github_installation_token(gh_client)
             commit_sha = await self._github_batch_commit(
-                gh_client,
-                github_installation_token,
-                owner=repo.owner,
-                repo=repo.name,
-                branch=repo_spec.branch,
-                files=generated_files,
+                gh_client, github_installation_token,
+                owner=owner, repo=repo_name, branch=branch,
+                files=validated_files,
                 message=f"feat: initial site generation via deterministic_web_v1\n\nTask: {task_id}\nTrace: {trace_id or 'N/A'}",
             )
         steps_completed.append("write_files")
-        logger.info(
-            "deterministic.executor.phase3_done task_id=%s commit_sha=%s",
-            task_id, commit_sha,
-        )
+        logger.info("deterministic.executor.phase3_done task_id=%s commit_sha=%s", task_id, commit_sha)
 
-        # ── Phase 4: Create Vercel Project & Deploy (no polling) ─────
+        # Vercel deploy
         logger.info("deterministic.executor.phase4_start task_id=%s", task_id)
-        fix_attempts = 0
-        build_logs = ""
-        vercel_ready_state = "DEPLOYING"
-        current_files = generated_files
-
+        deploy_target = "production" if (deployment_target or "").lower() == "production" else "preview"
         async with httpx.AsyncClient(timeout=VERCEL_TIMEOUT_SECONDS) as vc_client:
             vercel_project = await self._vercel_create_or_resolve_project(
                 vc_client,
                 team_id=hosting_team_id,
                 project_name=project_name,
-                github_owner=repo.owner,
-                github_repo=repo.name,
+                github_owner=owner,
+                github_repo=repo_name,
                 production_branch=deploy_branch,
             )
             steps_completed.append("provision_hosting")
@@ -393,47 +593,38 @@ class DeterministicWebExecutor:
                 vc_client,
                 team_id=hosting_team_id,
                 project_name=vercel_project.name,
-                files=current_files,
+                files=validated_files,
                 target=deploy_target,
             )
             steps_completed.append("deploy")
-
-            logger.info(
-                "deterministic.executor.phase4_deployed task_id=%s deployment_id=%s",
-                task_id, deployment.id,
-            )
-
-        logger.info(
-            "deterministic.executor.phase4_done task_id=%s deployment_url=%s state=%s fixes=%d",
-            task_id, deployment.url, vercel_ready_state, fix_attempts,
-        )
+            logger.info("deterministic.executor.phase4_deployed task_id=%s deployment_id=%s", task_id, deployment.id)
 
         deployment_url = self._normalize_deployment_url(deployment.url)
+        logger.info("deterministic.executor.phase4_done task_id=%s deployment_url=%s", task_id, deployment_url)
+
         artifacts = [
-            {"path": repo.html_url, "type": "repository", "summary": "GitHub repository created and code committed."},
+            {"path": html_url, "type": "repository", "summary": "GitHub repository created and code committed."},
         ]
         if deployment_url:
             artifacts.append({"path": deployment_url, "type": "deployment", "summary": "Vercel deployment triggered; build in progress."})
 
-        status = "success"
-        message = f"Pipeline completed: {len(current_files)} files generated, committed, and deployment triggered."
-
         result: dict[str, Any] = {
             "execution_id": execution_id,
-            "status": status,
-            "message": message,
+            "status": "success",
+            "build_phase": "complete",
+            "message": f"Pipeline completed: {len(validated_files)} files generated, committed, and deployment triggered.",
             "artifacts": artifacts,
             "steps_completed": steps_completed,
-            "repository_url": repo.html_url,
+            "repository_url": html_url,
             "repo_commit_sha": commit_sha,
             "deployment_id": deployment.id,
             "deployment_url": deployment_url,
-            "files_generated": len(current_files),
+            "files_generated": len(validated_files),
             "provider_ids": {"vercel_project_id": vercel_project.id},
-            "vercel_ready_state": vercel_ready_state,
-            "fix_attempts": fix_attempts,
+            "vercel_ready_state": "DEPLOYING",
+            "fix_attempts": 0,
             "local_preflight_fix_attempts": local_preflight_fix_attempts,
-            "build_logs": build_logs,
+            "build_logs": preflight_logs,
         }
         if deploy_target == "preview":
             result["preview_url"] = deployment_url
@@ -996,6 +1187,94 @@ class DeterministicWebExecutor:
 
         return "\n".join(parts)
 
+    def _build_config_layout_prompt(
+        self,
+        goal: str,
+        project_context: str,
+        pages: list[dict[str, Any]],
+        design_notes: str,
+        color_palette: dict[str, str],
+        content_strategy: str,
+        *,
+        template_reference: Optional[TemplateReference] = None,
+    ) -> str:
+        """Prompt for config files + layout + NavBar + Footer (focused call)."""
+        nav_links = [p.get("title", p.get("slug", "")) for p in pages]
+        primary = color_palette.get("primary", "#2563eb")
+        secondary = color_palette.get("secondary", "#7c3aed")
+        accent = color_palette.get("accent", "#f59e0b")
+
+        parts: list[str] = [
+            f"Generate the CORE STRUCTURE files for a website: {goal}\n",
+            f"Context: {project_context}" if project_context else "",
+            f"Design Direction: {design_notes}" if design_notes else "",
+            f"Content Strategy: {content_strategy}" if content_strategy else "",
+            f"Colors: primary={primary}, secondary={secondary}, accent={accent}\n",
+            f"Navigation Links: {json.dumps(nav_links)}\n",
+            "\nGenerate EXACTLY these files:\n",
+            "1. package.json — full deps: next, react, react-dom, tailwindcss, @tailwindcss/postcss, clsx, tailwind-merge, class-variance-authority, lucide-react, framer-motion, typescript, @types/react, @types/node, eslint, eslint-config-next",
+            "2. tsconfig.json — with @/* path alias to ./src/*, next plugin, strict mode",
+            '3. postcss.config.mjs — export default { plugins: { "@tailwindcss/postcss": {} } }',
+            "4. next.config.ts — minimal NextConfig = {}",
+            f'5. src/app/globals.css — @import "tailwindcss" + CSS variables for primary={primary}, secondary={secondary}, accent={accent}',
+            f"6. src/app/layout.tsx — RootLayout importing NavBar + Footer from @/components, metadata with title related to '{goal}'",
+            f"7. src/components/NavBar.tsx — Sticky navigation: logo/brand text, links for {json.dumps(nav_links)}, mobile hamburger menu with useState, backdrop blur. Use 'use client'. Rich implementation with transitions.",
+            f"8. src/components/Footer.tsx — Multi-column: brand + tagline, page links, social placeholders, newsletter signup form, copyright year.",
+        ]
+        if template_reference and template_reference.source_repo:
+            parts.append(f"\nTemplate Reference: {template_reference.source_repo}")
+        parts.append("\nCRITICAL: Every component must use NAMED exports. Write thorough, production-quality code with real content.")
+        parts.append("Each component should be FULLY implemented — no skeleton/placeholder implementations.")
+        return "\n".join(p for p in parts if p)
+
+    def _build_components_prompt(
+        self,
+        goal: str,
+        project_context: str,
+        component_names: list[str],
+        design_notes: str,
+        color_palette: dict[str, str],
+        content_strategy: str,
+    ) -> str:
+        """Prompt for a batch of shared components (focused call)."""
+        primary = color_palette.get("primary", "#2563eb")
+        secondary = color_palette.get("secondary", "#7c3aed")
+        accent = color_palette.get("accent", "#f59e0b")
+
+        parts: list[str] = [
+            f"Generate SHARED COMPONENTS for a website: {goal}\n",
+            f"Context: {project_context}" if project_context else "",
+            f"Design Direction: {design_notes}" if design_notes else "",
+            f"Colors: primary={primary}, secondary={secondary}, accent={accent}\n",
+            f"\nGenerate these {len(component_names)} component files:\n",
+        ]
+
+        for i, comp in enumerate(component_names, 1):
+            slug_lower = comp.lower()
+            if "hero" in slug_lower:
+                parts.append(f"{i}. src/components/{comp}.tsx — Reusable hero section: title, subtitle, CTA button props. Gradient background primary→secondary. Full-width, min-h-[500px].")
+            elif "cta" in slug_lower:
+                parts.append(f"{i}. src/components/{comp}.tsx — Call-to-action banner: headline, description, button. Accent color bg. Centered layout with padding.")
+            elif "feature" in slug_lower or "card" in slug_lower:
+                parts.append(f"{i}. src/components/{comp}.tsx — Card component: icon/number prop, title, description. Hover shadow, rounded corners, border.")
+            elif "testimonial" in slug_lower:
+                parts.append(f"{i}. src/components/{comp}.tsx — Testimonial card: quote text, author name, role, avatar placeholder. Star rating optional.")
+            elif "pricing" in slug_lower:
+                parts.append(f"{i}. src/components/{comp}.tsx — Pricing tier card: plan name, price, features list, CTA button. Highlighted/popular tier option.")
+            elif "team" in slug_lower:
+                parts.append(f"{i}. src/components/{comp}.tsx — Team member card: photo placeholder, name, role, bio. Hover effect with social links.")
+            elif "form" in slug_lower or "contact" in slug_lower:
+                parts.append(f"{i}. src/components/{comp}.tsx — Form component with labeled inputs, validation states, submit button. 'use client' for useState.")
+            elif "faq" in slug_lower or "accordion" in slug_lower:
+                parts.append(f"{i}. src/components/{comp}.tsx — Expandable FAQ/accordion: question, answer toggle. 'use client' for state. Smooth transition.")
+            else:
+                parts.append(f"{i}. src/components/{comp}.tsx — Reusable {comp} component with well-typed props and Tailwind styling.")
+
+        parts.append("\nCRITICAL: Every component must use NAMED exports. Write thorough implementations with real content, not placeholders.")
+        parts.append("Use Tailwind CSS for all styling. Make responsive. Add hover/transition effects.")
+        parts.append(f"Content Strategy: {content_strategy}" if content_strategy else "")
+        return "\n".join(p for p in parts if p)
+
     @staticmethod
     def _extract_component_signatures(files: list[GeneratedFile]) -> dict[str, str]:
         """Extract component names and their prop signatures from generated files."""
@@ -1453,6 +1732,13 @@ class DeterministicWebExecutor:
 
         # ── Final enforcement: remove any unapproved deps from package.json
         self._enforce_package_allowlist(deps, dev, template_reference=template_reference)
+
+        # ── Deduplicate: dev-only packages must not appear in dependencies ─
+        for k in REQUIRED_DEV_DEPS:
+            deps.pop(k, None)
+        for k in list(deps.keys()):
+            if k.startswith("@types/") and k in dev:
+                del deps[k]
 
         file_map[pkg_path] = GeneratedFile(path=pkg_path, content=json.dumps(pkg, indent=2) + "\n")
 

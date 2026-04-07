@@ -247,23 +247,53 @@ export function useGovernedFlow() {
       execution_plan_v2: executionPlan,
     };
 
-    addLog('Pipeline starting: creating repository, generating code, deploying...');
+    addLog('Pipeline starting: provisioning repository and generating blueprint...');
     const data = await integration.submitTask(integrationBase, apiToken, payload);
     setTaskResult(data);
 
+    const taskId = data.task_id;
     const execResponse = data.execution_response ?? {};
-    const stepsCompleted = (execResponse.steps_completed as string[]) ?? [];
-    const filesGenerated = (execResponse.files_generated as number) ?? 0;
+    const buildPhase = (execResponse.build_phase as string | undefined) ?? data.build_phase;
 
-    if (stepsCompleted.includes('provision_repo')) addLog('Phase 1 complete: GitHub repository created.');
-    if (stepsCompleted.includes('generate_code')) addLog(`Phase 2 complete: ${filesGenerated} files generated via AI.`);
-    if (stepsCompleted.includes('write_files')) addLog('Phase 3 complete: code committed to GitHub.');
-    if (stepsCompleted.includes('deploy')) addLog('Phase 4 complete: Vercel deployment triggered.');
+    if (data.repository_url) addLog(`Repository created: ${data.repository_url}`);
+    addLog(`Task submitted. status=${data.status ?? 'n/a'} build_phase=${buildPhase ?? 'n/a'}`);
 
-    addLog(`Task submitted. status=${data.status ?? 'n/a'} execution_id=${data.execution_id ?? 'n/a'}`);
-    if (data.deployment_url) addLog(`Deployment URL: ${data.deployment_url}`);
-    if (data.repository_url) addLog(`Repository URL: ${data.repository_url}`);
-    if (data.deployment_url) {
+    const PHASE_LABELS: Record<string, string> = {
+      architect_done: 'Blueprint generated. Generating foundation files (configs, layout, components)...',
+      foundation_done: 'Foundation generated. Generating page files...',
+      pages_done: 'Pages generated. Running inspector, committing, and deploying...',
+      complete: 'Build complete!',
+    };
+
+    if (taskId && buildPhase && buildPhase !== 'complete' && buildPhase !== 'error') {
+      let currentPhase = buildPhase;
+      while (currentPhase && currentPhase !== 'complete' && currentPhase !== 'error') {
+        const label = PHASE_LABELS[currentPhase] ?? `Advancing phase: ${currentPhase}...`;
+        addLog(label);
+        const phaseResult = await integration.advanceBuildPhase(integrationBase, apiToken, taskId);
+        currentPhase = phaseResult.build_phase;
+
+        if (phaseResult.files_generated) {
+          addLog(`Files generated so far: ${phaseResult.files_generated}`);
+        }
+        if (currentPhase === 'complete') {
+          setTaskResult({
+            ...data,
+            status: phaseResult.status,
+            deployment_url: phaseResult.deployment_url ?? data.deployment_url,
+            repository_url: phaseResult.repository_url ?? data.repository_url,
+            execution_response: phaseResult.execution_response ?? data.execution_response,
+          });
+          addLog(phaseResult.message ?? 'Build complete!');
+          if (phaseResult.deployment_url) addLog(`Deployment URL: ${phaseResult.deployment_url}`);
+        } else if (currentPhase === 'error') {
+          addLog(`Build error: ${phaseResult.message ?? 'Unknown error'}`);
+        }
+      }
+    }
+
+    const finalResult = taskResult ?? data;
+    if (finalResult?.deployment_url) {
       setActiveTab('preview');
     }
   }

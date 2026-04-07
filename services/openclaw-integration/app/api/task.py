@@ -1,9 +1,11 @@
-"""POST /task — submit task, gate, token, executor call; POST /task/{id}/continue — follow-up."""
+"""POST /task — submit task, gate, token, executor call; POST /task/{id}/continue — follow-up; POST /task/{id}/build-phase — advance build."""
 import logging
+from datetime import datetime, timezone
 from typing import Any, Optional
 
 import httpx
 from fastapi import APIRouter, Body, Depends, HTTPException
+from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm.attributes import flag_modified
 
@@ -11,7 +13,9 @@ from app.core.config import settings
 from app.core.errors import ErrorCodes
 from app.core.trace_id import normalize_trace_id
 from app.db.session import get_session
-from app.models import Task, TaskContinueRequest, TaskStatus, TaskSubmitRequest, TaskSubmitResponse
+from app.models import Task, TaskBuildState, TaskContinueRequest, TaskStatus, TaskSubmitRequest, TaskSubmitResponse
+from app.models.deployment import DeploymentRecord
+from app.services.deterministic_executor import DeterministicWebExecutor, DeterministicExecutionError
 from app.services.execution_client import OpenClawClient, OpenClawError
 from app.services.task_submission import _task_submit_response, run_task_submission
 
@@ -141,6 +145,223 @@ async def continue_task(
         gate_outcome="PASS",
         reason_codes=[],
     )
+
+
+class BuildPhaseResponse(BaseModel):
+    task_id: str
+    build_phase: str
+    status: str
+    files_generated: int = 0
+    message: str = ""
+    deployment_url: Optional[str] = None
+    repository_url: Optional[str] = None
+    execution_response: Optional[dict[str, Any]] = None
+
+
+PHASE_TRANSITIONS = {
+    "architect_done": "foundation_done",
+    "foundation_done": "pages_done",
+    "pages_done": "complete",
+}
+
+
+@router.post("/task/{task_id}/build-phase", response_model=BuildPhaseResponse)
+async def advance_build_phase(
+    task_id: str,
+    session: AsyncSession = Depends(get_session),
+):
+    """Advance the deterministic build pipeline by one phase.
+
+    Each call runs the next phase of code generation, giving each phase
+    the full Vercel function timeout budget.
+    """
+    task = await session.get(Task, task_id)
+    if not task:
+        raise HTTPException(status_code=404, detail="Task not found")
+
+    build_state = await session.get(TaskBuildState, task_id)
+    if not build_state:
+        raise HTTPException(
+            status_code=422,
+            detail={"code": "NO_BUILD_STATE", "message": "No build state found. Submit the task first via POST /task."},
+        )
+
+    current_phase = build_state.phase
+    if current_phase == "complete":
+        raise HTTPException(
+            status_code=422,
+            detail={"code": "BUILD_COMPLETE", "message": "Build is already complete."},
+        )
+    if current_phase == "error":
+        raise HTTPException(
+            status_code=422,
+            detail={"code": "BUILD_FAILED", "message": "Build failed. Submit a new task."},
+        )
+    if current_phase not in PHASE_TRANSITIONS:
+        raise HTTPException(
+            status_code=422,
+            detail={"code": "INVALID_PHASE", "message": f"Cannot advance from phase '{current_phase}'."},
+        )
+
+    executor = DeterministicWebExecutor()
+    config = build_state.config_json or {}
+    blueprint = build_state.blueprint_json or {}
+    context = config.get("context", {})
+    template_ref = executor.deserialize_template_reference(build_state.template_reference_json)
+    repo_info = build_state.repo_info_json or {}
+
+    try:
+        if current_phase == "architect_done":
+            context_data = blueprint.pop("_context", None) or config.get("context", {})
+            if not context_data and build_state.config_json:
+                plan_json = config.get("plan_json", {})
+                operations = plan_json.get("operations", [])
+                context_data = executor._build_project_context(plan_json, operations)
+
+            files = await executor.execute_foundation(
+                blueprint=blueprint,
+                context=context_data,
+                template_reference=template_ref,
+                task_id=task_id,
+            )
+
+            build_state.generated_files_json = executor.serialize_files(files)
+            build_state.phase = "foundation_done"
+            build_state.updated_at = datetime.now(timezone.utc)
+            await session.commit()
+
+            return BuildPhaseResponse(
+                task_id=task_id,
+                build_phase="foundation_done",
+                status="partial",
+                files_generated=len(files),
+                message=f"Foundation generated: {len(files)} files (configs, layout, components).",
+                repository_url=repo_info.get("html_url"),
+            )
+
+        elif current_phase == "foundation_done":
+            foundation_files = executor.deserialize_files(build_state.generated_files_json)
+            context_data = config.get("context", {})
+            if not context_data:
+                plan_json = config.get("plan_json", {})
+                operations = plan_json.get("operations", [])
+                context_data = executor._build_project_context(plan_json, operations)
+
+            all_files = await executor.execute_pages(
+                blueprint=blueprint,
+                context=context_data,
+                foundation_files=foundation_files,
+                task_id=task_id,
+            )
+
+            build_state.generated_files_json = executor.serialize_files(all_files)
+            build_state.phase = "pages_done"
+            build_state.updated_at = datetime.now(timezone.utc)
+            await session.commit()
+
+            return BuildPhaseResponse(
+                task_id=task_id,
+                build_phase="pages_done",
+                status="partial",
+                files_generated=len(all_files),
+                message=f"Pages generated: {len(all_files)} total files.",
+                repository_url=repo_info.get("html_url"),
+            )
+
+        elif current_phase == "pages_done":
+            all_files = executor.deserialize_files(build_state.generated_files_json)
+            plan_json = config.get("plan_json", {})
+            operations = plan_json.get("operations", [])
+
+            result = await executor.execute_finalize(
+                all_files=all_files,
+                blueprint=blueprint,
+                template_reference=template_ref,
+                plan=plan_json,
+                operations=operations,
+                repo_info=repo_info,
+                task_id=task_id,
+                trace_id=config.get("trace_id"),
+                deployment_target=config.get("deployment_target", "preview"),
+                hosting_team_id=config.get("hosting_team_id", ""),
+                project_name=config.get("project_name", ""),
+                deploy_branch=config.get("deploy_branch", "main"),
+            )
+
+            build_state.phase = "complete"
+            build_state.updated_at = datetime.now(timezone.utc)
+
+            task.status = TaskStatus.completed if result.get("status") == "success" else TaskStatus.needs_review
+            task.execution_id = result.get("execution_id")
+            task.audit_history = (task.audit_history or []) + [
+                {"event_type": "execution_response", "payload": result},
+            ]
+            flag_modified(task, "audit_history")
+
+            if result.get("status") == "success":
+                try:
+                    from app.services.deployment_tracker import record_deployment
+                    await record_deployment(
+                        session,
+                        result=result,
+                        task_id=task_id,
+                        trace_id=config.get("trace_id"),
+                        build_sot_hash=plan_json.get("build_sot_hash"),
+                        execution_plan_hash=plan_json.get("execution_plan_hash"),
+                        project_name=config.get("project_name"),
+                    )
+                except Exception:
+                    logger.exception("build-phase.record_deployment_failed task_id=%s", task_id)
+
+            await session.commit()
+
+            return BuildPhaseResponse(
+                task_id=task_id,
+                build_phase="complete",
+                status=result.get("status", "success"),
+                files_generated=result.get("files_generated", 0),
+                message=result.get("message", "Build complete."),
+                deployment_url=result.get("deployment_url"),
+                repository_url=result.get("repository_url"),
+                execution_response=result,
+            )
+
+    except DeterministicExecutionError as e:
+        build_state.phase = "error"
+        build_state.updated_at = datetime.now(timezone.utc)
+        task.status = TaskStatus.needs_review
+        error_response = e.as_execution_response(execution_id=f"detexec_{task_id}")
+        task.audit_history = (task.audit_history or []) + [
+            {"event_type": "execution_response", "payload": error_response},
+        ]
+        flag_modified(task, "audit_history")
+        await session.commit()
+
+        return BuildPhaseResponse(
+            task_id=task_id,
+            build_phase="error",
+            status="needs_review",
+            message=str(e),
+            repository_url=repo_info.get("html_url"),
+        )
+    except Exception as e:
+        logger.exception("build-phase.unhandled_error task_id=%s phase=%s", task_id, current_phase)
+        build_state.phase = "error"
+        build_state.updated_at = datetime.now(timezone.utc)
+        task.status = TaskStatus.needs_review
+        task.audit_history = (task.audit_history or []) + [
+            {"event_type": "execution_response", "payload": {"status": "needs_review", "message": str(e)}},
+        ]
+        flag_modified(task, "audit_history")
+        await session.commit()
+
+        return BuildPhaseResponse(
+            task_id=task_id,
+            build_phase="error",
+            status="needs_review",
+            message=f"Unexpected error during build phase '{current_phase}': {str(e)[:200]}",
+            repository_url=repo_info.get("html_url"),
+        )
 
 
 @router.post("/test/execute")

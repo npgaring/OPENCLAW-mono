@@ -49,13 +49,26 @@ export interface ExecutionPlanLockResult {
 }
 
 export interface TaskSubmitResult {
+  task_id?: string;
   status?: string;
   execution_id?: string;
   deployment_url?: string;
   preview_url?: string;
   repository_url?: string;
+  build_phase?: string;
   execution_response?: Record<string, unknown>;
   [k: string]: unknown;
+}
+
+export interface BuildPhaseResult {
+  task_id: string;
+  build_phase: string;
+  status: string;
+  files_generated?: number;
+  message?: string;
+  deployment_url?: string;
+  repository_url?: string;
+  execution_response?: Record<string, unknown>;
 }
 
 export interface EventLogItem {

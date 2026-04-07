@@ -20,6 +20,7 @@ from app.models import (
 from app.models.approval_request import ApprovalRequest
 from app.models.deployment import DeploymentRecord
 from app.models.evaluation_record import EvaluationRecord
+from app.models.task_build_state import TaskBuildState
 
 logger = logging.getLogger(__name__)
 
@@ -40,6 +41,7 @@ _MIGRATION_FILES = [
     "013_governed_v2_execution_locks.sql",
     "014_uuid_columns_to_text.sql",
     "015_deployments_table.sql",
+    "017_task_build_state.sql",
 ]
 
 _init_lock = asyncio.Lock()
