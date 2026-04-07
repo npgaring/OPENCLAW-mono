@@ -642,7 +642,7 @@ class DeterministicWebExecutor:
                             {"role": "user", "content": user_prompt},
                         ],
                         "temperature": temperature,
-                        "max_tokens": max_tokens,
+                        "max_completion_tokens": max_tokens,
                     },
                 )
             if resp.status_code != 200:
@@ -2450,6 +2450,10 @@ class DeterministicWebExecutor:
 
     async def _run_local_preflight(self, files: list[GeneratedFile]) -> LocalPreflightResult:
         """Materialize generated files locally and run install/build before commit or deploy."""
+        import shutil
+        if not shutil.which("npm"):
+            logger.warning("deterministic.executor.local_preflight.skipped npm not found in PATH")
+            return LocalPreflightResult(success=True, logs="[skipped] npm not available in this environment")
         timeout_seconds = max(30, int(getattr(settings, "codegen_local_preflight_timeout_seconds", 300)))
         with tempfile.TemporaryDirectory(prefix="openclaw-preflight-") as temp_dir:
             skipped_paths: list[str] = []
