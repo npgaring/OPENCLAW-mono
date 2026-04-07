@@ -380,6 +380,39 @@ def test_v2_execution_plan_lock_prefixed_path_resolves(auth_headers):
     assert lock["outcome"] == "PASS"
 
 
+def test_task_deterministic_contract_requires_lineage_trio(auth_headers, monkeypatch):
+    client = TestClient(app)
+    ops = _ops()
+    plan_hash = hash_payload({"domain": "web", "operations": ops})
+
+    gateway_execute = AsyncMock(return_value={"status": "success", "execution_id": "ex-gateway-should-not-run"})
+    deterministic_execute = AsyncMock(return_value={"status": "success", "execution_id": "ex-det-should-not-run"})
+    monkeypatch.setattr("app.services.execution_client.OpenClawClient.execute", gateway_execute)
+    monkeypatch.setattr("app.services.deterministic_executor.DeterministicWebExecutor.execute", deterministic_execute)
+
+    task_resp = client.post(
+        "/task",
+        json={
+            "ocgg_identity": "W-OCGG",
+            "trace_id": "11a8bbd3-6e9a-4664-b8e7-7db61ca11c03",
+            "plan_hash": plan_hash,
+            "operations": ops,
+            "deployment_target": "preview",
+            "goal": "Deterministic request without lineage should fail.",
+            "context": "deterministic executor",
+            "executor_contract": "deterministic_web_v1",
+            "execution_plan_v2": {"commands": [{"id": "cmd-001", "type": "write_files"}]},
+        },
+        headers=auth_headers,
+    )
+    assert task_resp.status_code == 422, task_resp.text
+    detail = task_resp.json()["detail"]
+    assert detail["code"] == "V2_LINEAGE_REQUIRED"
+    assert set(detail.get("missing_fields") or []) == {"build_sot_hash", "execution_plan_hash", "v2_continuity_id"}
+    assert gateway_execute.await_count == 0
+    assert deterministic_execute.await_count == 0
+
+
 def test_task_non_deterministic_contract_still_uses_openclaw_gateway(auth_headers, monkeypatch):
     client = TestClient(app)
     ops = _ops()

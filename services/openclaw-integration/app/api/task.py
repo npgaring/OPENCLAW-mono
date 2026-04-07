@@ -207,6 +207,7 @@ async def advance_build_phase(
     config = build_state.config_json or {}
     blueprint = build_state.blueprint_json or {}
     context = config.get("context", {})
+    runtime_manifest_json = config.get("runtime_manifest") if isinstance(config.get("runtime_manifest"), dict) else {}
     template_ref = executor.deserialize_template_reference(build_state.template_reference_json)
     repo_info = build_state.repo_info_json or {}
 
@@ -218,15 +219,18 @@ async def advance_build_phase(
                 operations = plan_json.get("operations", [])
                 context_data = executor._build_project_context(plan_json, operations)
 
-            files = await executor.execute_foundation(
+            files, runtime_manifest_json = await executor.execute_foundation(
                 blueprint=blueprint,
                 context=context_data,
                 template_reference=template_ref,
                 task_id=task_id,
+                runtime_manifest_json=runtime_manifest_json,
             )
 
             build_state.generated_files_json = executor.serialize_files(files)
             build_state.phase = "foundation_done"
+            config["runtime_manifest"] = runtime_manifest_json
+            build_state.config_json = config
             build_state.updated_at = datetime.now(timezone.utc)
             await session.commit()
 
@@ -247,15 +251,18 @@ async def advance_build_phase(
                 operations = plan_json.get("operations", [])
                 context_data = executor._build_project_context(plan_json, operations)
 
-            all_files = await executor.execute_pages(
+            all_files, runtime_manifest_json = await executor.execute_pages(
                 blueprint=blueprint,
                 context=context_data,
                 foundation_files=foundation_files,
                 task_id=task_id,
+                runtime_manifest_json=runtime_manifest_json,
             )
 
             build_state.generated_files_json = executor.serialize_files(all_files)
             build_state.phase = "pages_done"
+            config["runtime_manifest"] = runtime_manifest_json
+            build_state.config_json = config
             build_state.updated_at = datetime.now(timezone.utc)
             await session.commit()
 
@@ -286,6 +293,7 @@ async def advance_build_phase(
                 hosting_team_id=config.get("hosting_team_id", ""),
                 project_name=config.get("project_name", ""),
                 deploy_branch=config.get("deploy_branch", "main"),
+                runtime_manifest_json=runtime_manifest_json,
             )
 
             build_state.phase = "complete"

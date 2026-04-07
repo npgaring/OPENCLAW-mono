@@ -11,6 +11,7 @@ from app.services.deterministic_executor import (
     DeterministicWebExecutor,
     GeneratedFile,
     LocalPreflightResult,
+    REASON_CODEGEN_CONFLICT_DETECTED,
     REASON_GITHUB_AUTH_FAILED,
     REASON_GITHUB_REPO_CREATE_FAILED,
     REASON_VERCEL_DEPLOY_FAILED,
@@ -211,6 +212,57 @@ def test_execute_finalize_commits_and_deploys(monkeypatch):
     assert result["repo_commit_sha"] == "commit-sha-final"
     assert "commit" in calls
     assert "deploy" in calls
+
+
+def test_execute_finalize_includes_conflict_metadata_when_present(monkeypatch):
+    _configure_settings(monkeypatch)
+    monkeypatch.setattr("app.services.deterministic_executor.settings.codegen_deploy_static_gate_enabled", False)
+
+    async def _fake_installation_token(self, client):
+        return "ghs_installation_token"
+
+    async def _fake_commit(self, client, installation_token, *, owner, repo, branch, files, message):
+        return "commit-sha-final"
+
+    async def _fake_vercel_project(self, client, team_id, project_name, github_owner, github_repo, production_branch):
+        return VercelProjectResult(id="prj_abc", name=project_name)
+
+    async def _fake_deploy(self, client, team_id, project_name, files, target):
+        return VercelDeploymentResult(id="dpl_456", url="test-site-preview.vercel.app", target=target)
+
+    def _fake_phase3_inspect(self, files, blueprint, *, template_reference=None):
+        return files, ["DUPLICATE_FILE:src/app/page.tsx (2 times)"]
+
+    monkeypatch.setattr("app.services.deterministic_executor.DeterministicWebExecutor._github_installation_token", _fake_installation_token)
+    monkeypatch.setattr("app.services.deterministic_executor.DeterministicWebExecutor._github_batch_commit", _fake_commit)
+    monkeypatch.setattr("app.services.deterministic_executor.DeterministicWebExecutor._vercel_create_or_resolve_project", _fake_vercel_project)
+    monkeypatch.setattr("app.services.deterministic_executor.DeterministicWebExecutor._vercel_deploy_files", _fake_deploy)
+    monkeypatch.setattr("app.services.deterministic_executor.DeterministicWebExecutor._phase3_inspect", _fake_phase3_inspect)
+
+    files = [
+        GeneratedFile(path="package.json", content='{"name":"test","dependencies":{"next":"^15.5.14","react":"^19.0.0","react-dom":"^19.0.0","tailwindcss":"^4.2.2","@tailwindcss/postcss":"^4.2.2"},"devDependencies":{"typescript":"^5.8.3"}}'),
+        GeneratedFile(path="src/app/page.tsx", content='export default function Home(){return <div>Home</div>;}'),
+    ]
+    repo_info = {"owner": "test-owner", "name": "test-site", "html_url": "https://github.com/test-owner/test-site", "default_branch": "main", "branch": "main"}
+
+    result = asyncio.run(DeterministicWebExecutor().execute_finalize(
+        all_files=files,
+        blueprint={"pages": []},
+        template_reference=TemplateReference(),
+        plan=_plan(),
+        operations=_plan()["operations"],
+        repo_info=repo_info,
+        task_id="task-fin-conflicts",
+        trace_id="trace-fin-conflicts",
+        deployment_target="preview",
+        hosting_team_id="team_123",
+        project_name="test-site",
+        deploy_branch="main",
+    ))
+
+    assert result["status"] == "success"
+    assert result["conflicts_detected"] == 1
+    assert result["conflict_samples"] == ["DUPLICATE_FILE:src/app/page.tsx (2 times)"]
 
 
 def test_deterministic_execute_missing_github_app_credentials_fails_fast(monkeypatch):
@@ -429,8 +481,8 @@ def test_ensure_scaffold_integrity_preserves_template_packages_and_adds_missing_
 
     assert pkg["dependencies"]["next"] == "^15.5.14"
     assert pkg["dependencies"]["clsx"] == "^2.1.1"
-    assert pkg["dependencies"]["framer-motion"] == "latest"
-    assert pkg["devDependencies"]["eslint-config-next"] == "15.5.14"
+    assert pkg["dependencies"]["framer-motion"] == "^12.9.4"
+    assert pkg["devDependencies"]["eslint-config-next"] == "^15"
     assert any(f.path == "app/globals.css" for f in out)
 
 
@@ -557,8 +609,238 @@ def test_ensure_scaffold_integrity_is_idempotent():
     assert _snapshot(first) == _snapshot(second)
 
 
+def test_execute_foundation_accumulates_runtime_manifest(monkeypatch):
+    monkeypatch.setattr("app.services.deterministic_executor.settings.openai_api_key", "sk-test")
+    call_count = {"value": 0}
+    manifest_snapshots: list[dict] = []
+
+    async def _fake_chat(
+        self,
+        api_key,
+        model,
+        system_prompt,
+        user_prompt,
+        *,
+        temperature=0.3,
+        max_tokens=16000,
+        manifest=None,
+    ):
+        manifest_snapshots.append((manifest.to_runtime_json() if manifest else {}))
+        idx = call_count["value"]
+        call_count["value"] += 1
+        if idx == 0:
+            return (
+                "===FILE: package.json===\n"
+                '{"name":"demo","private":true,"dependencies":{"next":"^15.5.14"}}\n'
+                "===END_FILE===\n"
+                "===FILE: src/app/layout.tsx===\n"
+                "export default function RootLayout({children}:{children:React.ReactNode}){return <html><body>{children}</body></html>;}\n"
+                "===END_FILE===\n"
+            )
+        return (
+            "===FILE: src/components/Hero.tsx===\n"
+            "export function Hero(){return <section>Hero</section>;}\n"
+            "===END_FILE===\n"
+        )
+
+    monkeypatch.setattr(
+        "app.services.deterministic_executor.DeterministicWebExecutor._openai_chat",
+        _fake_chat,
+    )
+
+    files, runtime_manifest_json = asyncio.run(
+        DeterministicWebExecutor().execute_foundation(
+            blueprint={
+                "pages": [{"slug": "home"}, {"slug": "about"}],
+                "shared_components": ["NavBar", "Footer", "Hero"],
+                "design_notes": "",
+                "color_palette": {},
+                "content_strategy": "",
+            },
+            context={"goal": "Launch", "context": "Marketing site"},
+            template_reference=TemplateReference(),
+            task_id="task-foundation-manifest",
+            runtime_manifest_json={},
+        )
+    )
+
+    assert call_count["value"] == 2
+    assert "home" in (manifest_snapshots[0].get("routes_created") or [])
+    assert "package.json" in (manifest_snapshots[1].get("files_created") or [])
+    assert any(f.path == "src/components/Hero.tsx" for f in files)
+    assert runtime_manifest_json["packages"]["next"] == "^15.5.14"
+    assert "src/components/Hero.tsx" in runtime_manifest_json["files_created"]
+
+
+def test_execute_pages_runs_sequential_batches_and_carries_manifest(monkeypatch):
+    monkeypatch.setattr("app.services.deterministic_executor.settings.openai_api_key", "sk-test")
+    monkeypatch.setattr("app.services.deterministic_executor.settings.codegen_phase2_batch_size", 2)
+    events: list[str] = []
+    manifest_snapshots: list[dict] = []
+    call_count = {"value": 0}
+
+    async def _fake_chat(
+        self,
+        api_key,
+        model,
+        system_prompt,
+        user_prompt,
+        *,
+        temperature=0.3,
+        max_tokens=16000,
+        manifest=None,
+    ):
+        idx = call_count["value"]
+        call_count["value"] += 1
+        events.append(f"start-{idx}")
+        manifest_snapshots.append(manifest.to_runtime_json() if manifest else {})
+        if idx == 0:
+            await asyncio.sleep(0.03)
+            events.append("end-0")
+            return (
+                "===FILE: src/app/page.tsx===\n"
+                "export default function Page(){return <main>Home</main>;}\n"
+                "===END_FILE===\n"
+            )
+        events.append("end-1")
+        return (
+            "===FILE: src/app/about/page.tsx===\n"
+            "export default function AboutPage(){return <main>About</main>;}\n"
+            "===END_FILE===\n"
+        )
+
+    monkeypatch.setattr(
+        "app.services.deterministic_executor.DeterministicWebExecutor._openai_chat",
+        _fake_chat,
+    )
+
+    foundation_files = [
+        GeneratedFile(path="package.json", content='{"name":"demo","private":true}'),
+        GeneratedFile(path="src/app/layout.tsx", content="export default function RootLayout(){return null;}"),
+    ]
+    all_files, runtime_manifest_json = asyncio.run(
+        DeterministicWebExecutor().execute_pages(
+            blueprint={
+                "pages": [
+                    {"slug": "home", "title": "Home"},
+                    {"slug": "about", "title": "About"},
+                    {"slug": "pricing", "title": "Pricing"},
+                    {"slug": "contact", "title": "Contact"},
+                ],
+                "design_notes": "",
+                "color_palette": {},
+                "content_strategy": "",
+            },
+            context={"goal": "Launch", "context": "Marketing site"},
+            foundation_files=foundation_files,
+            task_id="task-pages-sequential",
+            runtime_manifest_json={"routes_created": ["home", "about"]},
+        )
+    )
+
+    assert call_count["value"] == 2
+    assert events == ["start-0", "end-0", "start-1", "end-1"]
+    assert "src/app/page.tsx" in (manifest_snapshots[1].get("files_created") or [])
+    assert any(f.path == "src/app/about/page.tsx" for f in all_files)
+    assert "src/app/about/page.tsx" in runtime_manifest_json["files_created"]
+
+
+def test_phase3_inspect_detects_conflicts_in_log_mode(monkeypatch):
+    monkeypatch.setattr("app.services.deterministic_executor.settings.codegen_conflict_mode", "log")
+    files = [
+        GeneratedFile(path="src/app/page.tsx", content="export const Hero = () => <main />;\n"),
+        GeneratedFile(path="src/app/page.tsx", content="export const Hero = () => <section />;\n"),
+        GeneratedFile(path="src/components/Hero.tsx", content="export const Hero = () => <div />;\n"),
+        GeneratedFile(path="package.json", content='{"name":"demo","private":true}'),
+        GeneratedFile(path="packages/web/package.json", content='{"name":"demo-web","private":true}'),
+    ]
+
+    validated, conflicts = DeterministicWebExecutor()._phase3_inspect(files, blueprint={"pages": []})
+
+    assert validated
+    assert any(c.startswith("DUPLICATE_FILE:src/app/page.tsx") for c in conflicts)
+    assert any(c.startswith("DUPLICATE_EXPORT:Hero") for c in conflicts)
+    assert any(c.startswith("PACKAGE_FRAGMENTATION:") for c in conflicts)
+
+
+def test_phase3_inspect_blocks_when_conflict_mode_is_block(monkeypatch):
+    monkeypatch.setattr("app.services.deterministic_executor.settings.codegen_conflict_mode", "block")
+    files = [
+        GeneratedFile(path="src/app/page.tsx", content="export const Hero = () => <main />;\n"),
+        GeneratedFile(path="src/app/page.tsx", content="export const Hero = () => <section />;\n"),
+        GeneratedFile(path="package.json", content='{"name":"demo","private":true}'),
+    ]
+
+    with pytest.raises(DeterministicExecutionError) as err:
+        DeterministicWebExecutor()._phase3_inspect(files, blueprint={"pages": []})
+
+    assert err.value.reason_code == REASON_CODEGEN_CONFLICT_DETECTED
+    assert err.value.extra.get("conflicts_detected", 0) >= 1
+
+
+def test_auto_fix_build_errors_drops_out_of_scope_patches(monkeypatch):
+    async def _fake_chat(
+        self,
+        api_key,
+        model,
+        system_prompt,
+        user_prompt,
+        *,
+        temperature=0.2,
+        max_tokens=8000,
+        manifest=None,
+    ):
+        return (
+            "===FILE: src/app/page.tsx===\n"
+            "export default function Page(){return <main>fixed</main>;}\n"
+            "===END_FILE===\n"
+            "===FILE: src/app/other.tsx===\n"
+            "export function Other(){return <div>patched-out-of-scope</div>;}\n"
+            "===END_FILE===\n"
+        )
+
+    monkeypatch.setattr(
+        "app.services.deterministic_executor.DeterministicWebExecutor._openai_chat",
+        _fake_chat,
+    )
+
+    files = [
+        GeneratedFile(path="package.json", content='{"name":"demo","private":true}'),
+        GeneratedFile(path="src/app/layout.tsx", content="export default function RootLayout(){return null;}"),
+        GeneratedFile(path="src/app/globals.css", content='@import "tailwindcss";'),
+        GeneratedFile(path="src/app/page.tsx", content="export default function Page(){return <main>original</main>;}\n"),
+        GeneratedFile(path="src/app/other.tsx", content="export function Other(){return <div>original-other</div>;}\n"),
+    ]
+
+    out = asyncio.run(
+        DeterministicWebExecutor()._auto_fix_build_errors(
+            "sk-test",
+            "gpt-test",
+            "Error in src/app/page.tsx",
+            files,
+        )
+    )
+
+    page = next(f for f in out if f.path == "src/app/page.tsx").content
+    other = next(f for f in out if f.path == "src/app/other.tsx").content
+
+    assert "fixed" in page
+    assert "original-other" in other
+    assert "patched-out-of-scope" not in other
+
+
 def test_auto_fix_build_errors_ignores_package_json_changes(monkeypatch):
-    async def _fake_chat(self, api_key, model, system_prompt, user_prompt, *, temperature=0.2, max_tokens=8000):
+    async def _fake_chat(
+        self,
+        api_key,
+        model,
+        system_prompt,
+        user_prompt,
+        *,
+        temperature=0.2,
+        max_tokens=8000,
+        manifest=None,
+    ):
         return (
             "===FILE: package.json===\n"
             '{"name":"demo","private":true,"dependencies":{"next":"^13.0.0"}}\n'
@@ -679,7 +961,7 @@ def test_execute_finalize_hard_gates_on_local_preflight_failure(monkeypatch):
         calls.append("preflight")
         return LocalPreflightResult(success=False, logs="local build failed")
 
-    async def _fake_auto_fix(self, api_key, model, error_logs, files, *, template_reference=None):
+    async def _fake_auto_fix(self, api_key, model, error_logs, files, *, template_reference=None, manifest=None):
         calls.append("autofix")
         return list(files)
 
@@ -707,9 +989,10 @@ def test_execute_finalize_hard_gates_on_local_preflight_failure(monkeypatch):
 
     assert out["status"] == "needs_review"
     assert out["vercel_ready_state"] == "SKIPPED_LOCAL_PREFLIGHT_FAILED"
-    assert out["local_preflight_fix_attempts"] == 2
-    assert calls.count("preflight") == 3
-    assert calls.count("autofix") == 2
+    assert out["local_preflight_fix_attempts"] == 1
+    assert calls.count("preflight") == 2
+    assert calls.count("autofix") == 1
+    assert out.get("reason_codes") == ["EXECUTION_CODEGEN_AUTOFIX_STALLED"]
     assert "commit" not in calls
     assert "deploy" not in calls
 

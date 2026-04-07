@@ -1521,7 +1521,7 @@ async def run_task_submission(
             dispatch_blocked=False,
         )
     evidence_reason_codes: list[str] = []
-    if not deterministic_mode:
+    if deterministic_mode:
         evidence_reason_codes = _execution_evidence_reason_codes(plan_json, result if isinstance(result, dict) else {})
         if evidence_reason_codes:
             result = dict(result)
@@ -1535,6 +1535,7 @@ async def run_task_submission(
         if build_state_data:
             build_state_config = build_state_data.get("config", {})
             build_state_config["context"] = build_state_data.get("context", {})
+            build_state_config.setdefault("runtime_manifest", {})
             build_state = TaskBuildState(
                 task_id=str(task.task_id),
                 phase="architect_done",

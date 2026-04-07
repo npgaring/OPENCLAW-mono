@@ -4,9 +4,8 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Any, Optional
 
-from sqlalchemy import Column, DateTime, Text
+from sqlalchemy import JSON, Column, DateTime
 from sqlmodel import Field, SQLModel
-from sqlalchemy.dialects.postgresql import JSONB
 
 
 def _utc_now() -> datetime:
@@ -20,19 +19,19 @@ class TaskBuildState(SQLModel, table=True):
     phase: str = Field(default="pending", max_length=32, index=True)
 
     blueprint_json: Optional[dict[str, Any]] = Field(
-        default=None, sa_column=Column(JSONB, nullable=True),
+        default=None, sa_column=Column(JSON, nullable=True),
     )
     repo_info_json: Optional[dict[str, Any]] = Field(
-        default=None, sa_column=Column(JSONB, nullable=True),
+        default=None, sa_column=Column(JSON, nullable=True),
     )
     template_reference_json: Optional[dict[str, Any]] = Field(
-        default=None, sa_column=Column(JSONB, nullable=True),
+        default=None, sa_column=Column(JSON, nullable=True),
     )
     generated_files_json: Optional[list[dict[str, str]]] = Field(
-        default=None, sa_column=Column(JSONB, nullable=True),
+        default=None, sa_column=Column(JSON, nullable=True),
     )
     config_json: Optional[dict[str, Any]] = Field(
-        default=None, sa_column=Column(JSONB, nullable=True),
+        default=None, sa_column=Column(JSON, nullable=True),
     )
 
     created_at: datetime = Field(

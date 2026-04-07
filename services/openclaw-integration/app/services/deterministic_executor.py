@@ -623,10 +623,14 @@ class DeterministicWebExecutor:
         hosting_team_id: str,
         project_name: str,
         deploy_branch: str,
+        runtime_manifest_json: Optional[dict[str, Any]] = None,
     ) -> dict[str, Any]:
         """Phase 4: Inspector, scaffold integrity, GitHub commit, Vercel deploy."""
         execution_id = f"detexec_{task_id}"
         steps_completed: list[str] = ["provision_repo", "architect", "generate_foundation", "generate_pages"]
+        runtime_manifest = BuildManifest.from_runtime_json(runtime_manifest_json)
+        runtime_manifest.add_routes([p.get("slug", "") for p in (blueprint.get("pages") or []) if isinstance(p, dict)])
+        runtime_manifest.update_from_files(all_files)
 
         owner = repo_info["owner"]
         repo_name = repo_info["name"]
@@ -637,9 +641,16 @@ class DeterministicWebExecutor:
         logger.info("deterministic.executor.codegen.phase3_inspector_start task_id=%s", task_id)
         if not all_files:
             all_files = self._extract_files_from_operations(operations)
-        validated_files = self._phase3_inspect(all_files, blueprint, template_reference=template_reference)
+        validated_files, conflicts = self._phase3_inspect(all_files, blueprint, template_reference=template_reference)
+        runtime_manifest.update_from_files(validated_files)
         logger.info("deterministic.executor.codegen.phase3_inspector_done task_id=%s files=%d", task_id, len(validated_files))
         steps_completed.append("generate_code")
+
+        def _add_conflict_metadata(payload: dict[str, Any]) -> dict[str, Any]:
+            if conflicts:
+                payload["conflicts_detected"] = len(conflicts)
+                payload["conflict_samples"] = conflicts[:20]
+            return payload
 
         if settings.enable_codegen_deploy_static_gate():
             qmap = {f.path: f for f in validated_files}
@@ -665,6 +676,7 @@ class DeterministicWebExecutor:
         max_fix_retries = getattr(settings, "codegen_max_fix_retries", 2)
         local_preflight_fix_attempts = 0
         preflight_logs = ""
+        seen_failure_signatures: set[str] = set()
 
         if settings.enable_codegen_local_preflight():
             while True:
@@ -673,29 +685,86 @@ class DeterministicWebExecutor:
                 if preflight.success:
                     steps_completed.append("local_preflight")
                     break
+                failure_signature = self._preflight_failure_signature(preflight.logs, validated_files)
+                if failure_signature in seen_failure_signatures:
+                    return _add_conflict_metadata(
+                        {
+                            "execution_id": execution_id,
+                            "status": "needs_review",
+                            "message": "Local preflight auto-fix loop made no progress (repeated failure signature).",
+                            "reason_codes": [REASON_CODEGEN_AUTOFIX_STALLED],
+                            "artifacts": [{"path": html_url, "type": "repository", "summary": "GitHub repository created; local preflight failed."}],
+                            "steps_completed": steps_completed,
+                            "repository_url": html_url,
+                            "repo_commit_sha": None,
+                            "deployment_id": None,
+                            "deployment_url": None,
+                            "files_generated": len(validated_files),
+                            "provider_ids": {},
+                            "vercel_ready_state": "SKIPPED_LOCAL_PREFLIGHT_FAILED",
+                            "fix_attempts": 0,
+                            "local_preflight_fix_attempts": local_preflight_fix_attempts,
+                            "build_logs": preflight_logs,
+                        }
+                    )
+                seen_failure_signatures.add(failure_signature)
                 if local_preflight_fix_attempts >= max_fix_retries or not api_key:
-                    return {
-                        "execution_id": execution_id,
-                        "status": "needs_review",
-                        "message": f"Local preflight build failed after {local_preflight_fix_attempts} auto-fix attempt(s).",
-                        "artifacts": [{"path": html_url, "type": "repository", "summary": "GitHub repository created; local preflight failed."}],
-                        "steps_completed": steps_completed,
-                        "repository_url": html_url,
-                        "repo_commit_sha": None,
-                        "deployment_id": None,
-                        "deployment_url": None,
-                        "files_generated": len(validated_files),
-                        "provider_ids": {},
-                        "vercel_ready_state": "SKIPPED_LOCAL_PREFLIGHT_FAILED",
-                        "fix_attempts": 0,
-                        "local_preflight_fix_attempts": local_preflight_fix_attempts,
-                        "build_logs": preflight_logs,
-                    }
+                    return _add_conflict_metadata(
+                        {
+                            "execution_id": execution_id,
+                            "status": "needs_review",
+                            "message": f"Local preflight build failed after {local_preflight_fix_attempts} auto-fix attempt(s).",
+                            "artifacts": [{"path": html_url, "type": "repository", "summary": "GitHub repository created; local preflight failed."}],
+                            "steps_completed": steps_completed,
+                            "repository_url": html_url,
+                            "repo_commit_sha": None,
+                            "deployment_id": None,
+                            "deployment_url": None,
+                            "files_generated": len(validated_files),
+                            "provider_ids": {},
+                            "vercel_ready_state": "SKIPPED_LOCAL_PREFLIGHT_FAILED",
+                            "fix_attempts": 0,
+                            "local_preflight_fix_attempts": local_preflight_fix_attempts,
+                            "build_logs": preflight_logs,
+                        }
+                    )
                 local_preflight_fix_attempts += 1
                 validated_files = await self._auto_fix_build_errors(
                     api_key, model, preflight_logs, validated_files,
                     template_reference=template_reference,
+                    manifest=runtime_manifest,
                 )
+                runtime_manifest.update_from_files(validated_files)
+                quality_after_fix = self._collect_deploy_quality_violations({f.path: f for f in validated_files})
+                if quality_after_fix:
+                    logger.warning(
+                        "deterministic.executor.deploy_quality_gate.after_autofix task_id=%s attempt=%d violations=%s",
+                        task_id,
+                        local_preflight_fix_attempts,
+                        quality_after_fix[:12],
+                    )
+                    if settings.enable_codegen_deploy_static_gate():
+                        return _add_conflict_metadata(
+                            {
+                                "execution_id": execution_id,
+                                "status": "needs_review",
+                                "message": "Static pre-build validation failed after auto-fix attempt.",
+                                "reason_codes": [REASON_DEPLOY_QUALITY_GATE_FAILED],
+                                "artifacts": [{"path": html_url, "type": "repository", "summary": "GitHub repository created; static validation failed."}],
+                                "steps_completed": steps_completed,
+                                "repository_url": html_url,
+                                "repo_commit_sha": None,
+                                "deployment_id": None,
+                                "deployment_url": None,
+                                "files_generated": len(validated_files),
+                                "provider_ids": {},
+                                "vercel_ready_state": "SKIPPED_LOCAL_PREFLIGHT_FAILED",
+                                "fix_attempts": 0,
+                                "local_preflight_fix_attempts": local_preflight_fix_attempts,
+                                "build_logs": preflight_logs,
+                                "quality_violations": quality_after_fix,
+                            }
+                        )
 
         # Batch commit to GitHub
         logger.info("deterministic.executor.phase3_start task_id=%s", task_id)
@@ -763,7 +832,7 @@ class DeterministicWebExecutor:
         }
         if deploy_target == "preview":
             result["preview_url"] = deployment_url
-        return result
+        return _add_conflict_metadata(result)
 
     # ------------------------------------------------------------------
     # Operation resolvers
@@ -1157,7 +1226,10 @@ class DeterministicWebExecutor:
         context: dict[str, Any],
         *,
         template_reference: Optional[TemplateReference] = None,
+        manifest: Optional[BuildManifest] = None,
     ) -> list[GeneratedFile]:
+        runtime_manifest = manifest or BuildManifest()
+        runtime_manifest.add_routes([p.get("slug", "") for p in (blueprint.get("pages") or []) if isinstance(p, dict)])
         all_files: list[GeneratedFile] = []
         pages = blueprint.get("pages") or []
         shared_components = blueprint.get("shared_components") or []
@@ -1178,15 +1250,17 @@ class DeterministicWebExecutor:
         foundation_content = await self._openai_chat(
             api_key, model, self._BUILDER_SYSTEM_PROMPT, foundation_prompt,
             temperature=0.3, max_tokens=max_tokens,
+            manifest=runtime_manifest,
         )
         if foundation_content:
             foundation_files = self._parse_codegen_response(foundation_content, [])
             all_files.extend(foundation_files)
+            runtime_manifest.update_from_files(foundation_files)
             logger.info("deterministic.executor.codegen.phase2_foundation files=%d", len(foundation_files))
 
         component_signatures = self._extract_component_signatures(all_files)
 
-        # ── Calls 2-N: Pages in batches (parallel) ─────────────────────
+        # ── Calls 2-N: Pages in sequential batches for cross-turn continuity ──
         async def _build_page_batch(batch_start: int, batch: list) -> list[GeneratedFile]:
             page_prompt = self._build_pages_prompt(
                 goal, project_context_str, batch, component_signatures, design_notes, color_palette, content_strategy,
@@ -1194,6 +1268,7 @@ class DeterministicWebExecutor:
             page_content = await self._openai_chat(
                 api_key, model, self._BUILDER_SYSTEM_PROMPT, page_prompt,
                 temperature=0.3, max_tokens=max_tokens,
+                manifest=runtime_manifest,
             )
             if page_content:
                 page_files = self._parse_codegen_response(page_content, [])
@@ -1204,12 +1279,9 @@ class DeterministicWebExecutor:
                 return page_files
             return []
 
-        batch_tasks = [
-            _build_page_batch(i, pages[i:i + batch_size])
-            for i in range(0, len(pages), batch_size)
-        ]
-        batch_results = await asyncio.gather(*batch_tasks)
-        for page_files in batch_results:
+        for i in range(0, len(pages), batch_size):
+            page_files = await _build_page_batch(i, pages[i:i + batch_size])
+            runtime_manifest.update_from_files(page_files)
             all_files.extend(page_files)
 
         return all_files
@@ -1479,8 +1551,23 @@ class DeterministicWebExecutor:
         blueprint: dict[str, Any],
         *,
         template_reference: Optional[TemplateReference] = None,
-    ) -> list[GeneratedFile]:
+    ) -> tuple[list[GeneratedFile], list[str]]:
         """Validate all generated files and fix issues to guarantee build success."""
+        conflicts = self._detect_cross_batch_conflicts(files)
+        if conflicts:
+            logger.warning(
+                "deterministic.executor.phase3.cross_batch_conflicts count=%d mode=%s sample=%s",
+                len(conflicts),
+                settings.normalized_codegen_conflict_mode(),
+                conflicts[:12],
+            )
+            if settings.normalized_codegen_conflict_mode() == "block":
+                raise DeterministicExecutionError(
+                    reason_code=REASON_CODEGEN_CONFLICT_DETECTED,
+                    message="Cross-batch conflicts detected during deterministic inspection.",
+                    provider="openclaw_codegen",
+                    extra={"conflicts_detected": len(conflicts), "conflict_samples": conflicts[:20]},
+                )
         file_map = {f.path: f for f in files}
 
         issues: list[str] = []
@@ -1536,7 +1623,41 @@ class DeterministicWebExecutor:
 
         # Run existing scaffold integrity (tsconfig, postcss, package.json, globals.css, missing imports, etc.)
         validated = self._ensure_scaffold_integrity(list(file_map.values()), template_reference=template_reference)
-        return validated
+        return validated, conflicts
+
+    @staticmethod
+    def _detect_cross_batch_conflicts(files: list[GeneratedFile]) -> list[str]:
+        """Detect conflicts before path dedup hides generation collisions."""
+        conflicts: list[str] = []
+        if not files:
+            return conflicts
+
+        path_counts: dict[str, int] = {}
+        for f in files:
+            path_counts[f.path] = path_counts.get(f.path, 0) + 1
+        for path, count in sorted(path_counts.items()):
+            if count > 1:
+                conflicts.append(f"DUPLICATE_FILE:{path} ({count} times)")
+
+        export_map: dict[str, str] = {}
+        export_re = re.compile(r"export\s+(?:async\s+)?(?:function|const|class)\s+(\w+)")
+        for f in files:
+            if not f.path.endswith((".ts", ".tsx", ".js", ".jsx")):
+                continue
+            for match in export_re.finditer(f.content):
+                export_name = match.group(1)
+                previous_path = export_map.get(export_name)
+                if previous_path and previous_path != f.path:
+                    conflicts.append(
+                        f"DUPLICATE_EXPORT:{export_name} in {previous_path} and {f.path}"
+                    )
+                export_map[export_name] = f.path
+
+        package_paths = sorted({f.path for f in files if f.path.endswith("package.json")})
+        if len(package_paths) > 1:
+            conflicts.append(f"PACKAGE_FRAGMENTATION:{json.dumps(package_paths)}")
+
+        return conflicts
 
     @staticmethod
     def _generate_fallback_page(slug: str, title: str, page_type: str) -> str:
@@ -1934,6 +2055,8 @@ class DeterministicWebExecutor:
 
         # ── Final enforcement: remove any unapproved deps from package.json
         self._enforce_package_allowlist(deps, dev, template_reference=template_reference)
+        if settings.codegen_strict_package_pinning_enabled:
+            self._pin_approved_package_versions(deps, dev)
 
         # ── Deduplicate: dev-only packages must not appear in dependencies ─
         for k in REQUIRED_DEV_DEPS:
@@ -2333,6 +2456,27 @@ class DeterministicWebExecutor:
                     label, k,
                 )
                 del bucket[k]
+
+    @staticmethod
+    def _pin_approved_package_versions(
+        deps: dict[str, str],
+        dev_deps: dict[str, str],
+    ) -> None:
+        """Pin all approved packages currently present to canonical versions."""
+        for bucket_name, bucket in (("dependencies", deps), ("devDependencies", dev_deps)):
+            for pkg_name in list(bucket.keys()):
+                canonical = APPROVED_PACKAGES.get(pkg_name)
+                if not canonical:
+                    continue
+                if bucket.get(pkg_name) != canonical:
+                    logger.info(
+                        "deterministic.executor.package_pin.updated section=%s pkg=%s from=%s to=%s",
+                        bucket_name,
+                        pkg_name,
+                        bucket.get(pkg_name),
+                        canonical,
+                    )
+                    bucket[pkg_name] = canonical
 
     @staticmethod
     def _ensure_use_client_directive(file_map: dict[str, GeneratedFile]) -> None:
@@ -3057,6 +3201,17 @@ class DeterministicWebExecutor:
             output = (stdout or b"").decode("utf-8", errors="ignore")
             timeout_msg = f"\n[local-preflight-timeout after {timeout_seconds}s]\n"
             return 124, output + timeout_msg
+
+    @staticmethod
+    def _preflight_failure_signature(logs: str, files: list[GeneratedFile]) -> str:
+        """Stable signature used to detect no-progress auto-fix loops."""
+        normalized_logs = "\n".join(line.strip() for line in (logs or "").splitlines()[-120:] if line.strip())
+        file_fingerprints = [
+            f"{f.path}:{hashlib.sha256(f.content.encode('utf-8', errors='ignore')).hexdigest()}"
+            for f in sorted(files, key=lambda item: item.path)
+        ]
+        payload = normalized_logs + "\n" + "\n".join(file_fingerprints)
+        return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
     # ------------------------------------------------------------------
     # GitHub: Authentication
@@ -3814,6 +3969,7 @@ class DeterministicWebExecutor:
         files: list[GeneratedFile],
         *,
         template_reference: Optional[TemplateReference] = None,
+        manifest: Optional[BuildManifest] = None,
     ) -> list[GeneratedFile]:
         """Use OpenAI to fix build errors based on Vercel build logs."""
         file_map = {f.path: f for f in files}
@@ -3863,10 +4019,25 @@ class DeterministicWebExecutor:
             api_key, model, system_prompt, user_prompt,
             temperature=0.2,
             max_tokens=getattr(settings, "codegen_phase3_max_tokens", 8000),
+            manifest=manifest,
         )
 
         fixed_files = self._parse_codegen_response(content, []) if content else []
-        fixed_files = [ff for ff in fixed_files if ff.path != "package.json"]
+        allowed_patch_paths = {str(p).strip() for p in errored_paths if str(p).strip()}
+        scoped_fixed_files: list[GeneratedFile] = []
+        for ff in fixed_files:
+            if ff.path == "package.json":
+                logger.info("deterministic.executor.auto_fix.drop_immutable_package_json")
+                continue
+            if ff.path not in allowed_patch_paths:
+                logger.warning(
+                    "deterministic.executor.auto_fix.drop_out_of_scope_patch file=%s allowed_scope_size=%d",
+                    ff.path,
+                    len(allowed_patch_paths),
+                )
+                continue
+            scoped_fixed_files.append(ff)
+        fixed_files = scoped_fixed_files
         for ff in fixed_files:
             if ff.path in file_map:
                 logger.info("deterministic.executor.auto_fix.patched file=%s", ff.path)
@@ -4167,5 +4338,7 @@ __all__ = [
     "REASON_VERCEL_PROJECT_CREATE_FAILED",
     "REASON_VERCEL_DEPLOY_FAILED",
     "REASON_CODE_GENERATION_FAILED",
+    "REASON_CODEGEN_CONFLICT_DETECTED",
+    "REASON_CODEGEN_AUTOFIX_STALLED",
     "_is_deterministic_plan",
 ]
