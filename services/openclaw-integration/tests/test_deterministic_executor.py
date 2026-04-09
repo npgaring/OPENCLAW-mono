@@ -1165,3 +1165,250 @@ def test_ensure_scaffold_integrity_deduplicates_dev_deps():
     assert "@types/react" not in pkg["dependencies"]
     assert "@types/node" not in pkg["dependencies"]
     assert pkg["devDependencies"]["typescript"] == "^5.8.3"
+
+
+# -------------------------------------------------------------------
+# New tests: Directive normalization, sanitizer, reviewer, quality gate
+# -------------------------------------------------------------------
+
+
+def test_normalize_directive_placement_moves_misplaced_use_client():
+    """'use client' after imports is moved to line 1."""
+    fm = {
+        "src/app/gallery/page.tsx": GeneratedFile(
+            path="src/app/gallery/page.tsx",
+            content=(
+                'import Link from "next/link";\n'
+                '"use client";\n'
+                '\n'
+                'import { useState } from "react";\n'
+                "export default function Gallery(){const [x,setX]=useState(0);return <div>{x}</div>;}\n"
+            ),
+        ),
+    }
+    DeterministicWebExecutor._normalize_directive_placement(fm)
+    content = fm["src/app/gallery/page.tsx"].content
+    lines = content.split("\n")
+    assert lines[0].strip() == '"use client";'
+    assert '"use client"' not in "\n".join(lines[1:])
+
+
+def test_normalize_directive_placement_leaves_correct_placement_alone():
+    fm = {
+        "src/app/page.tsx": GeneratedFile(
+            path="src/app/page.tsx",
+            content='"use client";\n\nimport { useState } from "react";\nexport default function Page(){return null;}\n',
+        ),
+    }
+    original = fm["src/app/page.tsx"].content
+    DeterministicWebExecutor._normalize_directive_placement(fm)
+    assert fm["src/app/page.tsx"].content == original
+
+
+def test_fix_missing_standard_imports_respects_use_client_position():
+    """Imports added by _fix_missing_standard_imports go AFTER 'use client'."""
+    fm = {
+        "src/app/page.tsx": GeneratedFile(
+            path="src/app/page.tsx",
+            content=(
+                '"use client";\n'
+                '\n'
+                'import { useState } from "react";\n'
+                "export default function Page(){return <Link href='/'>Home</Link>;}\n"
+            ),
+        ),
+    }
+    DeterministicWebExecutor._fix_missing_standard_imports(fm)
+    content = fm["src/app/page.tsx"].content
+    lines = content.split("\n")
+    assert lines[0].strip() == '"use client";'
+    assert any("next/link" in line for line in lines)
+    directive_line = next(i for i, l in enumerate(lines) if "use client" in l)
+    link_import_line = next(i for i, l in enumerate(lines) if "next/link" in l)
+    assert directive_line < link_import_line
+
+
+def test_collect_deploy_quality_violations_detects_directive_after_import():
+    fm = {
+        "package.json": GeneratedFile(path="package.json", content='{"name":"x","private":true}'),
+        "src/app/layout.tsx": GeneratedFile(path="src/app/layout.tsx", content="export default function RootLayout(){return null}"),
+        "src/app/page.tsx": GeneratedFile(path="src/app/page.tsx", content="export default function Page(){return null}"),
+        "src/app/gallery/page.tsx": GeneratedFile(
+            path="src/app/gallery/page.tsx",
+            content='import Link from "next/link";\n"use client";\nimport { useState } from "react";\n',
+        ),
+    }
+    v = DeterministicWebExecutor._collect_deploy_quality_violations(fm)
+    assert any(x.startswith("directive_after_import:") for x in v)
+
+
+def test_collect_deploy_quality_violations_detects_server_client_mixing():
+    fm = {
+        "package.json": GeneratedFile(path="package.json", content='{"name":"x","private":true}'),
+        "src/app/layout.tsx": GeneratedFile(path="src/app/layout.tsx", content="export default function RootLayout(){return null}"),
+        "src/app/page.tsx": GeneratedFile(
+            path="src/app/page.tsx",
+            content='"use client";\nimport { useState } from "react";\nexport const metadata = { title: "X" };\nexport default function Page(){return null}',
+        ),
+    }
+    v = DeterministicWebExecutor._collect_deploy_quality_violations(fm)
+    assert any(x.startswith("server_client_mixing:") for x in v)
+
+
+def test_execute_sanitize_fixes_directive_and_validates_hooks():
+    executor = DeterministicWebExecutor()
+    files = [
+        GeneratedFile(
+            path="src/app/gallery/page.tsx",
+            content=(
+                'import Link from "next/link";\n'
+                '"use client";\n'
+                '\n'
+                "export default function Gallery(){const [x,setX]=useState(0);return <div>{x}<Link href='/'>Home</Link></div>;}\n"
+            ),
+        ),
+        GeneratedFile(path="package.json", content='{"name":"demo","private":true}'),
+        GeneratedFile(path="src/app/layout.tsx", content="export default function RootLayout({children}:{children:React.ReactNode}){return <html><body>{children}</body></html>;}"),
+    ]
+
+    result = executor.execute_sanitize(
+        all_files=files,
+        blueprint={"pages": [{"slug": "gallery"}]},
+    )
+
+    assert result["agent_phase"] == "sanitizer_done"
+    assert result["agent_role"] == "sanitizer"
+    sanitized_files = result["files"]
+    gallery = next(f for f in sanitized_files if "gallery" in f.path)
+    lines = gallery.content.split("\n")
+    assert lines[0].strip() == '"use client";'
+    assert any("useState" in line and "react" in line for line in lines)
+
+
+def test_detect_server_client_mixing_removes_metadata_from_client_component():
+    fm = {
+        "src/app/page.tsx": GeneratedFile(
+            path="src/app/page.tsx",
+            content=(
+                '"use client";\n'
+                'import { useState } from "react";\n'
+                'import type { Metadata } from "next";\n'
+                '\n'
+                'export const metadata: Metadata = {\n'
+                '  title: "Home",\n'
+                '};\n'
+                '\n'
+                "export default function Home(){const [x,setX]=useState(0);return <div>{x}</div>;}\n"
+            ),
+        ),
+    }
+    issues = DeterministicWebExecutor._detect_server_client_mixing(fm)
+    assert len(issues) == 1
+    assert "server_client_mixing" in issues[0]
+    content = fm["src/app/page.tsx"].content
+    assert "export const metadata" not in content
+    assert '"use client"' in content
+
+
+def test_classify_build_errors_identifies_directive_and_import_errors():
+    logs = (
+        "Error: The \"use client\" directive must be placed before other expressions.\n"
+        "Module not found: Can't resolve '@/components/Hero'\n"
+        "Type error: TS2322: Type 'string' is not assignable to type 'number'\n"
+        "'Foo' is not exported from '@/lib/utils'\n"
+    )
+    classified = DeterministicWebExecutor._classify_build_errors(logs)
+    types = {e["type"] for e in classified}
+    assert "directive_error" in types
+    assert "import_error" in types
+    assert "type_error" in types
+    assert "export_error" in types
+
+
+def test_validate_hook_imports_adds_missing_react_import():
+    fm = {
+        "src/components/Counter.tsx": GeneratedFile(
+            path="src/components/Counter.tsx",
+            content=(
+                '"use client";\n'
+                "export function Counter(){const [x,setX]=useState(0);return <button onClick={()=>setX(x+1)}>{x}</button>;}\n"
+            ),
+        ),
+    }
+    issues: list[str] = []
+    DeterministicWebExecutor._validate_hook_imports(fm, issues)
+    assert any("missing_react_import" in i for i in issues)
+    content = fm["src/components/Counter.tsx"].content
+    assert 'from "react"' in content
+    lines = content.split("\n")
+    assert lines[0].strip() == '"use client";'
+
+
+def test_parse_review_issues_extracts_json_block():
+    content = (
+        'Here is my review:\n'
+        '```json\n'
+        '{"issues": [{"severity": "critical", "file": "src/app/page.tsx", "message": "Missing import"}], '
+        '"files_to_fix": ["src/app/page.tsx"]}\n'
+        '```\n'
+        'Some more text\n'
+    )
+    issues = DeterministicWebExecutor._parse_review_issues(content)
+    assert len(issues) == 1
+    assert issues[0]["severity"] == "critical"
+    assert issues[0]["file"] == "src/app/page.tsx"
+
+
+def test_parse_review_issues_handles_empty_output():
+    assert DeterministicWebExecutor._parse_review_issues("no json here") == []
+    assert DeterministicWebExecutor._parse_review_issues("") == []
+
+
+def test_execute_review_skips_without_api_key(monkeypatch):
+    monkeypatch.setattr("app.services.deterministic_executor.settings.openai_api_key", "")
+    files = [
+        GeneratedFile(path="src/app/page.tsx", content="export default function Page(){return null;}\n"),
+    ]
+    result = asyncio.run(DeterministicWebExecutor().execute_review(
+        all_files=files,
+        blueprint={"pages": []},
+    ))
+    assert result["agent_phase"] == "review_done"
+    assert result["review_report"]["status"] == "skipped"
+
+
+def test_execute_review_patches_critical_issues(monkeypatch):
+    monkeypatch.setattr("app.services.deterministic_executor.settings.openai_api_key", "sk-test")
+
+    async def _fake_chat(self, api_key, model, system_prompt, user_prompt, *, temperature=0.2, max_tokens=12000, manifest=None):
+        return (
+            '```json\n'
+            '{"issues": [{"severity": "critical", "file": "src/app/page.tsx", "message": "Missing use client"}],'
+            ' "files_to_fix": ["src/app/page.tsx"]}\n'
+            '```\n'
+            '===FILE: src/app/page.tsx===\n'
+            '"use client";\n'
+            'import { useState } from "react";\n'
+            'export default function Page(){const [x,setX]=useState(0);return <div>{x}</div>;}\n'
+            '===END_FILE===\n'
+        )
+
+    monkeypatch.setattr(
+        "app.services.deterministic_executor.DeterministicWebExecutor._openai_chat",
+        _fake_chat,
+    )
+
+    files = [
+        GeneratedFile(
+            path="src/app/page.tsx",
+            content='import { useState } from "react";\nexport default function Page(){const [x,setX]=useState(0);return <div>{x}</div>;}\n',
+        ),
+    ]
+    result = asyncio.run(DeterministicWebExecutor().execute_review(
+        all_files=files,
+        blueprint={"pages": [{"slug": "home"}]},
+    ))
+    assert result["agent_phase"] == "review_done"
+    assert result["review_report"]["files_patched"] == 1
+    page = next(f for f in result["files"] if f.path == "src/app/page.tsx")
+    assert '"use client"' in page.content

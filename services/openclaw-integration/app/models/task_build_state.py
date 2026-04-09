@@ -45,6 +45,9 @@ class TaskBuildState(SQLModel, table=True):
     verification_json: Optional[dict[str, Any]] = Field(
         default=None, sa_column=Column(JSON, nullable=True),
     )
+    review_json: Optional[dict[str, Any]] = Field(
+        default=None, sa_column=Column(JSON, nullable=True),
+    )
     repair_history_json: Optional[list[dict[str, Any]]] = Field(
         default=None, sa_column=Column(JSON, nullable=True),
     )

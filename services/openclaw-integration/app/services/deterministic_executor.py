@@ -50,7 +50,9 @@ BRANCH_RETRY_DELAYS = (2, 3, 5, 8)
 LEGACY_BUILD_PHASE_BY_AGENT_PHASE = {
     "planner_done": "architect_done",
     "frontend_done": "foundation_done",
+    "sanitizer_done": "foundation_done",
     "backend_done": "pages_done",
+    "review_done": "pages_done",
     "verify_done": "pages_done",
     "complete": "complete",
     "error": "error",
@@ -59,7 +61,9 @@ LEGACY_BUILD_PHASE_BY_AGENT_PHASE = {
 AGENT_ROLE_BY_PHASE = {
     "planner_done": "planner",
     "frontend_done": "frontend",
+    "sanitizer_done": "sanitizer",
     "backend_done": "backend",
+    "review_done": "reviewer",
     "verify_done": "verifier",
     "complete": "orchestrator",
     "error": "verifier",
@@ -386,6 +390,32 @@ class DeterministicWebExecutor:
     def _utc_timestamp() -> str:
         return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
 
+    @staticmethod
+    def _classify_interactive_routes(
+        routes: list[str],
+        pages: list[dict[str, Any]],
+    ) -> list[str]:
+        """Return routes likely to require 'use client' based on page type."""
+        INTERACTIVE = {
+            "contact", "faq", "pricing", "gallery", "portfolio",
+            "calculator", "booking", "search", "dashboard", "quiz",
+        }
+        page_types: dict[str, str] = {}
+        for page in pages:
+            if not isinstance(page, dict):
+                continue
+            slug = str(page.get("slug") or "").strip().strip("/")
+            ptype = str(page.get("page_type") or page.get("type") or slug).strip().lower()
+            if slug:
+                page_types[slug] = ptype
+        interactive: list[str] = []
+        for route in routes:
+            slug = route.strip("/") or "home"
+            ptype = page_types.get(slug, slug)
+            if ptype in INTERACTIVE or slug in INTERACTIVE:
+                interactive.append(route)
+        return interactive
+
     def _default_agent_team_plan(
         self,
         *,
@@ -396,6 +426,11 @@ class DeterministicWebExecutor:
         routes = [str(route).strip() for route in (context.get("routes") or []) if str(route).strip()]
         if not routes:
             routes = ["/"]
+        pages = blueprint.get("pages") or []
+        interactive_routes = self._classify_interactive_routes(routes, pages)
+        integrations = list(plan.get("integrations") or [])
+        shared_components = list(blueprint.get("shared_components") or [])
+
         file_ownership = [
             {
                 "agent_role": "frontend",
@@ -411,6 +446,16 @@ class DeterministicWebExecutor:
                     "src/lib/env/**",
                     "src/lib/schema/**",
                 ],
+                "allowed_shared_paths": [],
+            },
+            {
+                "agent_role": "sanitizer",
+                "owned_paths": [],
+                "allowed_shared_paths": [],
+            },
+            {
+                "agent_role": "reviewer",
+                "owned_paths": [],
                 "allowed_shared_paths": [],
             },
             {
@@ -438,6 +483,10 @@ class DeterministicWebExecutor:
                     "goal": context.get("goal"),
                     "route_count": len(routes),
                 },
+                "instructions": [
+                    "Emit ownership manifest, work packets with per-agent instructions, and reserved singletons.",
+                    f"Total routes: {len(routes)}, interactive routes: {len(interactive_routes)}",
+                ],
                 "acceptance_checks": [
                     "Planner emits work packets, file ownership, route ownership, and reserved singletons.",
                 ],
@@ -450,11 +499,39 @@ class DeterministicWebExecutor:
                 "depends_on": ["planner_done"],
                 "inputs": {
                     "routes": list(routes),
-                    "shared_components": list(blueprint.get("shared_components") or []),
+                    "shared_components": shared_components,
                 },
+                "instructions": [
+                    "Place 'use client' as the VERY FIRST LINE of any file using hooks or event handlers.",
+                    f"These routes likely need 'use client': {interactive_routes}" if interactive_routes else
+                    "No routes identified as needing 'use client' — prefer server components.",
+                    f"Shared components to generate: {shared_components}" if shared_components else
+                    "Generate NavBar and Footer as shared components at minimum.",
+                    "Server pages should export const metadata for SEO.",
+                    "If a page needs both metadata AND interactivity, keep the page as a server component "
+                    "and extract interactive parts into a client component under src/components/.",
+                ],
                 "acceptance_checks": [
                     "Frontend owns route modules, page content, and shared UI components.",
                     "Route modules may use legal Next.js exports like metadata and generateMetadata.",
+                    "'use client' is line 1 in every file using hooks or event handlers.",
+                ],
+            },
+            {
+                "agent_role": "sanitizer",
+                "phase": "sanitizer_done",
+                "owned_paths": [],
+                "allowed_shared_paths": [],
+                "depends_on": ["frontend_done"],
+                "inputs": {},
+                "instructions": [
+                    "Run deterministic transforms: directive normalization, import validation, export checks.",
+                    "No LLM calls — purely rule-based.",
+                ],
+                "acceptance_checks": [
+                    "'use client' is line 1 wherever needed.",
+                    "All imports resolve.",
+                    "No server/client mixing in a single file.",
                 ],
             },
             {
@@ -462,12 +539,35 @@ class DeterministicWebExecutor:
                 "phase": "backend_done",
                 "owned_paths": [entry["owned_paths"] for entry in file_ownership if entry["agent_role"] == "backend"][0],
                 "allowed_shared_paths": [],
-                "depends_on": ["frontend_done"],
+                "depends_on": ["sanitizer_done"],
                 "inputs": {
-                    "integrations": list(plan.get("integrations") or []),
+                    "integrations": integrations,
                 },
+                "instructions": [
+                    "Server-only code must stay inside backend-owned paths.",
+                    "Do NOT overwrite or modify any frontend-owned files.",
+                    f"Integrations to wire: {integrations}" if integrations else
+                    "No external integrations required.",
+                    "API routes go in src/app/api/<name>/route.ts with named HTTP-method exports.",
+                ],
                 "acceptance_checks": [
                     "Backend work stays inside server-owned paths and does not overwrite frontend-owned files.",
+                ],
+            },
+            {
+                "agent_role": "reviewer",
+                "phase": "review_done",
+                "owned_paths": [],
+                "allowed_shared_paths": [],
+                "depends_on": ["backend_done"],
+                "inputs": {},
+                "instructions": [
+                    "Review ALL files for Next.js anti-patterns, broken cross-file references, and accessibility gaps.",
+                    "Only fix build-blocking and deploy-blocking issues.",
+                ],
+                "acceptance_checks": [
+                    "No build-blocking anti-patterns remain.",
+                    "All cross-file imports resolve.",
                 ],
             },
             {
@@ -475,10 +575,15 @@ class DeterministicWebExecutor:
                 "phase": "verify_done",
                 "owned_paths": [],
                 "allowed_shared_paths": [],
-                "depends_on": ["backend_done"],
+                "depends_on": ["review_done"],
                 "inputs": {
                     "deployment_target": plan.get("deploy_target") or context.get("deployment_target"),
                 },
+                "instructions": [
+                    "Run ownership conflict detection, static quality gate, and local npm build preflight.",
+                    "Block deploy only on real failures.",
+                    f"Expected routes: {routes}",
+                ],
                 "acceptance_checks": [
                     "Verifier blocks only on real ownership, build, or deploy-preflight failures.",
                 ],
@@ -491,7 +596,14 @@ class DeterministicWebExecutor:
                 {
                     "name": "next_route_module_exports",
                     "description": "Treat route-module exports as module-local, not global singleton exports.",
-                }
+                },
+                {
+                    "name": "directive_safety",
+                    "description": (
+                        "'use client' must be the very first line of any file using React hooks or event handlers. "
+                        "It is mutually exclusive with metadata exports."
+                    ),
+                },
             ],
             "reserved_singletons": reserved_singletons,
             "route_ownership": [{"route": route, "agent_role": "frontend"} for route in routes],
@@ -928,6 +1040,143 @@ class DeterministicWebExecutor:
         }
 
     # ------------------------------------------------------------------
+    # Phased execution: Sanitizer (deterministic, no LLM)
+    # ------------------------------------------------------------------
+    def execute_sanitize(
+        self,
+        *,
+        all_files: list[GeneratedFile],
+        blueprint: dict[str, Any],
+        template_reference: Optional[TemplateReference] = None,
+        runtime_manifest_json: Optional[dict[str, Any]] = None,
+    ) -> dict[str, Any]:
+        """Deterministic code transforms: directive safety, import/export validation, server/client mixing."""
+        runtime_manifest = BuildManifest.from_runtime_json(runtime_manifest_json)
+        runtime_manifest.update_from_files(all_files)
+        file_map = {f.path: f for f in all_files}
+        warnings: list[str] = []
+
+        self._normalize_directive_placement(file_map)
+        self._ensure_use_client_directive(file_map)
+        self._normalize_directive_placement(file_map)
+        self._fix_duplicate_imports(file_map)
+        self._validate_component_exports(file_map, warnings)
+        self._fix_export_import_mismatches(file_map)
+        self._validate_hook_imports(file_map, warnings)
+        self._validate_next_imports(file_map, warnings)
+        mixing_issues = self._detect_server_client_mixing(file_map)
+        warnings.extend(mixing_issues)
+        self._fix_missing_standard_imports(file_map)
+        self._normalize_directive_placement(file_map)
+
+        sanitized_files = list(file_map.values())
+        runtime_manifest.update_from_files(sanitized_files)
+
+        if warnings:
+            logger.info(
+                "deterministic.executor.sanitizer.warnings count=%d sample=%s",
+                len(warnings), warnings[:10],
+            )
+
+        return {
+            "status": "partial",
+            "build_phase": _legacy_build_phase("sanitizer_done"),
+            "agent_phase": "sanitizer_done",
+            "agent_role": "sanitizer",
+            "message": f"Sanitizer applied deterministic fixes to {len(sanitized_files)} files ({len(warnings)} warnings).",
+            "files_generated": len(sanitized_files),
+            "files": sanitized_files,
+            "sanitizer_warnings": warnings,
+            "runtime_manifest": runtime_manifest.to_runtime_json(),
+        }
+
+    @staticmethod
+    def _validate_hook_imports(file_map: dict[str, GeneratedFile], issues: list[str]) -> None:
+        """Ensure files using React hooks have the corresponding import from 'react'."""
+        import re
+        HOOKS = ["useState", "useEffect", "useRef", "useCallback", "useMemo", "useReducer", "useContext"]
+        hook_re = re.compile(r"\b(" + "|".join(HOOKS) + r")\b")
+        react_import_re = re.compile(r"""from\s+['"]react['"]""")
+
+        for path, f in list(file_map.items()):
+            if not (path.endswith(".tsx") or path.endswith(".jsx")):
+                continue
+            used_hooks = set(hook_re.findall(f.content))
+            if not used_hooks:
+                continue
+            if react_import_re.search(f.content):
+                continue
+            issues.append(f"missing_react_import:{path}:hooks={','.join(sorted(used_hooks))}")
+            import_line = "import { " + ", ".join(sorted(used_hooks)) + ' } from "react";\n'
+            content = f.content
+            directive_match = re.match(r'^(["\']use client["\'];?\s*\n)', content)
+            if directive_match:
+                insert_pos = directive_match.end()
+                content = content[:insert_pos] + import_line + content[insert_pos:]
+            else:
+                content = import_line + content
+            file_map[path] = GeneratedFile(path=path, content=content)
+
+    @staticmethod
+    def _validate_next_imports(file_map: dict[str, GeneratedFile], issues: list[str]) -> None:
+        """Ensure files using Next.js components/hooks have proper imports."""
+        import re
+        NEXT_IMPORTS: list[tuple[str, str, str]] = [
+            (r"<Link[\s/>]", "next/link", 'import Link from "next/link";'),
+            (r"<Image[\s/>]", "next/image", 'import Image from "next/image";'),
+            (r"\buseRouter\b", "next/navigation", 'import { useRouter } from "next/navigation";'),
+            (r"\busePathname\b", "next/navigation", 'import { usePathname } from "next/navigation";'),
+            (r"\buseSearchParams\b", "next/navigation", 'import { useSearchParams } from "next/navigation";'),
+        ]
+        for path, f in list(file_map.items()):
+            if not (path.endswith(".tsx") or path.endswith(".jsx")):
+                continue
+            for pattern, check_pkg, statement in NEXT_IMPORTS:
+                if re.search(pattern, f.content) and check_pkg not in f.content:
+                    issues.append(f"missing_next_import:{path}:{check_pkg}")
+
+    @staticmethod
+    def _detect_server_client_mixing(file_map: dict[str, GeneratedFile]) -> list[str]:
+        """Flag files with both 'use client' and metadata exports (mutually exclusive in App Router).
+
+        When mixing is detected, the metadata export is removed since 'use client' takes priority
+        for files that already use hooks/handlers.
+        """
+        import re
+        issues: list[str] = []
+        METADATA_BLOCK_RE = re.compile(
+            r"(?:^|\n)(export\s+const\s+metadata[\s\S]*?^};?\s*$)", re.MULTILINE
+        )
+        GENERATE_METADATA_RE = re.compile(
+            r"(?:^|\n)(export\s+(?:async\s+)?function\s+generateMetadata[\s\S]*?^}\s*$)", re.MULTILINE
+        )
+        METADATA_IMPORT_RE = re.compile(
+            r"^import\s+type\s+\{\s*Metadata\s*\}\s+from\s+['\"]next['\"];?\s*\n?", re.MULTILINE
+        )
+
+        for path, f in list(file_map.items()):
+            if not (path.endswith(".tsx") or path.endswith(".jsx")):
+                continue
+            has_directive = '"use client"' in f.content or "'use client'" in f.content
+            has_metadata = (
+                "export const metadata" in f.content
+                or "export function generateMetadata" in f.content
+                or "export async function generateMetadata" in f.content
+            )
+            if has_directive and has_metadata:
+                issues.append(f"server_client_mixing:{path}")
+                content = f.content
+                content = METADATA_BLOCK_RE.sub("", content)
+                content = GENERATE_METADATA_RE.sub("", content)
+                content = METADATA_IMPORT_RE.sub("", content)
+                file_map[path] = GeneratedFile(path=path, content=content.strip() + "\n")
+                logger.info(
+                    "deterministic.executor.sanitizer.removed_metadata_from_client_component file=%s",
+                    path,
+                )
+        return issues
+
+    # ------------------------------------------------------------------
     # Phased execution: Backend agent
     # ------------------------------------------------------------------
     async def execute_backend(
@@ -956,6 +1205,178 @@ class DeterministicWebExecutor:
             "files": all_files,
             "runtime_manifest": runtime_manifest.to_runtime_json(),
         }
+
+    # ------------------------------------------------------------------
+    # Phased execution: Reviewer (LLM-based code review)
+    # ------------------------------------------------------------------
+    _REVIEWER_SYSTEM_PROMPT = (
+        "You are a senior code reviewer specializing in Next.js App Router, React 19, TypeScript, and Tailwind CSS v4.\n"
+        "You receive all generated source files for a website and must identify build-blocking issues.\n\n"
+        "CHECK FOR THESE CRITICAL ISSUES:\n"
+        "1. DIRECTIVE ERRORS: 'use client' must be the very first line (before all imports) in files using "
+        "hooks (useState, useEffect, etc.) or event handlers (onClick, onChange, etc.). "
+        "A file CANNOT have both 'use client' and metadata exports.\n"
+        "2. IMPORT ERRORS: Every import must resolve — @/ imports map to src/. "
+        "Check that imported components actually exist in the file set.\n"
+        "3. EXPORT ERRORS: Components must use named exports. "
+        "Pages must have a default export function. "
+        "No duplicate default exports in a single file.\n"
+        "4. TYPE ERRORS: No 'any' casts in component props. Event handler types must be correct.\n"
+        "5. ACCESSIBILITY: Every <img>/<Image> must have alt text. "
+        "Pages should have a logical heading hierarchy (h1 -> h2 -> h3).\n"
+        "6. SEO: Server-rendered pages (no 'use client') should export metadata or generateMetadata.\n\n"
+        "OUTPUT FORMAT:\n"
+        "First, output a JSON block with your review:\n"
+        "```json\n"
+        '{"issues": [{"severity": "critical"|"warning", "file": "path", "line_hint": "...", "message": "..."}], '
+        '"files_to_fix": ["path1", "path2"]}\n'
+        "```\n"
+        "Then, output ONLY the fixed files using:\n"
+        "===FILE: path/to/file.ext===\n<full corrected content>\n===END_FILE===\n\n"
+        "RULES:\n"
+        "- Only fix build-blocking (critical) issues. Do NOT change styling or content.\n"
+        "- Output the COMPLETE file content for each fix — not just a diff.\n"
+        "- If there are no critical issues, output an empty issues array and no files.\n"
+    )
+
+    async def execute_review(
+        self,
+        *,
+        all_files: list[GeneratedFile],
+        blueprint: dict[str, Any],
+        ownership_manifest: Optional[dict[str, Any]] = None,
+        runtime_manifest_json: Optional[dict[str, Any]] = None,
+    ) -> dict[str, Any]:
+        """LLM-based code review that catches anti-patterns the sanitizer cannot detect."""
+        runtime_manifest = BuildManifest.from_runtime_json(runtime_manifest_json)
+        runtime_manifest.update_from_files(all_files)
+        api_key = (settings.openai_api_key or "").strip()
+        model = self._resolve_codegen_model()
+
+        review_report: dict[str, Any] = {
+            "status": "passed",
+            "issues_found": 0,
+            "files_patched": 0,
+            "iterations": 0,
+        }
+
+        if not api_key:
+            review_report["status"] = "skipped"
+            return {
+                "status": "partial",
+                "build_phase": _legacy_build_phase("review_done"),
+                "agent_phase": "review_done",
+                "agent_role": "reviewer",
+                "message": "Reviewer skipped (no API key).",
+                "files_generated": len(all_files),
+                "files": all_files,
+                "review_report": review_report,
+                "runtime_manifest": runtime_manifest.to_runtime_json(),
+            }
+
+        max_review_iterations = 2
+        current_files = list(all_files)
+
+        for iteration in range(max_review_iterations):
+            review_report["iterations"] = iteration + 1
+            file_summaries = self._build_review_file_summaries(current_files)
+            routes = [p.get("slug", "") for p in (blueprint.get("pages") or []) if isinstance(p, dict)]
+
+            user_prompt = (
+                f"Review these {len(current_files)} generated files for a website.\n"
+                f"Expected routes: {routes}\n\n"
+                f"{file_summaries}\n\n"
+                "Identify critical (build-blocking) issues and fix them."
+            )
+
+            logger.info(
+                "deterministic.executor.reviewer.iteration_%d_start file_count=%d",
+                iteration + 1, len(current_files),
+            )
+            content = await self._openai_chat(
+                api_key, model, self._REVIEWER_SYSTEM_PROMPT, user_prompt,
+                temperature=0.2,
+                max_tokens=getattr(settings, "codegen_review_max_tokens", 12000),
+                manifest=runtime_manifest,
+            )
+            if not content:
+                break
+
+            issues = self._parse_review_issues(content)
+            review_report["issues_found"] = len(issues)
+            critical_issues = [i for i in issues if i.get("severity") == "critical"]
+
+            if not critical_issues:
+                review_report["status"] = "passed"
+                logger.info(
+                    "deterministic.executor.reviewer.iteration_%d_clean issues=%d critical=0",
+                    iteration + 1, len(issues),
+                )
+                break
+
+            fixed_files = self._parse_codegen_response(content, [])
+            if not fixed_files:
+                logger.info(
+                    "deterministic.executor.reviewer.iteration_%d_no_fixes critical=%d",
+                    iteration + 1, len(critical_issues),
+                )
+                break
+
+            file_map = {f.path: f for f in current_files}
+            patched_count = 0
+            for ff in fixed_files:
+                if ff.path in file_map:
+                    file_map[ff.path] = ff
+                    patched_count += 1
+            current_files = list(file_map.values())
+            runtime_manifest.update_from_files(current_files)
+            review_report["files_patched"] = patched_count
+            logger.info(
+                "deterministic.executor.reviewer.iteration_%d_done critical=%d patched=%d",
+                iteration + 1, len(critical_issues), patched_count,
+            )
+
+        review_report.setdefault("status", "passed")
+        return {
+            "status": "partial",
+            "build_phase": _legacy_build_phase("review_done"),
+            "agent_phase": "review_done",
+            "agent_role": "reviewer",
+            "message": f"Reviewer completed {review_report['iterations']} iteration(s): "
+                       f"{review_report['issues_found']} issues found, "
+                       f"{review_report.get('files_patched', 0)} files patched.",
+            "files_generated": len(current_files),
+            "files": current_files,
+            "review_report": review_report,
+            "runtime_manifest": runtime_manifest.to_runtime_json(),
+        }
+
+    @staticmethod
+    def _build_review_file_summaries(files: list[GeneratedFile]) -> str:
+        """Build a compact summary of all files for the reviewer prompt."""
+        parts: list[str] = []
+        for f in sorted(files, key=lambda x: x.path):
+            truncated = f.content[:3000]
+            if len(f.content) > 3000:
+                truncated += f"\n// ... truncated ({len(f.content)} chars total)"
+            parts.append(f"===FILE: {f.path}===\n{truncated}\n===END_FILE===")
+        return "\n\n".join(parts)
+
+    @staticmethod
+    def _parse_review_issues(content: str) -> list[dict[str, Any]]:
+        """Extract the JSON issues block from reviewer output."""
+        import re
+        json_match = re.search(r"```json\s*(\{[\s\S]*?\})\s*```", content)
+        if not json_match:
+            json_match = re.search(r"(\{[^{}]*\"issues\"\s*:\s*\[[\s\S]*?\]\s*[^{}]*\})", content)
+        if not json_match:
+            return []
+        try:
+            parsed = json.loads(json_match.group(1))
+            issues = parsed.get("issues") if isinstance(parsed, dict) else []
+            return [i for i in (issues or []) if isinstance(i, dict)]
+        except (json.JSONDecodeError, TypeError):
+            return []
 
     # ------------------------------------------------------------------
     # Phased execution: Verifier
@@ -1686,6 +2107,16 @@ class DeterministicWebExecutor:
     _BUILDER_SYSTEM_PROMPT = (
         "You are an expert full-stack web developer specializing in Next.js App Router, React 19, TypeScript, and Tailwind CSS v4.\n"
         "You generate production-quality code: beautiful, responsive, accessible, with REAL content (no Lorem Ipsum).\n\n"
+        "DIRECTIVE RULES (BUILD-CRITICAL — violations break the Vercel build):\n"
+        "- \"use client\" MUST be the VERY FIRST LINE of any file that uses React hooks "
+        "(useState, useEffect, useRef, useCallback, useMemo, useReducer, useContext, "
+        "useRouter, usePathname, useSearchParams) or browser event handlers (onClick, onChange, onSubmit, etc.).\n"
+        "- NEVER place \"use client\" after import statements — this causes an immediate build failure.\n"
+        "- \"use client\" and metadata exports (export const metadata / generateMetadata) are MUTUALLY EXCLUSIVE. "
+        "A file CANNOT have both. If a page needs interactivity AND metadata, extract the interactive parts "
+        "into a separate client component under src/components/ and import it into the server page.\n"
+        "- Server Components (no \"use client\") can import Client Components, but Client Components must NOT "
+        "use server-only APIs like cookies() or headers().\n\n"
         "CRITICAL TECHNICAL RULES:\n"
         "- Use Next.js App Router with src/app/ directory structure.\n"
         "- Place shared UI under src/components/ only — NEVER under src/app/components/ (breaks imports and deploy gates).\n"
@@ -1714,6 +2145,8 @@ class DeterministicWebExecutor:
         "- Use Tailwind utility classes for all styling. Use gradients, shadows, rounded corners, hover effects.\n"
         "- Ensure full mobile responsiveness with sm:/md:/lg: breakpoints.\n"
         "- Add smooth transitions and hover states for interactive elements.\n\n"
+        "PLANNER INSTRUCTIONS: If the prompt includes a PLANNER INSTRUCTIONS section, follow those "
+        "project-specific directions precisely. They contain tailored guidance for this particular site.\n\n"
         "OUTPUT FORMAT: For each file, use EXACTLY:\n"
         "===FILE: path/to/file.ext===\n<content>\n===END_FILE===\n"
     )
@@ -2699,6 +3132,9 @@ class DeterministicWebExecutor:
         self._rewrite_internal_anchors_to_next_link(file_map)
         self._fix_missing_standard_imports(file_map)
 
+        # Final safety net: ensure "use client" is always line 1 after all transforms
+        self._normalize_directive_placement(file_map)
+
         return list(file_map.values())
 
     @staticmethod
@@ -3132,6 +3568,36 @@ class DeterministicWebExecutor:
             logger.info(
                 "deterministic.executor.scaffold.use_client_added file=%s had_metadata=%s",
                 path, has_metadata,
+            )
+
+    @staticmethod
+    def _normalize_directive_placement(file_map: dict[str, GeneratedFile]) -> None:
+        """Ensure 'use client' directive is always the very first line of the file.
+
+        If the directive appears after import statements (a build-fatal error in
+        Next.js App Router), strip it from its current position and re-insert it
+        as the first line.
+        """
+        import re
+        DIRECTIVE_RE = re.compile(r"""^[ \t]*(['"]use client['"])\s*;?\s*$""", re.MULTILINE)
+
+        for path, f in list(file_map.items()):
+            if not (path.endswith(".tsx") or path.endswith(".jsx")):
+                continue
+            content = f.content
+            first_line = content.split("\n", 1)[0].strip()
+            if first_line in ('"use client";', "'use client';", '"use client"', "'use client'"):
+                continue
+            m = DIRECTIVE_RE.search(content)
+            if not m:
+                continue
+            content_without = content[:m.start()] + content[m.end():]
+            content_without = content_without.lstrip("\n")
+            content = '"use client";\n\n' + content_without
+            file_map[path] = GeneratedFile(path=path, content=content)
+            logger.info(
+                "deterministic.executor.scaffold.directive_normalized file=%s",
+                path,
             )
 
     @staticmethod
@@ -3620,6 +4086,15 @@ class DeterministicWebExecutor:
             r")",
             re.IGNORECASE,
         )
+        directive_after_import_re = re.compile(
+            r"^import\s+", re.MULTILINE
+        )
+        misplaced_directive_re = re.compile(
+            r"""^[ \t]*['"]use client['"];?\s*$""", re.MULTILINE
+        )
+        server_client_mix_re = re.compile(
+            r"\bexport\s+(?:const\s+metadata|(?:async\s+)?function\s+generateMetadata)\b"
+        )
         for path, f in file_map.items():
             if not (path.endswith(".tsx") or path.endswith(".jsx")):
                 continue
@@ -3628,6 +4103,12 @@ class DeterministicWebExecutor:
                 continue
             if internal_a.search(f.content):
                 violations.append(f"internal_html_link:{path}")
+            first_import = directive_after_import_re.search(f.content)
+            directive_match = misplaced_directive_re.search(f.content)
+            if first_import and directive_match and first_import.start() < directive_match.start():
+                violations.append(f"directive_after_import:{path}")
+            if directive_match and server_client_mix_re.search(f.content):
+                violations.append(f"server_client_mixing:{path}")
         pkg = file_map.get("package.json")
         if not pkg:
             violations.append("missing_package_json")
@@ -3712,7 +4193,14 @@ class DeterministicWebExecutor:
                     seen_imports.add(statement)
             if imports_to_add:
                 prefix = "\n".join(imports_to_add) + "\n"
-                file_map[path] = GeneratedFile(path=path, content=prefix + f.content)
+                content = f.content
+                directive_match = re.match(r'^(["\']use client["\'];?\s*\n)', content)
+                if directive_match:
+                    insert_pos = directive_match.end()
+                    content = content[:insert_pos] + prefix + content[insert_pos:]
+                else:
+                    content = prefix + content
+                file_map[path] = GeneratedFile(path=path, content=content)
                 logger.info(
                     "deterministic.executor.scaffold.auto_import file=%s added=%s",
                     path, ", ".join(imports_to_add),
@@ -4586,6 +5074,74 @@ class DeterministicWebExecutor:
 
         return "No build log content found."
 
+    @staticmethod
+    def _classify_build_errors(error_logs: str) -> list[dict[str, str]]:
+        """Parse build logs into typed error categories for targeted fixes."""
+        import re
+        errors: list[dict[str, str]] = []
+        directive_re = re.compile(
+            r'"use client" directive must be placed before other expressions', re.IGNORECASE
+        )
+        module_re = re.compile(r"Module not found.*?Can't resolve\s+['\"]([^'\"]+)['\"]")
+        export_re = re.compile(r"'(\w+)' is not exported from '([^']+)'")
+        no_default_re = re.compile(r"does not contain a default export")
+        type_re = re.compile(r"Type error:|TS\d{4}:")
+        hook_re = re.compile(r"React Hook .* only works in a Client Component")
+
+        for line in error_logs.splitlines():
+            if directive_re.search(line):
+                errors.append({"type": "directive_error", "detail": line.strip()})
+            elif hook_re.search(line):
+                errors.append({"type": "directive_error", "detail": line.strip()})
+            elif module_re.search(line):
+                errors.append({"type": "import_error", "detail": line.strip()})
+            elif export_re.search(line) or no_default_re.search(line):
+                errors.append({"type": "export_error", "detail": line.strip()})
+            elif type_re.search(line):
+                errors.append({"type": "type_error", "detail": line.strip()})
+        return errors
+
+    def _apply_deterministic_prefixes(
+        self,
+        error_logs: str,
+        file_map: dict[str, GeneratedFile],
+    ) -> int:
+        """Apply rule-based fixes for known error patterns before calling LLM.
+
+        Returns the number of deterministic fixes applied.
+        """
+        fixes = 0
+
+        stubs_created = self._create_stubs_for_missing_modules(error_logs, file_map)
+        fixes += stubs_created
+
+        self._normalize_directive_placement(file_map)
+        self._ensure_use_client_directive(file_map)
+        self._normalize_directive_placement(file_map)
+        self._validate_hook_imports(file_map, [])
+        self._fix_missing_standard_imports(file_map)
+        self._normalize_directive_placement(file_map)
+        self._fix_duplicate_imports(file_map)
+        self._fix_export_import_mismatches(file_map)
+
+        import re
+        dup_default_re = re.compile(r"^export\s+default\s+", re.MULTILINE)
+        for path, f in list(file_map.items()):
+            if not (path.endswith(".tsx") or path.endswith(".jsx")):
+                continue
+            matches = list(dup_default_re.finditer(f.content))
+            if len(matches) > 1:
+                content = f.content
+                for m in reversed(matches[:-1]):
+                    line_end = content.find("\n", m.start())
+                    if line_end == -1:
+                        line_end = len(content)
+                    content = content[:m.start()] + content[line_end + 1:]
+                file_map[path] = GeneratedFile(path=path, content=content)
+                fixes += 1
+
+        return fixes
+
     async def _auto_fix_build_errors(
         self,
         api_key: str,
@@ -4596,18 +5152,44 @@ class DeterministicWebExecutor:
         template_reference: Optional[TemplateReference] = None,
         manifest: Optional[BuildManifest] = None,
     ) -> list[GeneratedFile]:
-        """Use OpenAI to fix build errors based on Vercel build logs."""
+        """Use deterministic pre-fixes then OpenAI to fix build errors."""
         file_map = {f.path: f for f in files}
 
-        stubs_created = self._create_stubs_for_missing_modules(error_logs, file_map)
-        if stubs_created:
-            logger.info("deterministic.executor.auto_fix.deterministic_stubs created=%d", stubs_created)
+        classified = self._classify_build_errors(error_logs)
+        logger.info(
+            "deterministic.executor.auto_fix.classified errors=%d types=%s",
+            len(classified),
+            list({e["type"] for e in classified}),
+        )
+
+        det_fixes = self._apply_deterministic_prefixes(error_logs, file_map)
+        if det_fixes:
+            logger.info("deterministic.executor.auto_fix.deterministic_fixes applied=%d", det_fixes)
+
+        error_types = {e["type"] for e in classified}
+        type_guidance = ""
+        if "directive_error" in error_types:
+            type_guidance += (
+                "DIRECTIVE FIX: 'use client' must be the VERY FIRST LINE of any file using hooks "
+                "or event handlers. Move it above all imports. Remove metadata exports from client files.\n"
+            )
+        if "import_error" in error_types:
+            type_guidance += (
+                "IMPORT FIX: Create missing component files with proper named exports. "
+                "@/ imports map to src/ — never add them to package.json.\n"
+            )
+        if "export_error" in error_types:
+            type_guidance += (
+                "EXPORT FIX: Ensure components have named exports. Pages need default exports. "
+                "Check for mismatched import/export styles (named vs default).\n"
+            )
 
         approved_list = ", ".join(sorted(APPROVED_PACKAGES.keys()))
         system_prompt = (
             "You are an expert Next.js/TypeScript debugger. You are given Vercel build error logs and the project's source files.\n"
             "Your job is to fix ONLY the files that are causing the build errors.\n\n"
-            "RULES:\n"
+            + (f"TARGETED GUIDANCE (based on error classification):\n{type_guidance}\n" if type_guidance else "")
+            + "RULES:\n"
             "- Fix import errors, missing modules, TypeScript errors, and syntax issues.\n"
             "- Do NOT change files that are not related to the errors.\n"
             "- Preserve the existing design and functionality — only fix what is broken.\n"
@@ -4615,7 +5197,8 @@ class DeterministicWebExecutor:
             "- If a 'Module not found' error references @/components/Foo, CREATE that file with a proper React component.\n"
             "- @/ imports are LOCAL project files (mapped to src/), NOT npm packages. Create the component file, do NOT add to package.json.\n"
             "- For Next.js App Router: pages are default exports, components are named exports.\n"
-            "- Tailwind CSS v4: use @import \"tailwindcss\" in globals.css, @tailwindcss/postcss in postcss.\n\n"
+            "- Tailwind CSS v4: use @import \"tailwindcss\" in globals.css, @tailwindcss/postcss in postcss.\n"
+            "- 'use client' must be the VERY FIRST LINE (before imports) in files using hooks or event handlers.\n\n"
             "DEPENDENCY RULES (STRICT):\n"
             "- Do NOT output package.json. Dependency management is handled externally.\n"
             "- Do NOT add import statements for packages not in this approved list: " + approved_list + ".\n"

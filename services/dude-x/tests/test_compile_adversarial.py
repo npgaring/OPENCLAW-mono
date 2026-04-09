@@ -112,6 +112,12 @@ def test_build_plan_includes_agent_team_metadata():
 
     assert plan.agent_team is not None
     work_packets = plan.agent_team["work_packets"]
-    assert [packet["agent_role"] for packet in work_packets] == ["planner", "frontend", "backend", "verifier"]
+    assert [packet["agent_role"] for packet in work_packets] == [
+        "planner", "frontend", "sanitizer", "backend", "reviewer", "verifier",
+    ]
     assert any(entry["agent_role"] == "frontend" for entry in plan.agent_team["file_ownership"])
+    assert any(entry["agent_role"] == "sanitizer" for entry in plan.agent_team["file_ownership"])
+    assert any(entry["agent_role"] == "reviewer" for entry in plan.agent_team["file_ownership"])
     assert any(entry["route"] == "/" for entry in plan.agent_team["route_ownership"])
+    for packet in work_packets:
+        assert "instructions" in packet, f"Work packet for {packet['agent_role']} missing instructions"

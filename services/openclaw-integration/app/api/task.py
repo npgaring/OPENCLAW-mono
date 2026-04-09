@@ -168,15 +168,19 @@ class BuildPhaseResponse(BaseModel):
 
 PHASE_TRANSITIONS = {
     "planner_done": "frontend_done",
-    "frontend_done": "backend_done",
-    "backend_done": "verify_done",
+    "frontend_done": "sanitizer_done",
+    "sanitizer_done": "backend_done",
+    "backend_done": "review_done",
+    "review_done": "verify_done",
     "verify_done": "complete",
 }
 
 PUBLIC_BUILD_PHASES = {
     "planner_done": "architect_done",
     "frontend_done": "foundation_done",
+    "sanitizer_done": "foundation_done",
     "backend_done": "pages_done",
+    "review_done": "pages_done",
     "verify_done": "pages_done",
     "complete": "complete",
     "error": "error",
@@ -185,7 +189,9 @@ PUBLIC_BUILD_PHASES = {
 AGENT_ROLE_BY_PHASE = {
     "planner_done": "planner",
     "frontend_done": "frontend",
+    "sanitizer_done": "sanitizer",
     "backend_done": "backend",
+    "review_done": "reviewer",
     "verify_done": "verifier",
     "complete": "orchestrator",
     "error": "verifier",
@@ -320,6 +326,43 @@ async def advance_build_phase(
 
         elif current_phase == "frontend_done":
             all_files = executor.deserialize_files(build_state.generated_files_json)
+
+            result = executor.execute_sanitize(
+                all_files=all_files,
+                blueprint=blueprint,
+                template_reference=template_ref,
+                runtime_manifest_json=runtime_manifest_json,
+            )
+            sanitized_files = list(result.get("files") or all_files)
+            serialized_files = executor.serialize_files(sanitized_files)
+
+            build_state.generated_files_json = serialized_files
+            build_state.phase = "sanitizer_done"
+            config["runtime_manifest"] = result.get("runtime_manifest") or runtime_manifest_json
+            build_state.config_json = config
+            build_state.agent_results_json = _append_agent_result(
+                agent_results,
+                agent_role="sanitizer",
+                summary=result.get("message", "Sanitizer completed."),
+                files=serialized_files,
+                warnings=result.get("sanitizer_warnings"),
+            )
+            build_state.updated_at = datetime.now(timezone.utc)
+            await session.commit()
+
+            return BuildPhaseResponse(
+                task_id=task_id,
+                build_phase=_public_build_phase("sanitizer_done"),
+                status="partial",
+                agent_phase="sanitizer_done",
+                agent_role="sanitizer",
+                files_generated=len(sanitized_files),
+                message=result.get("message", "Sanitizer completed."),
+                repository_url=repo_info.get("html_url"),
+            )
+
+        elif current_phase == "sanitizer_done":
+            all_files = executor.deserialize_files(build_state.generated_files_json)
             plan_json = config.get("plan_json", {})
 
             result = await executor.execute_backend(
@@ -355,6 +398,43 @@ async def advance_build_phase(
             )
 
         elif current_phase == "backend_done":
+            all_files = executor.deserialize_files(build_state.generated_files_json)
+
+            result = await executor.execute_review(
+                all_files=all_files,
+                blueprint=blueprint,
+                ownership_manifest=ownership_manifest,
+                runtime_manifest_json=runtime_manifest_json,
+            )
+            reviewed_files = list(result.get("files") or all_files)
+            serialized_files = executor.serialize_files(reviewed_files)
+
+            build_state.generated_files_json = serialized_files
+            build_state.phase = "review_done"
+            config["runtime_manifest"] = result.get("runtime_manifest") or runtime_manifest_json
+            build_state.config_json = config
+            build_state.review_json = result.get("review_report") if isinstance(result.get("review_report"), dict) else None
+            build_state.agent_results_json = _append_agent_result(
+                agent_results,
+                agent_role="reviewer",
+                summary=result.get("message", "Reviewer completed."),
+                files=serialized_files,
+            )
+            build_state.updated_at = datetime.now(timezone.utc)
+            await session.commit()
+
+            return BuildPhaseResponse(
+                task_id=task_id,
+                build_phase=_public_build_phase("review_done"),
+                status="partial",
+                agent_phase="review_done",
+                agent_role="reviewer",
+                files_generated=len(reviewed_files),
+                message=result.get("message", "Reviewer completed."),
+                repository_url=repo_info.get("html_url"),
+            )
+
+        elif current_phase == "review_done":
             all_files = executor.deserialize_files(build_state.generated_files_json)
             plan_json = config.get("plan_json", {})
             operations = plan_json.get("operations", [])

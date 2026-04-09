@@ -296,8 +296,10 @@ export function useGovernedFlow() {
 
     const PHASE_LABELS: Record<string, string> = {
       planner_done: 'Planner complete. Running frontend agent...',
-      frontend_done: 'Frontend agent complete. Running backend agent...',
-      backend_done: 'Backend agent complete. Running verifier...',
+      frontend_done: 'Frontend agent complete. Sanitizing code...',
+      sanitizer_done: 'Code sanitized. Running backend agent...',
+      backend_done: 'Backend agent complete. Reviewing code quality...',
+      review_done: 'Code review complete. Running verifier...',
       verify_done: 'Verifier complete. Committing and deploying...',
       architect_done: 'Blueprint generated. Generating foundation files (configs, layout, components)...',
       foundation_done: 'Foundation generated. Generating page files...',
