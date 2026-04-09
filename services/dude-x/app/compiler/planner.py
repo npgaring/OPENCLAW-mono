@@ -1,4 +1,5 @@
 """Build PlanPayload from validated SpecIn."""
+from app.compiler.agent_team import build_agent_team_plan
 from app.compiler.validator import INTENT_DOMAIN
 from app.core.errors import DUDEXError, ErrorCode
 from app.core.hashing import hash_payload, integration_hash_payload
@@ -56,4 +57,11 @@ def build_plan(spec: SpecIn) -> PlanPayload:
     plan_hash = hash_payload(plan_hash_body)
     plan_body["plan_hash"] = plan_hash
     plan_body["integration_plan_hash"] = integration_plan_hash
+    plan_body["agent_team"] = build_agent_team_plan(
+        domain=domain,
+        deployment_target=spec.target.environment,
+        routes=["/"],
+        operations=plan_body["operations"],
+        integrations=[],
+    )
     return PlanPayload(**plan_body)

@@ -68,6 +68,10 @@ class PlanPayload(BaseModel):
     rollback: dict[str, Any] = Field(default_factory=dict)
     plan_hash: str
     integration_plan_hash: Optional[str] = None
+    agent_team: Optional[dict[str, Any]] = Field(
+        default=None,
+        description="Optional ownership-aware multi-agent execution contract for downstream orchestrators.",
+    )
     trace_id: Optional[str] = Field(
         default=None,
         description="Server-generated or echoed correlation id; not part of plan_hash.",

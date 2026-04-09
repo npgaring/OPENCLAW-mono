@@ -33,6 +33,21 @@ class TaskBuildState(SQLModel, table=True):
     config_json: Optional[dict[str, Any]] = Field(
         default=None, sa_column=Column(JSON, nullable=True),
     )
+    work_packets_json: Optional[list[dict[str, Any]]] = Field(
+        default=None, sa_column=Column(JSON, nullable=True),
+    )
+    ownership_manifest_json: Optional[dict[str, Any]] = Field(
+        default=None, sa_column=Column(JSON, nullable=True),
+    )
+    agent_results_json: Optional[dict[str, Any]] = Field(
+        default=None, sa_column=Column(JSON, nullable=True),
+    )
+    verification_json: Optional[dict[str, Any]] = Field(
+        default=None, sa_column=Column(JSON, nullable=True),
+    )
+    repair_history_json: Optional[list[dict[str, Any]]] = Field(
+        default=None, sa_column=Column(JSON, nullable=True),
+    )
 
     created_at: datetime = Field(
         default_factory=_utc_now,

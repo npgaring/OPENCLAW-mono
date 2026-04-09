@@ -288,47 +288,62 @@ export function useGovernedFlow() {
     const taskId = data.task_id;
     const execResponse = data.execution_response ?? {};
     const buildPhase = (execResponse.build_phase as string | undefined) ?? data.build_phase;
+    const agentPhase = (execResponse.agent_phase as string | undefined) ?? data.agent_phase;
+    const progressPhase = agentPhase ?? buildPhase;
 
     if (data.repository_url) addLog(`Repository created: ${data.repository_url}`);
-    addLog(`Task submitted. status=${data.status ?? 'n/a'} build_phase=${buildPhase ?? 'n/a'}`);
+    addLog(`Task submitted. status=${data.status ?? 'n/a'} build_phase=${buildPhase ?? 'n/a'} agent_phase=${agentPhase ?? 'n/a'}`);
 
     const PHASE_LABELS: Record<string, string> = {
+      planner_done: 'Planner complete. Running frontend agent...',
+      frontend_done: 'Frontend agent complete. Running backend agent...',
+      backend_done: 'Backend agent complete. Running verifier...',
+      verify_done: 'Verifier complete. Committing and deploying...',
       architect_done: 'Blueprint generated. Generating foundation files (configs, layout, components)...',
       foundation_done: 'Foundation generated. Generating page files...',
       pages_done: 'Pages generated. Running inspector, committing, and deploying...',
       complete: 'Build complete!',
     };
 
-    if (taskId && buildPhase && buildPhase !== 'complete' && buildPhase !== 'error') {
-      let currentPhase = buildPhase;
+    if (taskId && progressPhase && progressPhase !== 'complete' && progressPhase !== 'error') {
+      let currentPhase = progressPhase;
       while (currentPhase && currentPhase !== 'complete' && currentPhase !== 'error') {
         const phaseStartedFrom = currentPhase;
         const label = PHASE_LABELS[currentPhase] ?? `Advancing phase: ${currentPhase}...`;
         addLog(label);
         const phaseResult = await integration.advanceBuildPhase(integrationBase, apiToken, taskId);
-        currentPhase = phaseResult.build_phase;
+        currentPhase = phaseResult.agent_phase ?? phaseResult.build_phase;
 
         if (phaseResult.files_generated) {
           addLog(`Files generated so far: ${phaseResult.files_generated}`);
         }
-        if (currentPhase === 'complete') {
+        if ((phaseResult.agent_phase ?? phaseResult.build_phase) === 'complete' || phaseResult.build_phase === 'complete') {
           latestTaskResult = {
             ...latestTaskResult,
             status: phaseResult.status,
+            build_phase: phaseResult.build_phase,
+            agent_phase: phaseResult.agent_phase,
+            agent_role: phaseResult.agent_role,
             deployment_url: phaseResult.deployment_url ?? data.deployment_url,
             repository_url: phaseResult.repository_url ?? data.repository_url,
+            verifier_report: phaseResult.verifier_report ?? latestTaskResult.verifier_report,
+            ownership_conflicts: phaseResult.ownership_conflicts ?? latestTaskResult.ownership_conflicts,
             execution_response: phaseResult.execution_response ?? data.execution_response,
           };
           setTaskResult(latestTaskResult);
           addLog(phaseResult.message ?? 'Build complete!');
           if (phaseResult.deployment_url) addLog(`Deployment URL: ${phaseResult.deployment_url}`);
-        } else if (currentPhase === 'error') {
+        } else if (phaseResult.build_phase === 'error' || currentPhase === 'error') {
           latestTaskResult = {
             ...latestTaskResult,
             status: phaseResult.status,
             build_phase: phaseResult.build_phase,
+            agent_phase: phaseResult.agent_phase,
+            agent_role: phaseResult.agent_role,
             deployment_url: phaseResult.deployment_url ?? latestTaskResult.deployment_url,
             repository_url: phaseResult.repository_url ?? latestTaskResult.repository_url,
+            verifier_report: phaseResult.verifier_report ?? latestTaskResult.verifier_report,
+            ownership_conflicts: phaseResult.ownership_conflicts ?? latestTaskResult.ownership_conflicts,
             execution_response: phaseResult.execution_response ?? latestTaskResult.execution_response,
           };
           setTaskResult(latestTaskResult);

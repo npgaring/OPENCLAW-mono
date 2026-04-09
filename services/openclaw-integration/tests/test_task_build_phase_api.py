@@ -31,7 +31,7 @@ async def _seed_task_build_state(task_id: str) -> None:
         session.add(
             TaskBuildState(
                 task_id=task_id,
-                phase="pages_done",
+                phase="verify_done",
                 blueprint_json={"pages": []},
                 repo_info_json={
                     "owner": "test-owner",
@@ -53,6 +53,7 @@ async def _seed_task_build_state(task_id: str) -> None:
                     "project_name": "test-site",
                     "deploy_branch": "main",
                 },
+                verification_json={"verifier_report": {"status": "passed"}},
             )
         )
         await session.commit()
@@ -71,7 +72,7 @@ def test_build_phase_returns_structured_deterministic_error(auth_headers):
         extra={"upstream_status_code": 403, "upstream_error": "forbidden"},
     )
 
-    with patch("app.api.task.DeterministicWebExecutor.execute_finalize", new=AsyncMock(side_effect=error)):
+    with patch("app.api.task.DeterministicWebExecutor.execute_commit_and_deploy", new=AsyncMock(side_effect=error)):
         with TestClient(app) as client:
             resp = client.post(f"/task/{task_id}/build-phase", headers=auth_headers)
 
@@ -79,6 +80,8 @@ def test_build_phase_returns_structured_deterministic_error(auth_headers):
     body = resp.json()
     assert body["build_phase"] == "error"
     assert body["status"] == "needs_review"
+    assert body["agent_phase"] == "verify_done"
+    assert body["agent_role"] == "verifier"
     assert body["reason_codes"] == [REASON_VERCEL_PROJECT_CREATE_FAILED]
     assert body["provider_error"]["provider"] == "vercel"
     assert body["provider_error"]["status_code"] == 403

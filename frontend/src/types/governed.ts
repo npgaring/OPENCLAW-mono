@@ -56,6 +56,10 @@ export interface TaskSubmitResult {
   preview_url?: string;
   repository_url?: string;
   build_phase?: string;
+  agent_phase?: string;
+  agent_role?: string;
+  verifier_report?: Record<string, unknown>;
+  ownership_conflicts?: Record<string, unknown>[];
   execution_response?: Record<string, unknown>;
   [k: string]: unknown;
 }
@@ -64,6 +68,8 @@ export interface BuildPhaseResult {
   task_id: string;
   build_phase: string;
   status: string;
+  agent_phase?: string;
+  agent_role?: string;
   files_generated?: number;
   message?: string;
   deployment_url?: string;
@@ -73,6 +79,8 @@ export interface BuildPhaseResult {
   provider_error?: Record<string, unknown>;
   upstream_status_code?: number;
   upstream_error?: string;
+  verifier_report?: Record<string, unknown>;
+  ownership_conflicts?: Record<string, unknown>[];
 }
 
 export interface EventLogItem {

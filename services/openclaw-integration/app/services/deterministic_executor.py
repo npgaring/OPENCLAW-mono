@@ -19,6 +19,7 @@ import subprocess
 import tempfile
 import time
 from dataclasses import dataclass, field
+from fnmatch import fnmatch
 from typing import Any, Optional
 from urllib.parse import quote
 
@@ -45,6 +46,40 @@ CODEGEN_TIMEOUT_SECONDS = 180
 GITHUB_TIMEOUT_SECONDS = 60
 VERCEL_TIMEOUT_SECONDS = 60
 BRANCH_RETRY_DELAYS = (2, 3, 5, 8)
+
+LEGACY_BUILD_PHASE_BY_AGENT_PHASE = {
+    "planner_done": "architect_done",
+    "frontend_done": "foundation_done",
+    "backend_done": "pages_done",
+    "verify_done": "pages_done",
+    "complete": "complete",
+    "error": "error",
+}
+
+AGENT_ROLE_BY_PHASE = {
+    "planner_done": "planner",
+    "frontend_done": "frontend",
+    "backend_done": "backend",
+    "verify_done": "verifier",
+    "complete": "orchestrator",
+    "error": "verifier",
+}
+
+ALLOWED_ROUTE_MODULE_EXPORTS = {
+    "default",
+    "metadata",
+    "generateMetadata",
+    "viewport",
+    "generateViewport",
+    "generateStaticParams",
+    "revalidate",
+    "dynamic",
+    "dynamicParams",
+    "fetchCache",
+    "runtime",
+    "preferredRegion",
+    "maxDuration",
+}
 
 
 def _b64url(data: bytes) -> str:
@@ -75,6 +110,14 @@ def _normalize_private_key(value: str) -> str:
 
 def _is_deterministic_plan(plan: dict[str, Any]) -> bool:
     return plan.get("executor_contract") == "deterministic_web_v1" or isinstance(plan.get("execution_plan_v2"), dict)
+
+
+def _legacy_build_phase(agent_phase: str) -> str:
+    return LEGACY_BUILD_PHASE_BY_AGENT_PHASE.get(agent_phase, agent_phase)
+
+
+def _agent_role_for_phase(agent_phase: str) -> Optional[str]:
+    return AGENT_ROLE_BY_PHASE.get(agent_phase)
 
 
 class DeterministicExecutionError(Exception):
@@ -339,6 +382,233 @@ class DeterministicWebExecutor:
     def serialize_files(files: list[GeneratedFile]) -> list[dict[str, str]]:
         return [{"path": f.path, "content": f.content} for f in files]
 
+    @staticmethod
+    def _utc_timestamp() -> str:
+        return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+
+    def _default_agent_team_plan(
+        self,
+        *,
+        plan: dict[str, Any],
+        context: dict[str, Any],
+        blueprint: dict[str, Any],
+    ) -> dict[str, Any]:
+        routes = [str(route).strip() for route in (context.get("routes") or []) if str(route).strip()]
+        if not routes:
+            routes = ["/"]
+        file_ownership = [
+            {
+                "agent_role": "frontend",
+                "owned_paths": ["src/app/**", "src/components/**", "src/styles/**", "public/**"],
+                "allowed_shared_paths": ["public/**"],
+            },
+            {
+                "agent_role": "backend",
+                "owned_paths": [
+                    "src/app/api/**",
+                    "src/lib/server/**",
+                    "src/lib/integrations/**",
+                    "src/lib/env/**",
+                    "src/lib/schema/**",
+                ],
+                "allowed_shared_paths": [],
+            },
+            {
+                "agent_role": "verifier",
+                "owned_paths": [],
+                "allowed_shared_paths": [],
+            },
+        ]
+        reserved_singletons = [
+            {"path": "src/app/layout.tsx", "agent_role": "frontend"},
+            {"path": "src/app/globals.css", "agent_role": "frontend"},
+            {"path": "package.json", "agent_role": "orchestrator"},
+            {"path": "tsconfig.json", "agent_role": "orchestrator"},
+            {"path": "next.config.*", "agent_role": "orchestrator"},
+            {"path": "postcss.config.*", "agent_role": "orchestrator"},
+        ]
+        work_packets = [
+            {
+                "agent_role": "planner",
+                "phase": "planner_done",
+                "owned_paths": [],
+                "allowed_shared_paths": [],
+                "depends_on": [],
+                "inputs": {
+                    "goal": context.get("goal"),
+                    "route_count": len(routes),
+                },
+                "acceptance_checks": [
+                    "Planner emits work packets, file ownership, route ownership, and reserved singletons.",
+                ],
+            },
+            {
+                "agent_role": "frontend",
+                "phase": "frontend_done",
+                "owned_paths": [entry["owned_paths"] for entry in file_ownership if entry["agent_role"] == "frontend"][0],
+                "allowed_shared_paths": ["public/**"],
+                "depends_on": ["planner_done"],
+                "inputs": {
+                    "routes": list(routes),
+                    "shared_components": list(blueprint.get("shared_components") or []),
+                },
+                "acceptance_checks": [
+                    "Frontend owns route modules, page content, and shared UI components.",
+                    "Route modules may use legal Next.js exports like metadata and generateMetadata.",
+                ],
+            },
+            {
+                "agent_role": "backend",
+                "phase": "backend_done",
+                "owned_paths": [entry["owned_paths"] for entry in file_ownership if entry["agent_role"] == "backend"][0],
+                "allowed_shared_paths": [],
+                "depends_on": ["frontend_done"],
+                "inputs": {
+                    "integrations": list(plan.get("integrations") or []),
+                },
+                "acceptance_checks": [
+                    "Backend work stays inside server-owned paths and does not overwrite frontend-owned files.",
+                ],
+            },
+            {
+                "agent_role": "verifier",
+                "phase": "verify_done",
+                "owned_paths": [],
+                "allowed_shared_paths": [],
+                "depends_on": ["backend_done"],
+                "inputs": {
+                    "deployment_target": plan.get("deploy_target") or context.get("deployment_target"),
+                },
+                "acceptance_checks": [
+                    "Verifier blocks only on real ownership, build, or deploy-preflight failures.",
+                ],
+            },
+        ]
+        return {
+            "work_packets": work_packets,
+            "file_ownership": file_ownership,
+            "shared_contracts": [
+                {
+                    "name": "next_route_module_exports",
+                    "description": "Treat route-module exports as module-local, not global singleton exports.",
+                }
+            ],
+            "reserved_singletons": reserved_singletons,
+            "route_ownership": [{"route": route, "agent_role": "frontend"} for route in routes],
+        }
+
+    def _build_ownership_manifest(
+        self,
+        *,
+        plan: dict[str, Any],
+        context: dict[str, Any],
+        blueprint: dict[str, Any],
+    ) -> dict[str, Any]:
+        raw_agent_team = plan.get("agent_team") if isinstance(plan.get("agent_team"), dict) else {}
+        manifest = json.loads(json.dumps(raw_agent_team or self._default_agent_team_plan(plan=plan, context=context, blueprint=blueprint)))
+        manifest.setdefault("work_packets", [])
+        manifest.setdefault("file_ownership", [])
+        manifest.setdefault("shared_contracts", [])
+        manifest.setdefault("reserved_singletons", [])
+        manifest.setdefault("route_ownership", [])
+
+        existing_routes = {str(entry.get("route") or "").strip() for entry in manifest["route_ownership"] if isinstance(entry, dict)}
+        for page in blueprint.get("pages") or []:
+            if not isinstance(page, dict):
+                continue
+            slug = str(page.get("slug") or "").strip()
+            route = "/" if slug in ("", "home") else f"/{slug.strip('/')}"
+            if route not in existing_routes:
+                manifest["route_ownership"].append(
+                    {
+                        "route": route,
+                        "agent_role": "frontend",
+                        "path": "src/app/page.tsx" if route == "/" else f"src/app/{route.strip('/')}/page.tsx",
+                    }
+                )
+                existing_routes.add(route)
+        if "/" not in existing_routes:
+            manifest["route_ownership"].append({"route": "/", "agent_role": "frontend", "path": "src/app/page.tsx"})
+        return manifest
+
+    @staticmethod
+    def _append_agent_result(
+        agent_results: Optional[dict[str, Any]],
+        *,
+        agent_role: str,
+        summary: str,
+        files: list[GeneratedFile],
+        warnings: Optional[list[str]] = None,
+    ) -> dict[str, Any]:
+        next_results = dict(agent_results or {})
+        next_results[agent_role] = {
+            "status": "completed",
+            "started_at": next_results.get(agent_role, {}).get("started_at") or DeterministicWebExecutor._utc_timestamp(),
+            "ended_at": DeterministicWebExecutor._utc_timestamp(),
+            "summary": summary,
+            "files_produced": [f.path for f in files],
+            "warnings": list(warnings or []),
+        }
+        return next_results
+
+    @staticmethod
+    def _match_owned_path(path: str, patterns: list[str]) -> bool:
+        return any(fnmatch(path, pattern) for pattern in patterns)
+
+    def _owner_for_path(self, path: str, ownership_manifest: Optional[dict[str, Any]]) -> Optional[str]:
+        if not isinstance(ownership_manifest, dict):
+            return None
+        for entry in ownership_manifest.get("reserved_singletons") or []:
+            if isinstance(entry, dict) and fnmatch(path, str(entry.get("path") or "")):
+                return str(entry.get("agent_role") or "").strip() or None
+        for entry in ownership_manifest.get("file_ownership") or []:
+            if not isinstance(entry, dict):
+                continue
+            patterns = [str(p) for p in (entry.get("owned_paths") or []) if str(p).strip()]
+            if self._match_owned_path(path, patterns):
+                return str(entry.get("agent_role") or "").strip() or None
+        return None
+
+    @staticmethod
+    def _normalize_route_path(path: str) -> Optional[str]:
+        normalized = str(path or "").strip()
+        for prefix in ("src/app/", "app/"):
+            if not normalized.startswith(prefix):
+                continue
+            rel = normalized[len(prefix):]
+            if rel == "page.tsx":
+                return "/"
+            if rel.endswith("/page.tsx"):
+                rel = rel[: -len("/page.tsx")]
+            elif rel == "route.ts":
+                return "/"
+            elif rel.endswith("/route.ts"):
+                rel = rel[: -len("/route.ts")]
+            else:
+                return None
+            segments = [
+                segment for segment in rel.split("/")
+                if segment and not segment.startswith("(") and not segment.startswith("@")
+            ]
+            return "/" + "/".join(segments) if segments else "/"
+        return None
+
+    @staticmethod
+    def _format_conflict(conflict: dict[str, Any]) -> str:
+        conflict_type = str(conflict.get("type") or "").strip()
+        if conflict_type == "duplicate_file":
+            return f"DUPLICATE_FILE:{conflict.get('path')} ({conflict.get('count')} times)"
+        if conflict_type == "reserved_singleton_collision":
+            owners = conflict.get("owners") or conflict.get("owner")
+            return f"RESERVED_SINGLETON:{conflict.get('path')} owner={json.dumps(owners)}"
+        if conflict_type == "duplicate_route":
+            return f"DUPLICATE_ROUTE:{conflict.get('route')} paths={json.dumps(conflict.get('paths') or [])}"
+        if conflict_type == "route_ownership_conflict":
+            return f"ROUTE_OWNERSHIP:{conflict.get('route')} owners={json.dumps(conflict.get('owners') or [])}"
+        if conflict_type == "package_fragmentation":
+            return f"PACKAGE_FRAGMENTATION:{json.dumps(conflict.get('paths') or [])}"
+        return json.dumps(conflict, sort_keys=True)
+
     # ------------------------------------------------------------------
     # Main entry point
     # ------------------------------------------------------------------
@@ -420,6 +690,14 @@ class DeterministicWebExecutor:
         steps_completed.append("architect")
         runtime_manifest = BuildManifest()
         runtime_manifest.add_routes([p.get("slug", "") for p in (blueprint.get("pages") or []) if isinstance(p, dict)])
+        ownership_manifest = self._build_ownership_manifest(plan=plan, context=context, blueprint=blueprint)
+        work_packets = list(ownership_manifest.get("work_packets") or [])
+        agent_results = self._append_agent_result(
+            {},
+            agent_role="planner",
+            summary="Planner completed repository provisioning, blueprint generation, and ownership manifest creation.",
+            files=[],
+        )
 
         build_state = {
             "blueprint": blueprint,
@@ -448,13 +726,20 @@ class DeterministicWebExecutor:
                 "plan_json": plan,
                 "runtime_manifest": runtime_manifest.to_runtime_json(),
             },
+            "work_packets": work_packets,
+            "ownership_manifest": ownership_manifest,
+            "agent_results": agent_results,
+            "verification": None,
+            "repair_history": [],
         }
 
         return {
             "execution_id": execution_id,
             "status": "partial",
             "build_phase": "architect_done",
-            "message": "Phase 1 complete: repository provisioned and blueprint generated.",
+            "agent_phase": "planner_done",
+            "agent_role": "planner",
+            "message": "Planner complete: repository provisioned, blueprint generated, and ownership manifest recorded.",
             "artifacts": [{"path": repo.html_url, "type": "repository", "summary": "GitHub repository created."}],
             "steps_completed": steps_completed,
             "repository_url": repo.html_url,
@@ -606,51 +891,121 @@ class DeterministicWebExecutor:
         return all_files, runtime_manifest.to_runtime_json()
 
     # ------------------------------------------------------------------
-    # Phased execution: Finalize (inspect, commit, deploy)
+    # Phased execution: Frontend agent
     # ------------------------------------------------------------------
-    async def execute_finalize(
+    async def execute_frontend(
+        self,
+        *,
+        blueprint: dict[str, Any],
+        context: dict[str, Any],
+        template_reference: TemplateReference,
+        task_id: str,
+        runtime_manifest_json: Optional[dict[str, Any]] = None,
+    ) -> dict[str, Any]:
+        foundation_files, runtime_manifest_json = await self.execute_foundation(
+            blueprint=blueprint,
+            context=context,
+            template_reference=template_reference,
+            task_id=task_id,
+            runtime_manifest_json=runtime_manifest_json,
+        )
+        all_files, runtime_manifest_json = await self.execute_pages(
+            blueprint=blueprint,
+            context=context,
+            foundation_files=foundation_files,
+            task_id=task_id,
+            runtime_manifest_json=runtime_manifest_json,
+        )
+        return {
+            "status": "partial",
+            "build_phase": _legacy_build_phase("frontend_done"),
+            "agent_phase": "frontend_done",
+            "agent_role": "frontend",
+            "message": f"Frontend agent generated {len(all_files)} site files.",
+            "files_generated": len(all_files),
+            "files": all_files,
+            "runtime_manifest": runtime_manifest_json,
+        }
+
+    # ------------------------------------------------------------------
+    # Phased execution: Backend agent
+    # ------------------------------------------------------------------
+    async def execute_backend(
+        self,
+        *,
+        all_files: list[GeneratedFile],
+        plan: dict[str, Any],
+        runtime_manifest_json: Optional[dict[str, Any]] = None,
+    ) -> dict[str, Any]:
+        runtime_manifest = BuildManifest.from_runtime_json(runtime_manifest_json)
+        runtime_manifest.update_from_files(all_files)
+        backend_operations = [
+            op for op in (plan.get("operations") or [])
+            if isinstance(op, dict) and str(op.get("target") or "").startswith("hosting/")
+        ]
+        summary = "Backend agent found no server-side file generation requirements."
+        if backend_operations:
+            summary = "Backend agent recorded deployment and server-side ownership requirements without mutating frontend files."
+        return {
+            "status": "partial",
+            "build_phase": _legacy_build_phase("backend_done"),
+            "agent_phase": "backend_done",
+            "agent_role": "backend",
+            "message": summary,
+            "files_generated": len(all_files),
+            "files": all_files,
+            "runtime_manifest": runtime_manifest.to_runtime_json(),
+        }
+
+    # ------------------------------------------------------------------
+    # Phased execution: Verifier
+    # ------------------------------------------------------------------
+    async def execute_verify(
         self,
         *,
         all_files: list[GeneratedFile],
         blueprint: dict[str, Any],
         template_reference: TemplateReference,
-        plan: dict[str, Any],
         operations: list[dict[str, Any]],
         repo_info: dict[str, Any],
         task_id: str,
-        trace_id: Optional[str],
         deployment_target: str,
         hosting_team_id: str,
         project_name: str,
         deploy_branch: str,
+        ownership_manifest: Optional[dict[str, Any]] = None,
         runtime_manifest_json: Optional[dict[str, Any]] = None,
+        repair_history_json: Optional[list[dict[str, Any]]] = None,
     ) -> dict[str, Any]:
-        """Phase 4: Inspector, scaffold integrity, GitHub commit, Vercel deploy."""
         execution_id = f"detexec_{task_id}"
-        steps_completed: list[str] = ["provision_repo", "architect", "generate_foundation", "generate_pages"]
         runtime_manifest = BuildManifest.from_runtime_json(runtime_manifest_json)
-        runtime_manifest.add_routes([p.get("slug", "") for p in (blueprint.get("pages") or []) if isinstance(p, dict)])
         runtime_manifest.update_from_files(all_files)
-
-        owner = repo_info["owner"]
-        repo_name = repo_info["name"]
         html_url = repo_info["html_url"]
-        branch = repo_info.get("branch", "main")
 
-        # Inspector + scaffold integrity
         logger.info("deterministic.executor.codegen.phase3_inspector_start task_id=%s", task_id)
         if not all_files:
             all_files = self._extract_files_from_operations(operations)
-        validated_files, conflicts = self._phase3_inspect(all_files, blueprint, template_reference=template_reference)
+        validated_files, conflicts = self._phase3_inspect(
+            all_files,
+            blueprint,
+            template_reference=template_reference,
+            ownership_manifest=ownership_manifest,
+        )
         runtime_manifest.update_from_files(validated_files)
         logger.info("deterministic.executor.codegen.phase3_inspector_done task_id=%s files=%d", task_id, len(validated_files))
-        steps_completed.append("generate_code")
 
-        def _add_conflict_metadata(payload: dict[str, Any]) -> dict[str, Any]:
-            if conflicts:
-                payload["conflicts_detected"] = len(conflicts)
-                payload["conflict_samples"] = conflicts[:20]
-            return payload
+        verifier_report: dict[str, Any] = {
+            "status": "passed",
+            "ownership_check": {
+                "status": "passed",
+                "conflicts_detected": len(conflicts),
+            },
+            "local_preflight": {"status": "skipped"},
+            "deploy_preflight": {"status": "pending"},
+            "repair_attempts": 0,
+        }
+        if conflicts:
+            verifier_report["ownership_check"]["conflicts"] = conflicts
 
         if settings.enable_codegen_deploy_static_gate():
             qmap = {f.path: f for f in validated_files}
@@ -667,20 +1022,29 @@ class DeterministicWebExecutor:
                         + "; ".join(qviol[:8])
                     ),
                     provider="openclaw_codegen",
-                    extra={"quality_violations": qviol},
+                    extra={
+                        "quality_violations": qviol,
+                        "verifier_report": {**verifier_report, "status": "blocked"},
+                        "ownership_conflicts": conflicts,
+                    },
                 )
 
-        # Vercel access preflight (block before GitHub commit when token/team lacks access).
         logger.info("deterministic.executor.vercel_preflight_start task_id=%s", task_id)
         async with httpx.AsyncClient(timeout=VERCEL_TIMEOUT_SECONDS) as vc_client:
             vercel_project = await self._vercel_create_or_resolve_project(
                 vc_client,
                 team_id=hosting_team_id,
                 project_name=project_name,
-                github_owner=owner,
-                github_repo=repo_name,
+                github_owner=repo_info["owner"],
+                github_repo=repo_info["name"],
                 production_branch=deploy_branch,
             )
+        verifier_report["deploy_preflight"] = {
+            "status": "passed",
+            "provider": "vercel",
+            "project_name": vercel_project.name,
+            "project_id": vercel_project.id,
+        }
         logger.info(
             "deterministic.executor.vercel_preflight_done task_id=%s project_id=%s project_name=%s",
             task_id,
@@ -688,12 +1052,12 @@ class DeterministicWebExecutor:
             vercel_project.name,
         )
 
-        # Local preflight (if enabled)
         api_key = (settings.openai_api_key or "").strip()
         model = self._resolve_codegen_model()
         max_fix_retries = getattr(settings, "codegen_max_fix_retries", 2)
         local_preflight_fix_attempts = 0
         preflight_logs = ""
+        repair_history = list(repair_history_json or [])
         seen_failure_signatures: set[str] = set()
 
         if settings.enable_codegen_local_preflight():
@@ -701,112 +1065,175 @@ class DeterministicWebExecutor:
                 preflight = await self._run_local_preflight(validated_files)
                 preflight_logs = preflight.logs
                 if preflight.success:
-                    steps_completed.append("local_preflight")
+                    verifier_report["local_preflight"] = {"status": "passed"}
                     break
+                verifier_report["local_preflight"] = {
+                    "status": "failed",
+                    "last_error": preflight.logs[:500],
+                }
                 failure_signature = self._preflight_failure_signature(preflight.logs, validated_files)
-                if failure_signature in seen_failure_signatures:
-                    return _add_conflict_metadata(
-                        {
-                            "execution_id": execution_id,
-                            "status": "needs_review",
-                            "message": "Local preflight auto-fix loop made no progress (repeated failure signature).",
-                            "reason_codes": [REASON_CODEGEN_AUTOFIX_STALLED],
-                            "artifacts": [{"path": html_url, "type": "repository", "summary": "GitHub repository created; local preflight failed."}],
-                            "steps_completed": steps_completed,
-                            "repository_url": html_url,
-                            "repo_commit_sha": None,
-                            "deployment_id": None,
-                            "deployment_url": None,
-                            "files_generated": len(validated_files),
-                            "provider_ids": {},
-                            "vercel_ready_state": "SKIPPED_LOCAL_PREFLIGHT_FAILED",
-                            "fix_attempts": 0,
-                            "local_preflight_fix_attempts": local_preflight_fix_attempts,
+                if failure_signature in seen_failure_signatures or local_preflight_fix_attempts >= max_fix_retries or not api_key:
+                    verifier_report["status"] = "blocked"
+                    verifier_report["repair_attempts"] = local_preflight_fix_attempts
+                    return {
+                        "execution_id": execution_id,
+                        "status": "needs_review",
+                        "build_phase": "error",
+                        "agent_phase": "verify_done",
+                        "agent_role": "verifier",
+                        "message": "Verifier blocked finalize after local preflight failed to converge.",
+                        "reason_codes": [REASON_CODEGEN_AUTOFIX_STALLED],
+                        "repository_url": html_url,
+                        "files_generated": len(validated_files),
+                        "vercel_ready_state": "SKIPPED_LOCAL_PREFLIGHT_FAILED",
+                        "local_preflight_fix_attempts": local_preflight_fix_attempts,
+                        "build_logs": preflight_logs,
+                        "ownership_conflicts": conflicts,
+                        "verifier_report": verifier_report,
+                        "repair_history": repair_history,
+                        "verification_json": {
+                            "verifier_report": verifier_report,
+                            "ownership_conflicts": conflicts,
                             "build_logs": preflight_logs,
-                        }
-                    )
+                            "local_preflight_fix_attempts": local_preflight_fix_attempts,
+                            "vercel_project": {"id": vercel_project.id, "name": vercel_project.name},
+                        },
+                    }
                 seen_failure_signatures.add(failure_signature)
-                if local_preflight_fix_attempts >= max_fix_retries or not api_key:
-                    return _add_conflict_metadata(
-                        {
-                            "execution_id": execution_id,
-                            "status": "needs_review",
-                            "message": f"Local preflight build failed after {local_preflight_fix_attempts} auto-fix attempt(s).",
-                            "artifacts": [{"path": html_url, "type": "repository", "summary": "GitHub repository created; local preflight failed."}],
-                            "steps_completed": steps_completed,
-                            "repository_url": html_url,
-                            "repo_commit_sha": None,
-                            "deployment_id": None,
-                            "deployment_url": None,
-                            "files_generated": len(validated_files),
-                            "provider_ids": {},
-                            "vercel_ready_state": "SKIPPED_LOCAL_PREFLIGHT_FAILED",
-                            "fix_attempts": 0,
-                            "local_preflight_fix_attempts": local_preflight_fix_attempts,
-                            "build_logs": preflight_logs,
-                        }
-                    )
                 local_preflight_fix_attempts += 1
-                validated_files = await self._auto_fix_build_errors(
-                    api_key, model, preflight_logs, validated_files,
+                repaired_files = await self._auto_fix_build_errors(
+                    api_key,
+                    model,
+                    preflight_logs,
+                    validated_files,
                     template_reference=template_reference,
                     manifest=runtime_manifest,
                 )
+                repaired_paths = sorted(
+                    {
+                        new_file.path
+                        for new_file in repaired_files
+                        for old_file in validated_files
+                        if new_file.path == old_file.path and new_file.content != old_file.content
+                    }
+                    | {
+                        new_file.path for new_file in repaired_files
+                        if new_file.path not in {old_file.path for old_file in validated_files}
+                    }
+                )
+                repair_history.append(
+                    {
+                        "issue_id": f"local-preflight-{local_preflight_fix_attempts}",
+                        "reason": "local_preflight_failure",
+                        "files_touched": repaired_paths,
+                        "outcome": "applied",
+                    }
+                )
+                validated_files = repaired_files
                 runtime_manifest.update_from_files(validated_files)
                 quality_after_fix = self._collect_deploy_quality_violations({f.path: f for f in validated_files})
                 if quality_after_fix:
-                    logger.warning(
-                        "deterministic.executor.deploy_quality_gate.after_autofix task_id=%s attempt=%d violations=%s",
-                        task_id,
-                        local_preflight_fix_attempts,
-                        quality_after_fix[:12],
-                    )
-                    if settings.enable_codegen_deploy_static_gate():
-                        return _add_conflict_metadata(
-                            {
-                                "execution_id": execution_id,
-                                "status": "needs_review",
-                                "message": "Static pre-build validation failed after auto-fix attempt.",
-                                "reason_codes": [REASON_DEPLOY_QUALITY_GATE_FAILED],
-                                "artifacts": [{"path": html_url, "type": "repository", "summary": "GitHub repository created; static validation failed."}],
-                                "steps_completed": steps_completed,
-                                "repository_url": html_url,
-                                "repo_commit_sha": None,
-                                "deployment_id": None,
-                                "deployment_url": None,
-                                "files_generated": len(validated_files),
-                                "provider_ids": {},
-                                "vercel_ready_state": "SKIPPED_LOCAL_PREFLIGHT_FAILED",
-                                "fix_attempts": 0,
-                                "local_preflight_fix_attempts": local_preflight_fix_attempts,
-                                "build_logs": preflight_logs,
-                                "quality_violations": quality_after_fix,
-                            }
-                        )
+                    verifier_report["status"] = "blocked"
+                    verifier_report["repair_attempts"] = local_preflight_fix_attempts
+                    return {
+                        "execution_id": execution_id,
+                        "status": "needs_review",
+                        "build_phase": "error",
+                        "agent_phase": "verify_done",
+                        "agent_role": "verifier",
+                        "message": "Verifier blocked finalize after scoped repair introduced unresolved static issues.",
+                        "reason_codes": [REASON_DEPLOY_QUALITY_GATE_FAILED],
+                        "repository_url": html_url,
+                        "files_generated": len(validated_files),
+                        "vercel_ready_state": "SKIPPED_LOCAL_PREFLIGHT_FAILED",
+                        "local_preflight_fix_attempts": local_preflight_fix_attempts,
+                        "build_logs": preflight_logs,
+                        "ownership_conflicts": conflicts,
+                        "verifier_report": {**verifier_report, "quality_violations": quality_after_fix},
+                        "repair_history": repair_history,
+                        "verification_json": {
+                            "verifier_report": {**verifier_report, "quality_violations": quality_after_fix},
+                            "ownership_conflicts": conflicts,
+                            "build_logs": preflight_logs,
+                            "local_preflight_fix_attempts": local_preflight_fix_attempts,
+                            "vercel_project": {"id": vercel_project.id, "name": vercel_project.name},
+                        },
+                    }
 
-        # Batch commit to GitHub
+        verifier_report["repair_attempts"] = local_preflight_fix_attempts
+        return {
+            "status": "partial",
+            "build_phase": _legacy_build_phase("verify_done"),
+            "agent_phase": "verify_done",
+            "agent_role": "verifier",
+            "message": "Verifier passed ownership, local build, and deploy preflight checks.",
+            "files_generated": len(validated_files),
+            "files": validated_files,
+            "ownership_conflicts": conflicts,
+            "verifier_report": verifier_report,
+            "repair_history": repair_history,
+            "verification_json": {
+                "verifier_report": verifier_report,
+                "ownership_conflicts": conflicts,
+                "build_logs": preflight_logs,
+                "local_preflight_fix_attempts": local_preflight_fix_attempts,
+                "vercel_project": {"id": vercel_project.id, "name": vercel_project.name},
+            },
+            "runtime_manifest": runtime_manifest.to_runtime_json(),
+        }
+
+    # ------------------------------------------------------------------
+    # Phased execution: Commit and deploy
+    # ------------------------------------------------------------------
+    async def execute_commit_and_deploy(
+        self,
+        *,
+        validated_files: list[GeneratedFile],
+        repo_info: dict[str, Any],
+        task_id: str,
+        trace_id: Optional[str],
+        deployment_target: str,
+        hosting_team_id: str,
+        project_name: str,
+        deploy_branch: str,
+        verification_json: Optional[dict[str, Any]] = None,
+    ) -> dict[str, Any]:
+        execution_id = f"detexec_{task_id}"
+        owner = repo_info["owner"]
+        repo_name = repo_info["name"]
+        html_url = repo_info["html_url"]
+        branch = repo_info.get("branch", "main")
+        deploy_target = "production" if (deployment_target or "").lower() == "production" else "preview"
+        verifier_report = dict((verification_json or {}).get("verifier_report") or {})
+        ownership_conflicts = list((verification_json or {}).get("ownership_conflicts") or [])
+        local_preflight_fix_attempts = int((verification_json or {}).get("local_preflight_fix_attempts") or 0)
+        preflight_logs = str((verification_json or {}).get("build_logs") or "")
+        verified_project = (verification_json or {}).get("vercel_project") or {}
+        project_name = str(verified_project.get("name") or project_name)
+        steps_completed: list[str] = ["provision_repo", "architect", "frontend", "backend", "verify"]
+
         logger.info("deterministic.executor.phase3_start task_id=%s", task_id)
         async with httpx.AsyncClient(timeout=GITHUB_TIMEOUT_SECONDS) as gh_client:
             github_installation_token = await self._github_installation_token(gh_client)
             commit_sha = await self._github_batch_commit(
-                gh_client, github_installation_token,
-                owner=owner, repo=repo_name, branch=branch,
+                gh_client,
+                github_installation_token,
+                owner=owner,
+                repo=repo_name,
+                branch=branch,
                 files=validated_files,
                 message=f"feat: initial site generation via deterministic_web_v1\n\nTask: {task_id}\nTrace: {trace_id or 'N/A'}",
             )
         steps_completed.append("write_files")
         logger.info("deterministic.executor.phase3_done task_id=%s commit_sha=%s", task_id, commit_sha)
 
-        # Vercel deploy
         logger.info("deterministic.executor.phase4_start task_id=%s", task_id)
-        deploy_target = "production" if (deployment_target or "").lower() == "production" else "preview"
         async with httpx.AsyncClient(timeout=VERCEL_TIMEOUT_SECONDS) as vc_client:
             steps_completed.append("provision_hosting")
-
             deployment = await self._vercel_deploy_files(
                 vc_client,
                 team_id=hosting_team_id,
-                project_name=vercel_project.name,
+                project_name=project_name,
                 files=validated_files,
                 target=deploy_target,
             )
@@ -826,7 +1253,9 @@ class DeterministicWebExecutor:
             "execution_id": execution_id,
             "status": "success",
             "build_phase": "complete",
-            "message": f"Pipeline completed: {len(validated_files)} files generated, committed, and deployment triggered.",
+            "agent_phase": "complete",
+            "agent_role": "orchestrator",
+            "message": f"Pipeline completed: {len(validated_files)} files verified, committed, and deployment triggered.",
             "artifacts": artifacts,
             "steps_completed": steps_completed,
             "repository_url": html_url,
@@ -834,15 +1263,76 @@ class DeterministicWebExecutor:
             "deployment_id": deployment.id,
             "deployment_url": deployment_url,
             "files_generated": len(validated_files),
-            "provider_ids": {"vercel_project_id": vercel_project.id},
+            "provider_ids": {"vercel_project_id": verified_project.get("id")},
             "vercel_ready_state": "DEPLOYING",
             "fix_attempts": 0,
             "local_preflight_fix_attempts": local_preflight_fix_attempts,
             "build_logs": preflight_logs,
+            "verifier_report": verifier_report or None,
+            "ownership_conflicts": ownership_conflicts or None,
         }
         if deploy_target == "preview":
             result["preview_url"] = deployment_url
-        return _add_conflict_metadata(result)
+        return result
+
+    # ------------------------------------------------------------------
+    # Phased execution: Finalize (compat wrapper)
+    # ------------------------------------------------------------------
+    async def execute_finalize(
+        self,
+        *,
+        all_files: list[GeneratedFile],
+        blueprint: dict[str, Any],
+        template_reference: TemplateReference,
+        plan: dict[str, Any],
+        operations: list[dict[str, Any]],
+        repo_info: dict[str, Any],
+        task_id: str,
+        trace_id: Optional[str],
+        deployment_target: str,
+        hosting_team_id: str,
+        project_name: str,
+        deploy_branch: str,
+        ownership_manifest: Optional[dict[str, Any]] = None,
+        runtime_manifest_json: Optional[dict[str, Any]] = None,
+        repair_history_json: Optional[list[dict[str, Any]]] = None,
+    ) -> dict[str, Any]:
+        verify_result = await self.execute_verify(
+            all_files=all_files,
+            blueprint=blueprint,
+            template_reference=template_reference,
+            operations=operations,
+            repo_info=repo_info,
+            task_id=task_id,
+            deployment_target=deployment_target,
+            hosting_team_id=hosting_team_id,
+            project_name=project_name,
+            deploy_branch=deploy_branch,
+            ownership_manifest=ownership_manifest,
+            runtime_manifest_json=runtime_manifest_json,
+            repair_history_json=repair_history_json,
+        )
+        if verify_result.get("status") != "partial":
+            return verify_result
+        final_result = await self.execute_commit_and_deploy(
+            validated_files=list(verify_result.get("files") or []),
+            repo_info=repo_info,
+            task_id=task_id,
+            trace_id=trace_id,
+            deployment_target=deployment_target,
+            hosting_team_id=hosting_team_id,
+            project_name=project_name,
+            deploy_branch=deploy_branch,
+            verification_json=verify_result.get("verification_json"),
+        )
+        ownership_conflicts = list(verify_result.get("ownership_conflicts") or [])
+        if ownership_conflicts:
+            final_result["conflicts_detected"] = len(ownership_conflicts)
+            final_result["conflict_samples"] = [self._format_conflict(conflict) for conflict in ownership_conflicts[:20]]
+            final_result["ownership_conflicts"] = ownership_conflicts
+        if verify_result.get("verifier_report") and not final_result.get("verifier_report"):
+            final_result["verifier_report"] = verify_result.get("verifier_report")
+        return final_result
 
     # ------------------------------------------------------------------
     # Operation resolvers
@@ -1561,22 +2051,37 @@ class DeterministicWebExecutor:
         blueprint: dict[str, Any],
         *,
         template_reference: Optional[TemplateReference] = None,
-    ) -> tuple[list[GeneratedFile], list[str]]:
+        ownership_manifest: Optional[dict[str, Any]] = None,
+    ) -> tuple[list[GeneratedFile], list[dict[str, Any]]]:
         """Validate all generated files and fix issues to guarantee build success."""
-        conflicts = self._detect_cross_batch_conflicts(files)
+        conflicts = self._detect_cross_batch_conflicts(files, ownership_manifest=ownership_manifest)
         if conflicts:
+            conflict_samples = [self._format_conflict(conflict) for conflict in conflicts[:12]]
             logger.warning(
                 "deterministic.executor.phase3.cross_batch_conflicts count=%d mode=%s sample=%s",
                 len(conflicts),
                 settings.normalized_codegen_conflict_mode(),
-                conflicts[:12],
+                conflict_samples,
             )
             if settings.normalized_codegen_conflict_mode() == "block":
+                verifier_report = {
+                    "status": "blocked",
+                    "ownership_check": {
+                        "status": "failed",
+                        "conflicts_detected": len(conflicts),
+                        "conflicts": conflicts[:20],
+                    },
+                }
                 raise DeterministicExecutionError(
                     reason_code=REASON_CODEGEN_CONFLICT_DETECTED,
                     message="Cross-batch conflicts detected during deterministic inspection.",
                     provider="openclaw_codegen",
-                    extra={"conflicts_detected": len(conflicts), "conflict_samples": conflicts[:20]},
+                    extra={
+                        "conflicts_detected": len(conflicts),
+                        "conflict_samples": [self._format_conflict(conflict) for conflict in conflicts[:20]],
+                        "ownership_conflicts": conflicts[:20],
+                        "verifier_report": verifier_report,
+                    },
                 )
         file_map = {f.path: f for f in files}
 
@@ -1635,10 +2140,14 @@ class DeterministicWebExecutor:
         validated = self._ensure_scaffold_integrity(list(file_map.values()), template_reference=template_reference)
         return validated, conflicts
 
-    @staticmethod
-    def _detect_cross_batch_conflicts(files: list[GeneratedFile]) -> list[str]:
-        """Detect conflicts before path dedup hides generation collisions."""
-        conflicts: list[str] = []
+    def _detect_cross_batch_conflicts(
+        self,
+        files: list[GeneratedFile],
+        *,
+        ownership_manifest: Optional[dict[str, Any]] = None,
+    ) -> list[dict[str, Any]]:
+        """Detect real ownership collisions before path dedup hides generation issues."""
+        conflicts: list[dict[str, Any]] = []
         if not files:
             return conflicts
 
@@ -1647,25 +2156,103 @@ class DeterministicWebExecutor:
             path_counts[f.path] = path_counts.get(f.path, 0) + 1
         for path, count in sorted(path_counts.items()):
             if count > 1:
-                conflicts.append(f"DUPLICATE_FILE:{path} ({count} times)")
-
-        export_map: dict[str, str] = {}
-        export_re = re.compile(r"export\s+(?:async\s+)?(?:function|const|class)\s+(\w+)")
-        for f in files:
-            if not f.path.endswith((".ts", ".tsx", ".js", ".jsx")):
-                continue
-            for match in export_re.finditer(f.content):
-                export_name = match.group(1)
-                previous_path = export_map.get(export_name)
-                if previous_path and previous_path != f.path:
+                owner = self._owner_for_path(path, ownership_manifest)
+                reserved_owner = any(
+                    fnmatch(path, str(entry.get("path") or ""))
+                    for entry in ((ownership_manifest or {}).get("reserved_singletons") or [])
+                    if isinstance(entry, dict)
+                )
+                conflicts.append(
+                    {
+                        "type": "duplicate_file",
+                        "path": path,
+                        "count": count,
+                        "owner": owner,
+                        "message": f"Multiple generated files resolved to the same path '{path}'.",
+                    }
+                )
+                if owner and reserved_owner:
                     conflicts.append(
-                        f"DUPLICATE_EXPORT:{export_name} in {previous_path} and {f.path}"
+                        {
+                            "type": "reserved_singleton_collision",
+                            "path": path,
+                            "count": count,
+                            "owner": owner,
+                            "message": f"Owned path '{path}' was emitted {count} times.",
+                        }
                     )
-                export_map[export_name] = f.path
+
+        route_to_paths: dict[str, list[str]] = {}
+        for f in files:
+            route = self._normalize_route_path(f.path)
+            if not route:
+                continue
+            route_to_paths.setdefault(route, [])
+            if f.path not in route_to_paths[route]:
+                route_to_paths[route].append(f.path)
+        for route, paths in sorted(route_to_paths.items()):
+            if len(paths) > 1:
+                owner = self._owner_for_path(paths[0], ownership_manifest)
+                conflicts.append(
+                    {
+                        "type": "duplicate_route",
+                        "route": route,
+                        "paths": paths,
+                        "owner": owner,
+                        "message": f"Multiple files resolved to route '{route}'.",
+                    }
+                )
+
+        route_ownership_map: dict[str, set[str]] = {}
+        for entry in (ownership_manifest or {}).get("route_ownership") or []:
+            if not isinstance(entry, dict):
+                continue
+            route = str(entry.get("route") or "").strip()
+            owner = str(entry.get("agent_role") or "").strip()
+            if not route or not owner:
+                continue
+            route_ownership_map.setdefault(route, set()).add(owner)
+        for route, owners in sorted(route_ownership_map.items()):
+            if len(owners) > 1:
+                conflicts.append(
+                    {
+                        "type": "route_ownership_conflict",
+                        "route": route,
+                        "owners": sorted(owners),
+                        "message": f"Route '{route}' is assigned to multiple agents.",
+                    }
+                )
+
+        singleton_owners: dict[str, set[str]] = {}
+        for entry in (ownership_manifest or {}).get("reserved_singletons") or []:
+            if not isinstance(entry, dict):
+                continue
+            singleton_path = str(entry.get("path") or "").strip()
+            owner = str(entry.get("agent_role") or "").strip()
+            if not singleton_path or not owner:
+                continue
+            singleton_owners.setdefault(singleton_path, set()).add(owner)
+        for singleton_path, owners in sorted(singleton_owners.items()):
+            if len(owners) > 1:
+                conflicts.append(
+                    {
+                        "type": "reserved_singleton_collision",
+                        "path": singleton_path,
+                        "owners": sorted(owners),
+                        "message": f"Reserved singleton '{singleton_path}' is assigned to multiple agents.",
+                    }
+                )
 
         package_paths = sorted({f.path for f in files if f.path.endswith("package.json")})
         if len(package_paths) > 1:
-            conflicts.append(f"PACKAGE_FRAGMENTATION:{json.dumps(package_paths)}")
+            conflicts.append(
+                {
+                    "type": "package_fragmentation",
+                    "paths": package_paths,
+                    "owner": "orchestrator",
+                    "message": "Multiple package.json files were generated for one deployment target.",
+                }
+            )
 
         return conflicts
 

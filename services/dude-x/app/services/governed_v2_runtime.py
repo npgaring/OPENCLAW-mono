@@ -5,6 +5,7 @@ from dataclasses import dataclass
 import re
 from typing import Any, Optional
 
+from app.compiler.agent_team import build_agent_team_plan
 from app.core.config import settings
 from app.core.hashing import hash_payload, integration_hash_payload
 from app.models.governed_v2 import (
@@ -211,6 +212,13 @@ def compile_execution_plan(
         deploy_target=build_sot.deployment_target,
         rollback_strategy={"type": "artifact_redeploy", "target": "site"},
         operations=operations,
+        agent_team=build_agent_team_plan(
+            domain="web",
+            deployment_target=build_sot.deployment_target,
+            routes=routes,
+            operations=operations,
+            integrations=list(build_sot.integrations),
+        ),
         governance_projection=governance_projection,
         stage_linkage=lineage.model_copy(update={"artifact_hash": None}),
         status=ArtifactStatus.compiled,
@@ -552,7 +560,7 @@ def _operations_from_build_sot(build_sot: BuildSoTV1, trace_id: str = "") -> lis
     github_owner = (settings.governed_v2_github_owner or "").strip()
     github_owner_fallback = (settings.governed_v2_github_owner_fallback or "").strip()
     owner_type = (settings.governed_v2_github_owner_type or "org").strip().lower()
-    default_branch = (settings.governed_v2_default_branch or "main").strip()
+    default_branch = (settings.governed_v2_default_branch or "prod").strip()
     team_id = (settings.governed_v2_vercel_team_id or "").strip()
     domain_behavior = (settings.governed_v2_domain_behavior or "vercel_default_only").strip()
     ops.append(
@@ -752,6 +760,13 @@ async def compile_execution_plan_async(
         deploy_target=build_sot.deployment_target,
         rollback_strategy={"type": "artifact_redeploy", "target": "site"},
         operations=operations,
+        agent_team=build_agent_team_plan(
+            domain="web",
+            deployment_target=build_sot.deployment_target,
+            routes=routes,
+            operations=operations,
+            integrations=list(build_sot.integrations),
+        ),
         governance_projection=governance_projection,
         stage_linkage=lineage.model_copy(update={"artifact_hash": None}),
         status=ArtifactStatus.compiled,

@@ -76,6 +76,8 @@ def test_v2_compile_requires_approval_and_is_deterministic():
     assert pa["execution_mode"] == "deterministic_web_v1"
     assert pa["stage_linkage"]["execution_plan_hash"] == pb["stage_linkage"]["execution_plan_hash"]
     assert pa["governance_projection"]["plan_hash"] == pb["governance_projection"]["plan_hash"]
+    assert pa["agent_team"]["work_packets"][0]["agent_role"] == "planner"
+    assert any(entry["agent_role"] == "frontend" for entry in pa["agent_team"]["file_ownership"])
 
 
 def test_v2_compile_includes_github_vercel_provisioning_defaults():

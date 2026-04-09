@@ -149,6 +149,8 @@ def test_deterministic_execute_returns_partial_with_build_state(monkeypatch):
 
     assert out["status"] == "partial"
     assert out["build_phase"] == "architect_done"
+    assert out["agent_phase"] == "planner_done"
+    assert out["agent_role"] == "planner"
     assert out["repository_url"] == "https://github.com/test-owner/test-site"
     assert "provision_repo" in out["steps_completed"]
     assert "architect" in out["steps_completed"]
@@ -159,6 +161,8 @@ def test_deterministic_execute_returns_partial_with_build_state(monkeypatch):
     assert build_state["repo_info"]["name"] == "test-site"
     assert build_state["template_reference"]["source_repo"] == "test-owner/test-site"
     assert build_state["config"]["task_id"] == "task-1"
+    assert build_state["work_packets"][0]["agent_role"] == "planner"
+    assert any(entry["agent_role"] == "frontend" for entry in build_state["ownership_manifest"]["file_ownership"])
 
 
 def test_execute_finalize_commits_and_deploys(monkeypatch):
@@ -208,6 +212,8 @@ def test_execute_finalize_commits_and_deploys(monkeypatch):
 
     assert result["status"] == "success"
     assert result["build_phase"] == "complete"
+    assert result["agent_phase"] == "complete"
+    assert result["agent_role"] == "orchestrator"
     assert result["deployment_url"] == "https://test-site-preview.vercel.app"
     assert result["repo_commit_sha"] == "commit-sha-final"
     assert "commit" in calls
@@ -230,8 +236,8 @@ def test_execute_finalize_includes_conflict_metadata_when_present(monkeypatch):
     async def _fake_deploy(self, client, team_id, project_name, files, target):
         return VercelDeploymentResult(id="dpl_456", url="test-site-preview.vercel.app", target=target)
 
-    def _fake_phase3_inspect(self, files, blueprint, *, template_reference=None):
-        return files, ["DUPLICATE_FILE:src/app/page.tsx (2 times)"]
+    def _fake_phase3_inspect(self, files, blueprint, *, template_reference=None, ownership_manifest=None):
+        return files, [{"type": "duplicate_file", "path": "src/app/page.tsx", "count": 2, "owner": "frontend"}]
 
     monkeypatch.setattr("app.services.deterministic_executor.DeterministicWebExecutor._github_installation_token", _fake_installation_token)
     monkeypatch.setattr("app.services.deterministic_executor.DeterministicWebExecutor._github_batch_commit", _fake_commit)
@@ -263,6 +269,7 @@ def test_execute_finalize_includes_conflict_metadata_when_present(monkeypatch):
     assert result["status"] == "success"
     assert result["conflicts_detected"] == 1
     assert result["conflict_samples"] == ["DUPLICATE_FILE:src/app/page.tsx (2 times)"]
+    assert result["ownership_conflicts"] == [{"type": "duplicate_file", "path": "src/app/page.tsx", "count": 2, "owner": "frontend"}]
 
 
 def test_deterministic_execute_missing_github_app_credentials_fails_fast(monkeypatch):
@@ -754,20 +761,44 @@ def test_execute_pages_runs_sequential_batches_and_carries_manifest(monkeypatch)
 
 def test_phase3_inspect_detects_conflicts_in_log_mode(monkeypatch):
     monkeypatch.setattr("app.services.deterministic_executor.settings.codegen_conflict_mode", "log")
+    ownership_manifest = {
+        "reserved_singletons": [{"path": "src/app/layout.tsx", "agent_role": "frontend"}],
+        "route_ownership": [{"route": "/", "agent_role": "frontend"}, {"route": "/blog", "agent_role": "frontend"}],
+    }
     files = [
-        GeneratedFile(path="src/app/page.tsx", content="export const Hero = () => <main />;\n"),
-        GeneratedFile(path="src/app/page.tsx", content="export const Hero = () => <section />;\n"),
-        GeneratedFile(path="src/components/Hero.tsx", content="export const Hero = () => <div />;\n"),
+        GeneratedFile(path="src/app/page.tsx", content="export const metadata = {};\nexport default function Home(){return <main />;}\n"),
+        GeneratedFile(path="src/app/page.tsx", content="export const metadata = {};\nexport default function HomeAlt(){return <section />;}\n"),
+        GeneratedFile(path="app/blog/page.tsx", content="export const metadata = {};\nexport default function Blog(){return <div />;}\n"),
+        GeneratedFile(path="src/app/blog/page.tsx", content="export const metadata = {};\nexport default function BlogTwo(){return <div />;}\n"),
         GeneratedFile(path="package.json", content='{"name":"demo","private":true}'),
         GeneratedFile(path="packages/web/package.json", content='{"name":"demo-web","private":true}'),
     ]
 
-    validated, conflicts = DeterministicWebExecutor()._phase3_inspect(files, blueprint={"pages": []})
+    validated, conflicts = DeterministicWebExecutor()._phase3_inspect(
+        files,
+        blueprint={"pages": []},
+        ownership_manifest=ownership_manifest,
+    )
 
     assert validated
-    assert any(c.startswith("DUPLICATE_FILE:src/app/page.tsx") for c in conflicts)
-    assert any(c.startswith("DUPLICATE_EXPORT:Hero") for c in conflicts)
-    assert any(c.startswith("PACKAGE_FRAGMENTATION:") for c in conflicts)
+    conflict_types = {conflict["type"] for conflict in conflicts}
+    assert "duplicate_file" in conflict_types
+    assert "duplicate_route" in conflict_types
+    assert "package_fragmentation" in conflict_types
+    assert not any("Hero" in json.dumps(conflict) for conflict in conflicts)
+
+
+def test_phase3_inspect_allows_route_module_exports_across_files(monkeypatch):
+    monkeypatch.setattr("app.services.deterministic_executor.settings.codegen_conflict_mode", "log")
+    files = [
+        GeneratedFile(path="src/app/page.tsx", content="export const metadata = {};\nexport default function Home(){return <main />;}\n"),
+        GeneratedFile(path="src/app/blog/page.tsx", content="export async function generateMetadata(){return {};}\nexport default function Blog(){return <main />;}\n"),
+        GeneratedFile(path="src/app/contact/page.tsx", content="export const maxDuration = 60;\nexport default function Contact(){return <main />;}\n"),
+    ]
+
+    _, conflicts = DeterministicWebExecutor()._phase3_inspect(files, blueprint={"pages": []})
+
+    assert conflicts == []
 
 
 def test_phase3_inspect_blocks_when_conflict_mode_is_block(monkeypatch):

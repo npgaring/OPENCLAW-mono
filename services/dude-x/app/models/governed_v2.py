@@ -165,6 +165,7 @@ class ExecutionPlanV1(BaseModel):
     deploy_target: Literal["preview", "production"] = "preview"
     rollback_strategy: dict[str, Any] = Field(default_factory=dict)
     operations: list[dict[str, Any]] = Field(default_factory=list)
+    agent_team: Optional[dict[str, Any]] = None
     governance_projection: dict[str, Any] = Field(default_factory=dict)
     stage_linkage: StageLinkage
     status: ArtifactStatus = ArtifactStatus.compiled

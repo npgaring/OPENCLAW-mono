@@ -216,6 +216,11 @@ def _task_submit_response(
     evaluation_frame: Optional[Any] = None,
     **kwargs: Any,
 ) -> TaskSubmitResponse:
+    execution_response = kwargs.get("execution_response")
+    if isinstance(execution_response, dict):
+        for field_name in ("build_phase", "agent_phase", "agent_role", "verifier_report", "ownership_conflicts"):
+            if kwargs.get(field_name) is None and execution_response.get(field_name) is not None:
+                kwargs[field_name] = execution_response.get(field_name)
     if trace_id:
         kwargs["trace_id"] = trace_id
         kwargs["audit_trace_id"] = trace_id
@@ -1529,7 +1534,7 @@ async def run_task_submission(
             result["reason_codes"] = evidence_reason_codes
 
     # Persist phased build state when the deterministic executor returns partial
-    if deterministic_mode and isinstance(result, dict) and result.get("build_phase") == "architect_done":
+    if deterministic_mode and isinstance(result, dict) and (result.get("agent_phase") == "planner_done" or result.get("build_phase") == "architect_done"):
         from app.models.task_build_state import TaskBuildState
         build_state_data = result.pop("_build_state", {})
         if build_state_data:
@@ -1538,12 +1543,17 @@ async def run_task_submission(
             build_state_config.setdefault("runtime_manifest", {})
             build_state = TaskBuildState(
                 task_id=str(task.task_id),
-                phase="architect_done",
+                phase="planner_done",
                 blueprint_json=build_state_data.get("blueprint"),
                 repo_info_json=build_state_data.get("repo_info"),
                 template_reference_json=build_state_data.get("template_reference"),
                 generated_files_json=None,
                 config_json=build_state_config,
+                work_packets_json=build_state_data.get("work_packets"),
+                ownership_manifest_json=build_state_data.get("ownership_manifest"),
+                agent_results_json=build_state_data.get("agent_results"),
+                verification_json=build_state_data.get("verification"),
+                repair_history_json=build_state_data.get("repair_history"),
             )
             session.add(build_state)
 

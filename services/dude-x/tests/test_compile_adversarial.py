@@ -95,3 +95,23 @@ def test_different_op_id_different_plan_hash():
     p1 = build_plan(s1)
     p2 = build_plan(s2)
     assert p1.plan_hash != p2.plan_hash
+
+
+def test_build_plan_includes_agent_team_metadata():
+    spec = SpecIn(
+        spec_version="1.0",
+        identity="W-OCGG",
+        intent="web-build",
+        target=Target(resource_id="r1", environment="preview"),
+        decisions=Decisions(operations=_base_ops("op-agent")),
+        constraints={},
+        signature=_sig(),
+    )
+
+    plan = build_plan(spec)
+
+    assert plan.agent_team is not None
+    work_packets = plan.agent_team["work_packets"]
+    assert [packet["agent_role"] for packet in work_packets] == ["planner", "frontend", "backend", "verifier"]
+    assert any(entry["agent_role"] == "frontend" for entry in plan.agent_team["file_ownership"])
+    assert any(entry["route"] == "/" for entry in plan.agent_team["route_ownership"])

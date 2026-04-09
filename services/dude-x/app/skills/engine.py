@@ -127,7 +127,7 @@ class SkillsEngine:
         github_owner = (settings.governed_v2_github_owner or "").strip()
         github_owner_fallback = (settings.governed_v2_github_owner_fallback or "").strip()
         owner_type = (settings.governed_v2_github_owner_type or "org").strip().lower()
-        default_branch = (settings.governed_v2_default_branch or "main").strip()
+        default_branch = (settings.governed_v2_default_branch or "prod").strip()
         team_id = (settings.governed_v2_vercel_team_id or "").strip()
         domain_behavior = (settings.governed_v2_domain_behavior or "vercel_default_only").strip()
 

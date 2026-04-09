@@ -151,6 +151,8 @@ class BuildPhaseResponse(BaseModel):
     task_id: str
     build_phase: str
     status: str
+    agent_phase: Optional[str] = None
+    agent_role: Optional[str] = None
     files_generated: int = 0
     message: str = ""
     deployment_url: Optional[str] = None
@@ -160,13 +162,67 @@ class BuildPhaseResponse(BaseModel):
     provider_error: Optional[dict[str, Any]] = None
     upstream_status_code: Optional[int] = None
     upstream_error: Optional[str] = None
+    verifier_report: Optional[dict[str, Any]] = None
+    ownership_conflicts: Optional[list[dict[str, Any]]] = None
 
 
 PHASE_TRANSITIONS = {
-    "architect_done": "foundation_done",
-    "foundation_done": "pages_done",
-    "pages_done": "complete",
+    "planner_done": "frontend_done",
+    "frontend_done": "backend_done",
+    "backend_done": "verify_done",
+    "verify_done": "complete",
 }
+
+PUBLIC_BUILD_PHASES = {
+    "planner_done": "architect_done",
+    "frontend_done": "foundation_done",
+    "backend_done": "pages_done",
+    "verify_done": "pages_done",
+    "complete": "complete",
+    "error": "error",
+}
+
+AGENT_ROLE_BY_PHASE = {
+    "planner_done": "planner",
+    "frontend_done": "frontend",
+    "backend_done": "backend",
+    "verify_done": "verifier",
+    "complete": "orchestrator",
+    "error": "verifier",
+}
+
+LEGACY_INTERNAL_PHASE_ALIASES = {
+    "architect_done": "planner_done",
+    "foundation_done": "frontend_done",
+    "pages_done": "backend_done",
+}
+
+
+def _public_build_phase(internal_phase: str) -> str:
+    return PUBLIC_BUILD_PHASES.get(internal_phase, internal_phase)
+
+
+def _agent_role(internal_phase: str) -> Optional[str]:
+    return AGENT_ROLE_BY_PHASE.get(internal_phase)
+
+
+def _append_agent_result(
+    current: Optional[dict[str, Any]],
+    *,
+    agent_role: str,
+    summary: str,
+    files: list[dict[str, str]],
+    warnings: Optional[list[str]] = None,
+) -> dict[str, Any]:
+    results = dict(current or {})
+    results[agent_role] = {
+        "status": "completed",
+        "summary": summary,
+        "files_produced": [f["path"] for f in files if isinstance(f, dict) and isinstance(f.get("path"), str)],
+        "warnings": list(warnings or []),
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+    }
+    return results
 
 
 @router.post("/task/{task_id}/build-phase", response_model=BuildPhaseResponse)
@@ -190,7 +246,9 @@ async def advance_build_phase(
             detail={"code": "NO_BUILD_STATE", "message": "No build state found. Submit the task first via POST /task."},
         )
 
-    current_phase = build_state.phase
+    current_phase = LEGACY_INTERNAL_PHASE_ALIASES.get(build_state.phase, build_state.phase)
+    if current_phase != build_state.phase:
+        build_state.phase = current_phase
     if current_phase == "complete":
         raise HTTPException(
             status_code=422,
@@ -214,82 +272,173 @@ async def advance_build_phase(
     runtime_manifest_json = config.get("runtime_manifest") if isinstance(config.get("runtime_manifest"), dict) else {}
     template_ref = executor.deserialize_template_reference(build_state.template_reference_json)
     repo_info = build_state.repo_info_json or {}
+    ownership_manifest = build_state.ownership_manifest_json or {}
+    agent_results = build_state.agent_results_json or {}
+    repair_history = build_state.repair_history_json or []
 
     try:
-        if current_phase == "architect_done":
+        if current_phase == "planner_done":
             context_data = blueprint.pop("_context", None) or config.get("context", {})
             if not context_data and build_state.config_json:
                 plan_json = config.get("plan_json", {})
                 operations = plan_json.get("operations", [])
                 context_data = executor._build_project_context(plan_json, operations)
 
-            files, runtime_manifest_json = await executor.execute_foundation(
+            result = await executor.execute_frontend(
                 blueprint=blueprint,
                 context=context_data,
                 template_reference=template_ref,
                 task_id=task_id,
                 runtime_manifest_json=runtime_manifest_json,
             )
+            files = list(result.get("files") or [])
+            serialized_files = executor.serialize_files(files)
 
-            build_state.generated_files_json = executor.serialize_files(files)
-            build_state.phase = "foundation_done"
-            config["runtime_manifest"] = runtime_manifest_json
+            build_state.generated_files_json = serialized_files
+            build_state.phase = "frontend_done"
+            config["runtime_manifest"] = result.get("runtime_manifest") or runtime_manifest_json
             build_state.config_json = config
+            build_state.agent_results_json = _append_agent_result(
+                agent_results,
+                agent_role="frontend",
+                summary=result.get("message", "Frontend agent completed."),
+                files=serialized_files,
+            )
             build_state.updated_at = datetime.now(timezone.utc)
             await session.commit()
 
             return BuildPhaseResponse(
                 task_id=task_id,
-                build_phase="foundation_done",
+                build_phase=_public_build_phase("frontend_done"),
                 status="partial",
+                agent_phase="frontend_done",
+                agent_role="frontend",
                 files_generated=len(files),
-                message=f"Foundation generated: {len(files)} files (configs, layout, components).",
+                message=result.get("message", f"Frontend agent generated {len(files)} files."),
                 repository_url=repo_info.get("html_url"),
             )
 
-        elif current_phase == "foundation_done":
-            foundation_files = executor.deserialize_files(build_state.generated_files_json)
-            context_data = config.get("context", {})
-            if not context_data:
-                plan_json = config.get("plan_json", {})
-                operations = plan_json.get("operations", [])
-                context_data = executor._build_project_context(plan_json, operations)
+        elif current_phase == "frontend_done":
+            all_files = executor.deserialize_files(build_state.generated_files_json)
+            plan_json = config.get("plan_json", {})
 
-            all_files, runtime_manifest_json = await executor.execute_pages(
-                blueprint=blueprint,
-                context=context_data,
-                foundation_files=foundation_files,
-                task_id=task_id,
+            result = await executor.execute_backend(
+                all_files=all_files,
+                plan=plan_json,
                 runtime_manifest_json=runtime_manifest_json,
             )
+            backend_files = list(result.get("files") or all_files)
+            serialized_files = executor.serialize_files(backend_files)
 
-            build_state.generated_files_json = executor.serialize_files(all_files)
-            build_state.phase = "pages_done"
-            config["runtime_manifest"] = runtime_manifest_json
+            build_state.generated_files_json = serialized_files
+            build_state.phase = "backend_done"
+            config["runtime_manifest"] = result.get("runtime_manifest") or runtime_manifest_json
             build_state.config_json = config
+            build_state.agent_results_json = _append_agent_result(
+                agent_results,
+                agent_role="backend",
+                summary=result.get("message", "Backend agent completed."),
+                files=serialized_files,
+            )
             build_state.updated_at = datetime.now(timezone.utc)
             await session.commit()
 
             return BuildPhaseResponse(
                 task_id=task_id,
-                build_phase="pages_done",
+                build_phase=_public_build_phase("backend_done"),
                 status="partial",
-                files_generated=len(all_files),
-                message=f"Pages generated: {len(all_files)} total files.",
+                agent_phase="backend_done",
+                agent_role="backend",
+                files_generated=len(backend_files),
+                message=result.get("message", "Backend agent completed."),
                 repository_url=repo_info.get("html_url"),
             )
 
-        elif current_phase == "pages_done":
+        elif current_phase == "backend_done":
             all_files = executor.deserialize_files(build_state.generated_files_json)
             plan_json = config.get("plan_json", {})
             operations = plan_json.get("operations", [])
 
-            result = await executor.execute_finalize(
+            result = await executor.execute_verify(
                 all_files=all_files,
                 blueprint=blueprint,
                 template_reference=template_ref,
-                plan=plan_json,
                 operations=operations,
+                repo_info=repo_info,
+                task_id=task_id,
+                deployment_target=config.get("deployment_target", "preview"),
+                hosting_team_id=config.get("hosting_team_id", ""),
+                project_name=config.get("project_name", ""),
+                deploy_branch=config.get("deploy_branch", "main"),
+                ownership_manifest=ownership_manifest,
+                runtime_manifest_json=runtime_manifest_json,
+                repair_history_json=repair_history,
+            )
+
+            if result.get("status") != "partial":
+                build_state.phase = "error"
+                build_state.verification_json = result.get("verification_json") if isinstance(result.get("verification_json"), dict) else None
+                build_state.repair_history_json = result.get("repair_history") if isinstance(result.get("repair_history"), list) else repair_history
+                build_state.updated_at = datetime.now(timezone.utc)
+                task.status = TaskStatus.needs_review
+                task.execution_id = result.get("execution_id")
+                task.audit_history = (task.audit_history or []) + [
+                    {"event_type": "execution_response", "payload": result},
+                ]
+                flag_modified(task, "audit_history")
+                await session.commit()
+
+                return BuildPhaseResponse(
+                    task_id=task_id,
+                    build_phase="error",
+                    status="needs_review",
+                    agent_phase=result.get("agent_phase", "verify_done"),
+                    agent_role=result.get("agent_role", "verifier"),
+                    files_generated=result.get("files_generated", 0),
+                    message=result.get("message", "Verifier blocked finalize."),
+                    repository_url=result.get("repository_url") or repo_info.get("html_url"),
+                    execution_response=result,
+                    reason_codes=list(result.get("reason_codes") or []),
+                    verifier_report=result.get("verifier_report") if isinstance(result.get("verifier_report"), dict) else None,
+                    ownership_conflicts=result.get("ownership_conflicts") if isinstance(result.get("ownership_conflicts"), list) else None,
+                )
+
+            verified_files = list(result.get("files") or all_files)
+            serialized_files = executor.serialize_files(verified_files)
+            build_state.generated_files_json = serialized_files
+            build_state.phase = "verify_done"
+            config["runtime_manifest"] = result.get("runtime_manifest") or runtime_manifest_json
+            build_state.config_json = config
+            build_state.verification_json = result.get("verification_json") if isinstance(result.get("verification_json"), dict) else None
+            build_state.repair_history_json = result.get("repair_history") if isinstance(result.get("repair_history"), list) else repair_history
+            build_state.agent_results_json = _append_agent_result(
+                agent_results,
+                agent_role="verifier",
+                summary=result.get("message", "Verifier completed."),
+                files=serialized_files,
+            )
+            build_state.updated_at = datetime.now(timezone.utc)
+            await session.commit()
+
+            return BuildPhaseResponse(
+                task_id=task_id,
+                build_phase=_public_build_phase("verify_done"),
+                status="partial",
+                agent_phase="verify_done",
+                agent_role="verifier",
+                files_generated=len(verified_files),
+                message=result.get("message", "Verifier completed."),
+                repository_url=repo_info.get("html_url"),
+                verifier_report=result.get("verifier_report") if isinstance(result.get("verifier_report"), dict) else None,
+                ownership_conflicts=result.get("ownership_conflicts") if isinstance(result.get("ownership_conflicts"), list) else None,
+            )
+
+        elif current_phase == "verify_done":
+            all_files = executor.deserialize_files(build_state.generated_files_json)
+            plan_json = config.get("plan_json", {})
+
+            result = await executor.execute_commit_and_deploy(
+                validated_files=all_files,
                 repo_info=repo_info,
                 task_id=task_id,
                 trace_id=config.get("trace_id"),
@@ -297,11 +446,8 @@ async def advance_build_phase(
                 hosting_team_id=config.get("hosting_team_id", ""),
                 project_name=config.get("project_name", ""),
                 deploy_branch=config.get("deploy_branch", "main"),
-                runtime_manifest_json=runtime_manifest_json,
+                verification_json=build_state.verification_json or {},
             )
-
-            build_state.phase = "complete"
-            build_state.updated_at = datetime.now(timezone.utc)
 
             task.status = TaskStatus.completed if result.get("status") == "success" else TaskStatus.needs_review
             task.execution_id = result.get("execution_id")
@@ -309,6 +455,14 @@ async def advance_build_phase(
                 {"event_type": "execution_response", "payload": result},
             ]
             flag_modified(task, "audit_history")
+            build_state.phase = "complete"
+            build_state.agent_results_json = _append_agent_result(
+                build_state.agent_results_json,
+                agent_role="orchestrator",
+                summary=result.get("message", "Commit and deploy complete."),
+                files=build_state.generated_files_json or [],
+            )
+            build_state.updated_at = datetime.now(timezone.utc)
 
             if result.get("status") == "success":
                 try:
@@ -331,11 +485,15 @@ async def advance_build_phase(
                 task_id=task_id,
                 build_phase="complete",
                 status=result.get("status", "success"),
+                agent_phase=result.get("agent_phase", "complete"),
+                agent_role=result.get("agent_role", "orchestrator"),
                 files_generated=result.get("files_generated", 0),
                 message=result.get("message", "Build complete."),
                 deployment_url=result.get("deployment_url"),
                 repository_url=result.get("repository_url"),
                 execution_response=result,
+                verifier_report=result.get("verifier_report") if isinstance(result.get("verifier_report"), dict) else None,
+                ownership_conflicts=result.get("ownership_conflicts") if isinstance(result.get("ownership_conflicts"), list) else None,
             )
 
     except DeterministicExecutionError as e:
@@ -353,6 +511,8 @@ async def advance_build_phase(
             task_id=task_id,
             build_phase="error",
             status="needs_review",
+            agent_phase=current_phase,
+            agent_role=_agent_role(current_phase),
             message=str(e),
             repository_url=repo_info.get("html_url"),
             execution_response=error_response,
@@ -360,6 +520,8 @@ async def advance_build_phase(
             provider_error=error_response.get("provider_error") if isinstance(error_response.get("provider_error"), dict) else None,
             upstream_status_code=error_response.get("upstream_status_code") if isinstance(error_response.get("upstream_status_code"), int) else None,
             upstream_error=error_response.get("upstream_error") if isinstance(error_response.get("upstream_error"), str) else None,
+            verifier_report=error_response.get("verifier_report") if isinstance(error_response.get("verifier_report"), dict) else None,
+            ownership_conflicts=error_response.get("ownership_conflicts") if isinstance(error_response.get("ownership_conflicts"), list) else None,
         )
     except Exception as e:
         logger.exception("build-phase.unhandled_error task_id=%s phase=%s", task_id, current_phase)
@@ -382,6 +544,8 @@ async def advance_build_phase(
             task_id=task_id,
             build_phase="error",
             status="needs_review",
+            agent_phase=current_phase,
+            agent_role=_agent_role(current_phase),
             message=msg,
             repository_url=repo_info.get("html_url"),
             execution_response={**error_response, "message": msg},

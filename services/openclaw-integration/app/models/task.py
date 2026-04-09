@@ -217,7 +217,12 @@ class TaskSubmitResponse(BaseModel):
     task_id: str
     execution_id: Optional[str] = None
     status: str
-    execution_response: Optional[dict] = None
+    execution_response: Optional[dict[str, Any]] = None
+    build_phase: Optional[str] = None
+    agent_phase: Optional[str] = None
+    agent_role: Optional[str] = None
+    verifier_report: Optional[dict[str, Any]] = None
+    ownership_conflicts: Optional[list[dict[str, Any]]] = None
     deployment_url: Optional[str] = None
     preview_url: Optional[str] = None
     repository_url: Optional[str] = None

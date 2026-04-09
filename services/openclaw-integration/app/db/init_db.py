@@ -43,6 +43,7 @@ _MIGRATION_FILES = [
     "015_deployments_table.sql",
     "016_deployment_build_logs.sql",
     "017_task_build_state.sql",
+    "018_task_build_agent_team.sql",
 ]
 
 _init_lock = asyncio.Lock()
