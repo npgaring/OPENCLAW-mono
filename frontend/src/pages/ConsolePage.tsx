@@ -143,6 +143,13 @@ export function ConsolePage() {
 
               return <ProgressBar steps={progressSteps} />;
             })()}
+            {flow.lastFailure && (
+              <div className="deployment-error-alert">
+                <p className="deployment-error-title">Process stopped at {flow.lastFailure.step}</p>
+                <p className="deployment-error-message">{flow.lastFailure.message}</p>
+                <p className="deployment-error-time">Logged at {flow.lastFailure.at}</p>
+              </div>
+            )}
             {hasDeployment && (
               <div className="deployment-links">
                 {flow.repositoryUrl && (

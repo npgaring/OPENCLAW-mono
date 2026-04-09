@@ -5,7 +5,7 @@ from typing import Any, Optional
 
 import httpx
 from fastapi import APIRouter, Body, Depends, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm.attributes import flag_modified
 
@@ -156,6 +156,10 @@ class BuildPhaseResponse(BaseModel):
     deployment_url: Optional[str] = None
     repository_url: Optional[str] = None
     execution_response: Optional[dict[str, Any]] = None
+    reason_codes: list[str] = Field(default_factory=list)
+    provider_error: Optional[dict[str, Any]] = None
+    upstream_status_code: Optional[int] = None
+    upstream_error: Optional[str] = None
 
 
 PHASE_TRANSITIONS = {
@@ -351,24 +355,37 @@ async def advance_build_phase(
             status="needs_review",
             message=str(e),
             repository_url=repo_info.get("html_url"),
+            execution_response=error_response,
+            reason_codes=list(error_response.get("reason_codes") or []),
+            provider_error=error_response.get("provider_error") if isinstance(error_response.get("provider_error"), dict) else None,
+            upstream_status_code=error_response.get("upstream_status_code") if isinstance(error_response.get("upstream_status_code"), int) else None,
+            upstream_error=error_response.get("upstream_error") if isinstance(error_response.get("upstream_error"), str) else None,
         )
     except Exception as e:
         logger.exception("build-phase.unhandled_error task_id=%s phase=%s", task_id, current_phase)
         build_state.phase = "error"
         build_state.updated_at = datetime.now(timezone.utc)
         task.status = TaskStatus.needs_review
+        error_response = {
+            "status": "needs_review",
+            "message": str(e),
+            "reason_codes": ["EXECUTION_BUILD_PHASE_UNHANDLED_ERROR"],
+        }
         task.audit_history = (task.audit_history or []) + [
-            {"event_type": "execution_response", "payload": {"status": "needs_review", "message": str(e)}},
+            {"event_type": "execution_response", "payload": error_response},
         ]
         flag_modified(task, "audit_history")
         await session.commit()
 
+        msg = f"Unexpected error during build phase '{current_phase}': {str(e)[:200]}"
         return BuildPhaseResponse(
             task_id=task_id,
             build_phase="error",
             status="needs_review",
-            message=f"Unexpected error during build phase '{current_phase}': {str(e)[:200]}",
+            message=msg,
             repository_url=repo_info.get("html_url"),
+            execution_response={**error_response, "message": msg},
+            reason_codes=["EXECUTION_BUILD_PHASE_UNHANDLED_ERROR"],
         )
 
 

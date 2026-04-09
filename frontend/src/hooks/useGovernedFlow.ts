@@ -43,6 +43,22 @@ const defaultAudience = 'founders, marketing managers, local business owners';
 const defaultTone = 'professional';
 const defaultPages = 'home, services, case studies, contact';
 const defaultIntegrations = '';
+const ACTION_LABELS: Record<string, string> = {
+  cognitive: 'Cognitive Mode',
+  'sot-lock': 'Build SoT Lock',
+  approve: 'Build SoT Approval',
+  compile: 'Compile Execution Plan',
+  'plan-lock': 'Execution Plan Lock',
+  task: 'Task Submission',
+  refine: 'Refinement',
+};
+
+interface FlowFailure {
+  action: string;
+  step: string;
+  message: string;
+  at: string;
+}
 
 export function useGovernedFlow() {
   const [dudexBase, setDudexBase] = useState(
@@ -88,6 +104,7 @@ export function useGovernedFlow() {
     { at: new Date().toLocaleTimeString(), level: 'info', message: 'Console ready. Start with "Run Cognitive Mode".' },
   ]);
   const [busyAction, setBusyAction] = useState('');
+  const [lastFailure, setLastFailure] = useState<FlowFailure | null>(null);
 
   const [selectedFilePath, setSelectedFilePath] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState<'artifacts' | 'preview' | 'code'>('artifacts');
@@ -111,6 +128,21 @@ export function useGovernedFlow() {
     setEventLog((prev) => [{ at: new Date().toLocaleTimeString(), level, message }, ...prev]);
   }
 
+  function formatActionStep(action: string): string {
+    return ACTION_LABELS[action] ?? action;
+  }
+
+  function captureFailure(action: string, message: string, stepOverride?: string) {
+    const step = stepOverride ?? formatActionStep(action);
+    setLastFailure({
+      action,
+      step,
+      message,
+      at: new Date().toLocaleTimeString(),
+    });
+    addLog(`Stopped at ${step}: ${message}`, 'error');
+  }
+
   function buildBriefPayload(): JsonMap {
     return {
       project_name: asText(projectName),
@@ -126,10 +158,11 @@ export function useGovernedFlow() {
   async function runAction(name: string, fn: () => Promise<void>) {
     try {
       setBusyAction(name);
+      setLastFailure(null);
       await fn();
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      addLog(message, 'error');
+      captureFailure(name, message);
     } finally {
       setBusyAction('');
     }
@@ -249,6 +282,7 @@ export function useGovernedFlow() {
 
     addLog('Pipeline starting: provisioning repository and generating blueprint...');
     const data = await integration.submitTask(integrationBase, apiToken, payload);
+    let latestTaskResult: TaskSubmitResult = data;
     setTaskResult(data);
 
     const taskId = data.task_id;
@@ -268,6 +302,7 @@ export function useGovernedFlow() {
     if (taskId && buildPhase && buildPhase !== 'complete' && buildPhase !== 'error') {
       let currentPhase = buildPhase;
       while (currentPhase && currentPhase !== 'complete' && currentPhase !== 'error') {
+        const phaseStartedFrom = currentPhase;
         const label = PHASE_LABELS[currentPhase] ?? `Advancing phase: ${currentPhase}...`;
         addLog(label);
         const phaseResult = await integration.advanceBuildPhase(integrationBase, apiToken, taskId);
@@ -277,22 +312,37 @@ export function useGovernedFlow() {
           addLog(`Files generated so far: ${phaseResult.files_generated}`);
         }
         if (currentPhase === 'complete') {
-          setTaskResult({
-            ...data,
+          latestTaskResult = {
+            ...latestTaskResult,
             status: phaseResult.status,
             deployment_url: phaseResult.deployment_url ?? data.deployment_url,
             repository_url: phaseResult.repository_url ?? data.repository_url,
             execution_response: phaseResult.execution_response ?? data.execution_response,
-          });
+          };
+          setTaskResult(latestTaskResult);
           addLog(phaseResult.message ?? 'Build complete!');
           if (phaseResult.deployment_url) addLog(`Deployment URL: ${phaseResult.deployment_url}`);
         } else if (currentPhase === 'error') {
-          addLog(`Build error: ${phaseResult.message ?? 'Unknown error'}`);
+          latestTaskResult = {
+            ...latestTaskResult,
+            status: phaseResult.status,
+            build_phase: phaseResult.build_phase,
+            deployment_url: phaseResult.deployment_url ?? latestTaskResult.deployment_url,
+            repository_url: phaseResult.repository_url ?? latestTaskResult.repository_url,
+            execution_response: phaseResult.execution_response ?? latestTaskResult.execution_response,
+          };
+          setTaskResult(latestTaskResult);
+          captureFailure(
+            'task',
+            phaseResult.message ?? 'Unknown error',
+            `Build Phase (${phaseStartedFrom})`,
+          );
+          break;
         }
       }
     }
 
-    const finalResult = taskResult ?? data;
+    const finalResult = latestTaskResult;
     if (finalResult?.deployment_url) {
       setActiveTab('preview');
     }
@@ -308,6 +358,7 @@ export function useGovernedFlow() {
     setExecutionPlanHash(null);
     setExecutionLock(null);
     setTaskResult(null);
+    setLastFailure(null);
     setEventLog([{ at: new Date().toLocaleTimeString(), level: 'info', message: 'Session cleared.' }]);
   }
 
@@ -379,7 +430,7 @@ export function useGovernedFlow() {
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       setRefinementHistory((prev) => [...prev, { role: 'system', text: `Error: ${msg}` }]);
-      addLog(msg, 'error');
+      captureFailure('refine', msg);
     }
   }
 
@@ -442,6 +493,7 @@ export function useGovernedFlow() {
     stepRows,
     eventLog,
     busyAction,
+    lastFailure,
 
     // Artifacts for display
     displayBuildSot,

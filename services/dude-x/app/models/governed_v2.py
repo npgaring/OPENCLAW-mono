@@ -115,6 +115,8 @@ class BuildSoTEnvelope(BaseModel):
     stage_linkage: StageLinkage
     build_sot: BuildSoTV1
     cognitive_outcome: CognitiveOutcome
+    enrichment_status: Optional[Literal["applied", "fallback"]] = None
+    enrichment_warning: Optional[dict[str, Any]] = None
 
 
 class BuildSoTGovernanceResult(BaseModel):
@@ -166,4 +168,3 @@ class ExecutionPlanV1(BaseModel):
     governance_projection: dict[str, Any] = Field(default_factory=dict)
     stage_linkage: StageLinkage
     status: ArtifactStatus = ArtifactStatus.compiled
-

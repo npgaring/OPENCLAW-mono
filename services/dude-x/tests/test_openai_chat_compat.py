@@ -3,12 +3,13 @@ from __future__ import annotations
 
 import json
 
+import httpx
 import pytest
 
 from app.api.governed_v2 import _build_refine_payload
 from app.core.config import settings
 from app.models.governed_v2 import BuildSoTV1, SectionDefinition
-from app.services.content_enrichment import _build_enrichment_prompt, enrich_build_sot
+from app.services.content_enrichment import _build_enrichment_prompt, enrich_build_sot, enrich_build_sot_with_metadata
 from app.services.openai_chat_compat import (
     is_gpt5_family_model,
     sanitize_chat_completions_payload,
@@ -70,6 +71,14 @@ def test_build_refine_payload_temperature_compat(monkeypatch):
     monkeypatch.setattr(settings, "openai_content_model", "gpt-4.1-mini")
     non_gpt5_payload = _build_refine_payload(build_sot, "Change tone to concise")
     assert non_gpt5_payload["temperature"] == 0.3
+
+
+def test_build_enrichment_prompt_uses_page_content_entries_schema():
+    payload = _build_enrichment_prompt(_build_sot())
+    schema = payload["response_format"]["json_schema"]["schema"]
+    assert "page_content_entries" in schema["properties"]
+    assert "page_content_entries" in schema["required"]
+    assert "page_content" not in schema["required"]
 
 
 class _DummySkill(Skill):
@@ -164,8 +173,9 @@ async def test_content_enrichment_success_parses_when_gpt5_temperature_omitted(m
         "hero_headline": "Ship Faster",
         "hero_subheadline": "Governed web delivery",
         "value_propositions": [{"title": "Speed", "description": "Fast iterations", "icon_hint": "rocket"}],
-        "page_content": {
-            "home": {
+        "page_content_entries": [
+            {
+                "page_name": "home",
                 "meta_title": "Home | Acme",
                 "meta_description": "Acme home page",
                 "sections": [
@@ -178,7 +188,7 @@ async def test_content_enrichment_success_parses_when_gpt5_temperature_omitted(m
                     }
                 ],
             }
-        },
+        ],
         "cta_primary_text": "Get Started",
         "cta_secondary_text": "Learn More",
         "footer_tagline": "Acme",
@@ -228,3 +238,53 @@ async def test_content_enrichment_success_parses_when_gpt5_temperature_omitted(m
     assert "temperature" not in sent_payload
     assert out.content_blocks["hero"][0] == "Ship Faster"
     assert out.extensions["enrichment_version"] == "1.0"
+
+
+@pytest.mark.asyncio
+async def test_content_enrichment_fallback_returns_warning_metadata(monkeypatch):
+    class _Response:
+        def __init__(self):
+            self.status_code = 400
+            self.request = httpx.Request("POST", "https://api.openai.com/v1/chat/completions")
+            self.text = (
+                '{"error":{"message":"Invalid schema for response_format",'
+                '"type":"invalid_request_error","param":"response_format"}}'
+            )
+
+        def raise_for_status(self):
+            raise httpx.HTTPStatusError("bad request", request=self.request, response=self)
+
+        def json(self):
+            return {
+                "error": {
+                    "message": "Invalid schema for response_format",
+                    "type": "invalid_request_error",
+                    "param": "response_format",
+                }
+            }
+
+    class _Client:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return None
+
+        async def post(self, *args, **kwargs):
+            return _Response()
+
+    monkeypatch.setattr(settings, "openai_content_enabled", True)
+    monkeypatch.setattr(settings, "openai_api_key", "sk-test")
+    monkeypatch.setattr(settings, "openai_content_model", "gpt-5.4-mini")
+    monkeypatch.setattr("app.services.content_enrichment.httpx.AsyncClient", _Client)
+
+    build_sot = _build_sot()
+    enriched, status, warning = await enrich_build_sot_with_metadata(build_sot)
+    assert status == "fallback"
+    assert warning is not None
+    assert warning.get("status_code") == 400
+    assert warning.get("param") == "response_format"
+    assert enriched.project_name == build_sot.project_name

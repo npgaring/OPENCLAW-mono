@@ -69,6 +69,10 @@ export interface BuildPhaseResult {
   deployment_url?: string;
   repository_url?: string;
   execution_response?: Record<string, unknown>;
+  reason_codes?: string[];
+  provider_error?: Record<string, unknown>;
+  upstream_status_code?: number;
+  upstream_error?: string;
 }
 
 export interface EventLogItem {

@@ -160,7 +160,7 @@ class Settings(BaseSettings):
         ),
     )
     codegen_conflict_mode: str = Field(
-        default="log",
+        default="block",
         description=(
             "Cross-batch conflict handling in deterministic inspector. "
             "Use 'log' to continue with warnings, or 'block' to fail finalize."

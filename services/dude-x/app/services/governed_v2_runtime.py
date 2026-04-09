@@ -30,6 +30,8 @@ class CognitiveResult:
     linkage: StageLinkage
     cognitive_outcome: CognitiveOutcome
     raw_payload: dict[str, Any]
+    enrichment_status: Optional[str] = None
+    enrichment_warning: Optional[dict[str, Any]] = None
 
 
 def normalize_raw_payload(body: RawIntentSubmitRequest, trace_id: str) -> dict[str, Any]:
@@ -68,11 +70,11 @@ def run_cognitive_mode(body: RawIntentSubmitRequest, trace_id: str) -> Cognitive
 
 async def run_cognitive_mode_async(body: RawIntentSubmitRequest, trace_id: str) -> CognitiveResult:
     """Async version of run_cognitive_mode with optional OpenAI content enrichment."""
-    from app.services.content_enrichment import enrich_build_sot
+    from app.services.content_enrichment import enrich_build_sot_with_metadata
 
     result = run_cognitive_mode(body, trace_id)
     if settings.openai_content_enabled and result.cognitive_outcome.value == "PASS":
-        enriched_sot = await enrich_build_sot(result.build_sot)
+        enriched_sot, enrichment_status, enrichment_warning = await enrich_build_sot_with_metadata(result.build_sot)
         enriched_hash = hash_payload(enriched_sot.model_dump(mode="python"))
         enriched_linkage = StageLinkage(
             trace_id=trace_id,
@@ -87,6 +89,8 @@ async def run_cognitive_mode_async(body: RawIntentSubmitRequest, trace_id: str) 
             linkage=enriched_linkage,
             cognitive_outcome=result.cognitive_outcome,
             raw_payload=result.raw_payload,
+            enrichment_status=enrichment_status,
+            enrichment_warning=enrichment_warning,
         )
     return result
 

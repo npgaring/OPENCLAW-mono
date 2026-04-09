@@ -1,6 +1,9 @@
 """API tests for governed DUDE-X v2 dual-engine flow."""
+import httpx
+
 from fastapi.testclient import TestClient
 
+from app.core.config import settings
 from app.main import app
 
 
@@ -124,3 +127,69 @@ def test_v2_compile_includes_github_vercel_provisioning_defaults():
     assert deploy_op["inputs"]["provider"] == "vercel"
     assert "{timestamp}" not in deploy_op["inputs"]["project"]
     assert deploy_op["inputs"]["branch"] == "prod"
+
+
+def test_v2_raw_intent_surfaces_enrichment_fallback_warning(monkeypatch):
+    class _Response:
+        def __init__(self):
+            self.status_code = 400
+            self.request = httpx.Request("POST", "https://api.openai.com/v1/chat/completions")
+            self.text = (
+                '{"error":{"message":"Invalid schema for response_format",'
+                '"type":"invalid_request_error","param":"response_format"}}'
+            )
+
+        def raise_for_status(self):
+            raise httpx.HTTPStatusError("bad request", request=self.request, response=self)
+
+        def json(self):
+            return {
+                "error": {
+                    "message": "Invalid schema for response_format",
+                    "type": "invalid_request_error",
+                    "param": "response_format",
+                }
+            }
+
+    class _Client:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return None
+
+        async def post(self, *args, **kwargs):
+            return _Response()
+
+    monkeypatch.setattr(settings, "openai_content_enabled", True)
+    monkeypatch.setattr(settings, "openai_api_key", "sk-test")
+    monkeypatch.setattr(settings, "openai_content_model", "gpt-5.4-mini")
+    monkeypatch.setattr("app.services.content_enrichment.httpx.AsyncClient", _Client)
+
+    with TestClient(app) as client:
+        resp = client.post(
+            "/v2/raw-intents",
+            json={
+                "idea": "Create a business site with contact and pricing pages for local clinics.",
+                "ocgg_identity": "W-OCGG",
+                "intent": "web-build",
+                "brief": {
+                    "project_name": "Clinic Nova",
+                    "site_purpose": "Acquire qualified leads for clinic consultations.",
+                    "target_audience": ["local patients"],
+                    "desired_tone": "professional",
+                    "page_list": ["home", "pricing", "contact"],
+                },
+            },
+            headers=_auth(),
+        )
+
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["cognitive_outcome"] == "PASS"
+    assert body["enrichment_status"] == "fallback"
+    assert body["enrichment_warning"]["status_code"] == 400
+    assert body["enrichment_warning"]["param"] == "response_format"

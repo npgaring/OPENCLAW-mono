@@ -97,6 +97,8 @@ def _record_to_envelope(rec: BuildSoTRecord) -> BuildSoTEnvelope:
         stage_linkage=linkage,
         build_sot=build_sot,
         cognitive_outcome=_build_sot_outcome(build_sot),
+        enrichment_status=None,
+        enrichment_warning=None,
     )
 
 
@@ -126,6 +128,8 @@ async def submit_raw_intent(
         unresolved_count=len(result.build_sot.unresolved_items),
         contradictions_count=len(result.build_sot.contradictions),
         cognitive_outcome=result.cognitive_outcome.value,
+        enrichment_status=result.enrichment_status,
+        enrichment_warning=result.enrichment_warning,
     )
     existing_raw = await session.get(RawIntentRecord, result.raw_intent_hash)
     if existing_raw is None:
@@ -183,6 +187,8 @@ async def submit_raw_intent(
             metadata={
                 "unresolved_items": list(result.build_sot.unresolved_items),
                 "contradictions": list(result.build_sot.contradictions),
+                "enrichment_status": result.enrichment_status,
+                "enrichment_warning": result.enrichment_warning,
             },
         )
     )
@@ -222,6 +228,8 @@ async def submit_raw_intent(
         stage_linkage=result.linkage,
         build_sot=result.build_sot,
         cognitive_outcome=result.cognitive_outcome,
+        enrichment_status=result.enrichment_status,
+        enrichment_warning=result.enrichment_warning,
     )
 
 

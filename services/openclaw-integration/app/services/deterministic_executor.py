@@ -670,6 +670,24 @@ class DeterministicWebExecutor:
                     extra={"quality_violations": qviol},
                 )
 
+        # Vercel access preflight (block before GitHub commit when token/team lacks access).
+        logger.info("deterministic.executor.vercel_preflight_start task_id=%s", task_id)
+        async with httpx.AsyncClient(timeout=VERCEL_TIMEOUT_SECONDS) as vc_client:
+            vercel_project = await self._vercel_create_or_resolve_project(
+                vc_client,
+                team_id=hosting_team_id,
+                project_name=project_name,
+                github_owner=owner,
+                github_repo=repo_name,
+                production_branch=deploy_branch,
+            )
+        logger.info(
+            "deterministic.executor.vercel_preflight_done task_id=%s project_id=%s project_name=%s",
+            task_id,
+            vercel_project.id,
+            vercel_project.name,
+        )
+
         # Local preflight (if enabled)
         api_key = (settings.openai_api_key or "").strip()
         model = self._resolve_codegen_model()
@@ -783,14 +801,6 @@ class DeterministicWebExecutor:
         logger.info("deterministic.executor.phase4_start task_id=%s", task_id)
         deploy_target = "production" if (deployment_target or "").lower() == "production" else "preview"
         async with httpx.AsyncClient(timeout=VERCEL_TIMEOUT_SECONDS) as vc_client:
-            vercel_project = await self._vercel_create_or_resolve_project(
-                vc_client,
-                team_id=hosting_team_id,
-                project_name=project_name,
-                github_owner=owner,
-                github_repo=repo_name,
-                production_branch=deploy_branch,
-            )
             steps_completed.append("provision_hosting")
 
             deployment = await self._vercel_deploy_files(
@@ -3016,8 +3026,11 @@ class DeterministicWebExecutor:
         if "src/app/page.tsx" not in paths and "app/page.tsx" not in paths:
             violations.append("missing_root_page")
         internal_a = re.compile(
-            r"<a(\s[^>]*?)\bhref\s*=\s*"
-            r'(["\'])((?:/[^/"\'?#][^"\'?#]*|/))\2',
+            r"<a(?:\s[^>]*?)\bhref\s*=\s*(?:"
+            r'(["\'])((?:/[^/"\'?#][^"\'?#]*|/))\1'
+            r"|"
+            r'\{\s*(["\'])((?:/[^/"\'?#][^"\'?#]*|/))\3\s*\}'
+            r")",
             re.IGNORECASE,
         )
         for path, f in file_map.items():
@@ -3046,9 +3059,11 @@ class DeterministicWebExecutor:
         import re
 
         pattern = re.compile(
-            r"<a(\s[^>]*?)\bhref\s*=\s*"
-            r'(["\'])((?:/[^/"\'?#][^"\'?#]*|/))\2'
-            r"([^>]*?)>(.*?)</a>",
+            r"<a(?P<before>\s[^>]*?)\bhref\s*=\s*(?:"
+            r'(?P<quote>["\'])(?P<href_q>(?:/[^/"\'?#][^"\'?#]*|/))(?P=quote)'
+            r"|"
+            r'\{\s*(?P<expr_quote>["\'])(?P<href_expr>(?:/[^/"\'?#][^"\'?#]*|/))(?P=expr_quote)\s*\}'
+            r")(?P<after>[^>]*?)>(?P<body>.*?)</a>",
             re.IGNORECASE | re.DOTALL,
         )
 
@@ -3065,9 +3080,10 @@ class DeterministicWebExecutor:
                 m = pattern.search(new_content)
                 if not m:
                     break
+                href = m.group("href_q") or m.group("href_expr") or "/"
                 repl = (
-                    f"<Link{m.group(1)}href={m.group(2)}{m.group(3)}{m.group(2)}"
-                    f"{m.group(4)}>{m.group(5)}</Link>"
+                    f"<Link{m.group('before')}href=\"{href}\""
+                    f"{m.group('after')}>{m.group('body')}</Link>"
                 )
                 new_content = new_content[: m.start()] + repl + new_content[m.end() :]
             if new_content != f.content:
@@ -3749,6 +3765,17 @@ class DeterministicWebExecutor:
         get_resp, get_data = await self._request(client, "GET", get_url, headers=headers, params={"teamId": team_id})
         if get_resp.status_code == 200:
             return VercelProjectResult(id=str(get_data.get("id") or ""), name=str(get_data.get("name") or project_name))
+        if get_resp.status_code in (401, 403):
+            self._raise_http_error(
+                reason_code=REASON_VERCEL_PROJECT_CREATE_FAILED,
+                message=(
+                    f"Vercel access denied while resolving project '{project_name}' for team '{team_id}'. "
+                    "Verify VERCEL_TOKEN team membership and project permissions."
+                ),
+                provider="vercel",
+                resp=get_resp,
+                data=get_data,
+            )
         if get_resp.status_code != 404:
             self._raise_http_error(
                 reason_code=REASON_VERCEL_PROJECT_CREATE_FAILED,
@@ -3769,6 +3796,17 @@ class DeterministicWebExecutor:
             },
         }
         create_resp, create_data = await self._request(client, "POST", create_url, headers=headers, params={"teamId": team_id}, payload=payload)
+        if create_resp.status_code in (401, 403):
+            self._raise_http_error(
+                reason_code=REASON_VERCEL_PROJECT_CREATE_FAILED,
+                message=(
+                    f"Vercel access denied while creating project '{project_name}' for team '{team_id}'. "
+                    "Verify VERCEL_TOKEN team membership and project create permissions."
+                ),
+                provider="vercel",
+                resp=create_resp,
+                data=create_data,
+            )
         if create_resp.status_code not in (200, 201):
             self._raise_http_error(
                 reason_code=REASON_VERCEL_PROJECT_CREATE_FAILED,

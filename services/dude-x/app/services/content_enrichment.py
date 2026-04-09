@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import json
 import logging
-from typing import Any
+from typing import Any, Optional
 
 import httpx
 
@@ -17,6 +17,7 @@ from app.services.openai_chat_compat import (
 logger = logging.getLogger(__name__)
 
 OPENAI_API_URL = "https://api.openai.com/v1/chat/completions"
+EnrichmentStatus = str
 
 CONTENT_ENRICHMENT_SCHEMA: dict[str, Any] = {
     "type": "object",
@@ -37,12 +38,13 @@ CONTENT_ENRICHMENT_SCHEMA: dict[str, Any] = {
                 "required": ["title", "description", "icon_hint"],
             },
         },
-        "page_content": {
-            "type": "object",
-            "additionalProperties": {
+        "page_content_entries": {
+            "type": "array",
+            "items": {
                 "type": "object",
                 "additionalProperties": False,
                 "properties": {
+                    "page_name": {"type": "string"},
                     "meta_title": {"type": "string"},
                     "meta_description": {"type": "string"},
                     "sections": {
@@ -61,7 +63,7 @@ CONTENT_ENRICHMENT_SCHEMA: dict[str, Any] = {
                         },
                     },
                 },
-                "required": ["meta_title", "meta_description", "sections"],
+                "required": ["page_name", "meta_title", "meta_description", "sections"],
             },
         },
         "cta_primary_text": {"type": "string"},
@@ -93,7 +95,7 @@ CONTENT_ENRICHMENT_SCHEMA: dict[str, Any] = {
         "hero_headline",
         "hero_subheadline",
         "value_propositions",
-        "page_content",
+        "page_content_entries",
         "cta_primary_text",
         "cta_secondary_text",
         "footer_tagline",
@@ -144,13 +146,12 @@ def _build_enrichment_prompt(build_sot: BuildSoTV1) -> dict[str, Any]:
     return sanitize_chat_completions_payload(payload)
 
 
-async def enrich_build_sot(build_sot: BuildSoTV1) -> BuildSoTV1:
-    """Call OpenAI to enrich the Build SoT with production-quality content.
-
-    Falls back to the original build_sot if OpenAI is unavailable or disabled.
-    """
+async def enrich_build_sot_with_metadata(
+    build_sot: BuildSoTV1,
+) -> tuple[BuildSoTV1, EnrichmentStatus, Optional[dict[str, Any]]]:
+    """Call OpenAI to enrich Build SoT and return enrichment status metadata."""
     if not settings.openai_content_enabled or not settings.openai_api_key:
-        return build_sot
+        return build_sot, "fallback", {"reason": "disabled_or_missing_api_key"}
 
     payload = _build_enrichment_prompt(build_sot)
     try:
@@ -169,13 +170,23 @@ async def enrich_build_sot(build_sot: BuildSoTV1) -> BuildSoTV1:
         content_str = raw["choices"][0]["message"]["content"]
         enriched = json.loads(content_str)
     except Exception as exc:
+        summary = summarize_chat_completions_exception(exc)
         logger.exception(
             "content_enrichment.openai_call_failed details=%s, falling back to deterministic content",
-            summarize_chat_completions_exception(exc),
+            summary,
         )
-        return build_sot
+        return build_sot, "fallback", summary
 
-    return _apply_enrichment(build_sot, enriched)
+    return _apply_enrichment(build_sot, enriched), "applied", None
+
+
+async def enrich_build_sot(build_sot: BuildSoTV1) -> BuildSoTV1:
+    """Call OpenAI to enrich the Build SoT with production-quality content.
+
+    Falls back to the original build_sot if OpenAI is unavailable or disabled.
+    """
+    enriched, _, _ = await enrich_build_sot_with_metadata(build_sot)
+    return enriched
 
 
 def _apply_enrichment(build_sot: BuildSoTV1, enriched: dict[str, Any]) -> BuildSoTV1:
@@ -197,7 +208,7 @@ def _apply_enrichment(build_sot: BuildSoTV1, enriched: dict[str, Any]) -> BuildS
             f"{vp['title']}: {vp['description']}" for vp in vps
         ]
 
-    page_content = enriched.get("page_content", {})
+    page_content = _normalize_page_content(enriched)
     for page_name, page_data in page_content.items():
         sections = page_data.get("sections", [])
         section_texts = []
@@ -227,3 +238,28 @@ def _apply_enrichment(build_sot: BuildSoTV1, enriched: dict[str, Any]) -> BuildS
     }
 
     return build_sot
+
+
+def _normalize_page_content(enriched: dict[str, Any]) -> dict[str, Any]:
+    """Support both legacy page_content object and strict page_content_entries array."""
+    legacy = enriched.get("page_content")
+    if isinstance(legacy, dict):
+        return legacy
+
+    entries = enriched.get("page_content_entries")
+    if not isinstance(entries, list):
+        return {}
+
+    out: dict[str, Any] = {}
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        page_name = str(entry.get("page_name") or "").strip()
+        if not page_name:
+            continue
+        out[page_name] = {
+            "meta_title": str(entry.get("meta_title") or ""),
+            "meta_description": str(entry.get("meta_description") or ""),
+            "sections": entry.get("sections") if isinstance(entry.get("sections"), list) else [],
+        }
+    return out

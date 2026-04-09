@@ -300,18 +300,24 @@ def test_deterministic_execute_template_generation_failure_maps_reason_code(monk
 
 def test_execute_finalize_vercel_project_failure_maps_reason_code(monkeypatch):
     _configure_settings(monkeypatch)
+    calls: list[str] = []
 
     async def _fake_installation_token(self, client):
+        calls.append("installation_token")
         return "ghs_installation_token"
 
     async def _fake_commit(self, client, installation_token, *, owner, repo, branch, files, message):
+        calls.append("commit")
         return "commit-sha"
 
     async def _fake_vercel_project(self, client, team_id, project_name, github_owner, github_repo, production_branch):
         raise DeterministicExecutionError(
             reason_code=REASON_VERCEL_PROJECT_CREATE_FAILED,
-            message="Vercel unavailable",
+            message="Vercel access denied while resolving project.",
             provider="vercel",
+            status_code=403,
+            snippet="forbidden",
+            extra={"upstream_status_code": 403, "upstream_error": "forbidden"},
         )
 
     monkeypatch.setattr("app.services.deterministic_executor.DeterministicWebExecutor._github_installation_token", _fake_installation_token)
@@ -329,6 +335,7 @@ def test_execute_finalize_vercel_project_failure_maps_reason_code(monkeypatch):
             hosting_team_id="team_123", project_name="test-site", deploy_branch="main",
         ))
     assert err.value.reason_code == REASON_VERCEL_PROJECT_CREATE_FAILED
+    assert "commit" not in calls
 
 
 def test_execute_finalize_vercel_deploy_failure_maps_reason_code(monkeypatch):
@@ -973,10 +980,14 @@ def test_execute_finalize_hard_gates_on_local_preflight_failure(monkeypatch):
         calls.append("deploy")
         return VercelDeploymentResult(id="dpl_123", url="test-site-git.vercel.app", target=target)
 
+    async def _fake_vercel_project(self, client, team_id, project_name, github_owner, github_repo, production_branch):
+        return VercelProjectResult(id="prj_abc", name=project_name)
+
     monkeypatch.setattr("app.services.deterministic_executor.DeterministicWebExecutor._github_installation_token", _fake_installation_token)
     monkeypatch.setattr("app.services.deterministic_executor.DeterministicWebExecutor._run_local_preflight", _fake_preflight)
     monkeypatch.setattr("app.services.deterministic_executor.DeterministicWebExecutor._auto_fix_build_errors", _fake_auto_fix)
     monkeypatch.setattr("app.services.deterministic_executor.DeterministicWebExecutor._github_batch_commit", _fake_commit)
+    monkeypatch.setattr("app.services.deterministic_executor.DeterministicWebExecutor._vercel_create_or_resolve_project", _fake_vercel_project)
     monkeypatch.setattr("app.services.deterministic_executor.DeterministicWebExecutor._vercel_deploy_files", _fake_deploy)
 
     repo_info = {"owner": "test-owner", "name": "test-site", "html_url": "https://github.com/test-owner/test-site", "default_branch": "main", "branch": "main"}
@@ -1042,6 +1053,17 @@ def test_collect_deploy_quality_violations_detects_internal_anchor():
     assert any(x.startswith("internal_html_link:") for x in v)
 
 
+def test_collect_deploy_quality_violations_detects_internal_anchor_jsx_href_expression():
+    fm = {
+        "package.json": GeneratedFile(path="package.json", content='{"name":"x","private":true}'),
+        "src/app/layout.tsx": GeneratedFile(path="src/app/layout.tsx", content="export default function RootLayout(){return null}"),
+        "src/app/page.tsx": GeneratedFile(path="src/app/page.tsx", content="export default function Page(){return null}"),
+        "src/bad.tsx": GeneratedFile(path="src/bad.tsx", content='<a className="x" href={"/pricing"}>pricing</a>'),
+    }
+    v = DeterministicWebExecutor._collect_deploy_quality_violations(fm)
+    assert any(x.startswith("internal_html_link:") for x in v)
+
+
 def test_rewrite_internal_anchors_to_next_link():
     """Internal / hrefs become Link to satisfy @next/next/no-html-link-for-pages."""
     fm = {
@@ -1063,6 +1085,21 @@ def test_rewrite_internal_anchors_to_next_link():
     assert 'href="https://example.com"' in x
     assert "<Link" in x
     assert "Price</Link>" in x
+
+
+def test_rewrite_internal_anchors_to_next_link_handles_jsx_href_expression():
+    fm = {
+        "src/app/components/NavBar.tsx": GeneratedFile(
+            path="src/app/components/NavBar.tsx",
+            content='<nav><a className="x" href={"/"}>Home</a></nav>',
+        ),
+    }
+    DeterministicWebExecutor._rewrite_internal_anchors_to_next_link(fm)
+    nav = fm["src/app/components/NavBar.tsx"].content
+    assert "<Link" in nav
+    assert 'href="/"' in nav
+    assert 'href={"/"}' not in nav
+    assert "Home</Link>" in nav
 
 
 def test_ensure_scaffold_integrity_deduplicates_dev_deps():
