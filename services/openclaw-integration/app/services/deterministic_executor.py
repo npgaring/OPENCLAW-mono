@@ -1067,7 +1067,11 @@ class DeterministicWebExecutor:
         self._validate_next_imports(file_map, warnings)
         mixing_issues = self._detect_server_client_mixing(file_map)
         warnings.extend(mixing_issues)
+        self._rewrite_img_to_next_image(file_map)
+        self._fix_anonymous_default_exports(file_map)
+        self._fix_component_prop_type_mismatches(file_map)
         self._fix_missing_standard_imports(file_map)
+        self._remove_unused_imports(file_map)
         self._normalize_directive_placement(file_map)
 
         sanitized_files = list(file_map.values())
@@ -2128,10 +2132,15 @@ class DeterministicWebExecutor:
         "- PostCSS: export default { plugins: { \"@tailwindcss/postcss\": {} } };\n"
         "- EVERY component imported MUST be generated. All components use named exports.\n"
         "- ALWAYS import identifiers: Link from next/link, Image from next/image, etc.\n"
+        "- NEVER use raw <img> tags. ALWAYS use: import Image from \"next/image\"; and "
+        "<Image src=\"...\" alt=\"...\" width={N} height={N} />. This is required for Next.js image optimization.\n"
         "- INTERNAL navigation (href starting with \"/\", same-site): NEVER use raw <a>. "
         "Use: import Link from \"next/link\"; and <Link href=\"/path\">...</Link>. "
         "External URLs (https://, mailto:, tel:) may use <a> with rel=\"noopener noreferrer\".\n"
-        "- Remove unused imports and unused variables so ESLint passes (no-unused-vars).\n"
+        "- NEVER import something you don't use. Every imported name MUST appear in the JSX or logic below. "
+        "Remove unused imports and unused variables so ESLint passes (no-unused-vars).\n"
+        "- When a component accepts typed props (e.g. items: SomeItem[]), ALWAYS pass data matching that type. "
+        "NEVER pass plain strings where an object type is expected — this causes TypeScript build failures.\n"
         "- Avoid default-exporting anonymous objects from lib files; use named exports or: const x = { ... }; export default x;\n"
         "- For MetadataRoute.Robots use lowercase keys: userAgent, allow, disallow, crawlDelay.\n"
         "- Use proper TypeScript types throughout.\n\n"
@@ -2911,6 +2920,313 @@ class DeterministicWebExecutor:
                 )
 
     @staticmethod
+    def _remove_unused_imports(file_map: dict[str, GeneratedFile]) -> None:
+        """Remove imported names that are never referenced in the non-import body of the file.
+
+        Handles named imports (``import { A, B } from "x"``), default imports
+        (``import X from "x"``), namespace imports (``import * as X from "x"``),
+        and side-effect imports (``import "x"`` — always kept).  Multi-line
+        named imports are collapsed into a single check.
+        """
+        import re
+
+        SINGLE_IMPORT_RE = re.compile(
+            r"""^import\s+"""
+            r"""(?:"""
+            r"""(?:type\s+)?(\w+)"""                        # default import
+            r"""|(?:type\s+)?\*\s+as\s+(\w+)"""            # namespace import
+            r"""|(?:type\s+)?\{([^}]+)\}"""                 # named imports
+            r""")"""
+            r"""\s+from\s+['"][^'"]+['"]\s*;?\s*$"""
+        )
+        COMBINED_IMPORT_RE = re.compile(
+            r"""^import\s+"""
+            r"""(?:type\s+)?(\w+)\s*,\s*\{([^}]+)\}"""     # default + named
+            r"""\s+from\s+['"][^'"]+['"]\s*;?\s*$"""
+        )
+
+        for path, f in list(file_map.items()):
+            if not (path.endswith(".tsx") or path.endswith(".ts")
+                    or path.endswith(".jsx") or path.endswith(".js")):
+                continue
+
+            lines = f.content.split("\n")
+
+            import_entries: list[tuple[int, int, list[str], str]] = []
+            i = 0
+            while i < len(lines):
+                stripped = lines[i].strip()
+                if not stripped.startswith("import "):
+                    i += 1
+                    continue
+                if stripped.startswith("import ") and "from" not in stripped and (
+                    stripped.endswith(";") or stripped.endswith('"') or stripped.endswith("'")
+                ):
+                    i += 1
+                    continue
+
+                start = i
+                if "{" in stripped and "}" not in stripped:
+                    j = i + 1
+                    while j < len(lines) and "}" not in lines[j]:
+                        j += 1
+                    full_import = " ".join(lines[k].strip() for k in range(start, j + 1))
+                    end = j
+                else:
+                    full_import = stripped
+                    end = i
+
+                names: list[str] = []
+                cm = COMBINED_IMPORT_RE.match(full_import.strip())
+                if cm:
+                    if cm.group(1):
+                        names.append(cm.group(1))
+                    names.extend(n.strip().split(" as ")[-1].strip()
+                                 for n in cm.group(2).split(",") if n.strip())
+                else:
+                    m = SINGLE_IMPORT_RE.match(full_import.strip())
+                    if m:
+                        if m.group(1):
+                            names.append(m.group(1))
+                        elif m.group(2):
+                            names.append(m.group(2))
+                        elif m.group(3):
+                            names.extend(
+                                n.strip().split(" as ")[-1].strip()
+                                for n in m.group(3).split(",") if n.strip()
+                            )
+
+                if names:
+                    import_entries.append((start, end, names, full_import))
+                i = end + 1
+
+            if not import_entries:
+                continue
+
+            last_import_end = max(end for _, end, _, _ in import_entries)
+            body = "\n".join(lines[last_import_end + 1:])
+
+            lines_to_remove: set[int] = set()
+            changed = False
+            for start, end, names, full_import in import_entries:
+                used = [n for n in names if re.search(r'\b' + re.escape(n) + r'\b', body)]
+                if not used:
+                    for idx in range(start, end + 1):
+                        lines_to_remove.add(idx)
+                    changed = True
+                    logger.info(
+                        "deterministic.executor.unused_imports.removed file=%s names=%s",
+                        path, ", ".join(names),
+                    )
+                elif len(used) < len(names):
+                    unused = [n for n in names if n not in used]
+                    named_match = re.search(r'\{([^}]+)\}', full_import)
+                    if named_match:
+                        original_names_str = named_match.group(1)
+                        individual = [n.strip() for n in original_names_str.split(",") if n.strip()]
+                        kept = [n for n in individual if n.strip().split(" as ")[-1].strip() in used]
+                        if kept:
+                            new_names_str = ", ".join(kept)
+                            new_import = full_import[:named_match.start(1)] + " " + new_names_str + " " + full_import[named_match.end(1):]
+                            new_import = new_import.strip()
+                            for idx in range(start, end + 1):
+                                lines_to_remove.add(idx)
+                            lines[start] = new_import
+                            lines_to_remove.discard(start)
+                            changed = True
+                            logger.info(
+                                "deterministic.executor.unused_imports.trimmed file=%s removed=%s",
+                                path, ", ".join(unused),
+                            )
+
+            if changed:
+                new_lines = [line for idx, line in enumerate(lines) if idx not in lines_to_remove]
+                content = "\n".join(new_lines)
+                content = re.sub(r'\n{3,}', '\n\n', content)
+                file_map[path] = GeneratedFile(path=path, content=content)
+
+    @staticmethod
+    def _fix_anonymous_default_exports(file_map: dict[str, GeneratedFile]) -> None:
+        """Convert ``export default { ... }`` to a named const + export.
+
+        ESLint ``import/no-anonymous-default-export`` flags anonymous objects.
+        """
+        import re
+        anon_re = re.compile(
+            r"""^(export\s+default\s+)(\{)""", re.MULTILINE
+        )
+        for path, f in list(file_map.items()):
+            if not (path.endswith(".ts") or path.endswith(".js")):
+                continue
+            if not anon_re.search(f.content):
+                continue
+            basename = path.rsplit("/", 1)[-1].rsplit(".", 1)[0]
+            var_name = re.sub(r'[^a-zA-Z0-9]', '_', basename) + "Config"
+            new_content = anon_re.sub(
+                rf"const {var_name} = {{", f.content, count=1
+            )
+            if not new_content.rstrip().endswith(";"):
+                new_content = new_content.rstrip() + ";"
+            new_content += f"\n\nexport default {var_name};\n"
+            file_map[path] = GeneratedFile(path=path, content=new_content)
+            logger.info(
+                "deterministic.executor.anon_export_fixed file=%s var=%s",
+                path, var_name,
+            )
+
+    @staticmethod
+    def _rewrite_img_to_next_image(file_map: dict[str, GeneratedFile]) -> None:
+        """Replace raw ``<img>`` tags with Next.js ``<Image />`` in tsx/jsx files.
+
+        Adds ``width`` and ``height`` attributes when missing (required by next/image)
+        and ensures the ``next/image`` import is present.
+        """
+        import re
+        img_tag_re = re.compile(
+            r"<img\b([^>]*?)(/?\s*)>",
+            re.DOTALL,
+        )
+        src_re = re.compile(r"""\bsrc\s*=\s*(?:['"]([^'"]*?)['"]|\{([^}]+)\})""")
+        alt_re = re.compile(r"""\balt\s*=\s*(?:['"]([^'"]*?)['"]|\{([^}]+)\})""")
+        width_re = re.compile(r"""\bwidth\s*=""")
+        height_re = re.compile(r"""\bheight\s*=""")
+        class_re = re.compile(r"""\bclassName\s*=|class\s*=""")
+
+        for path, f in list(file_map.items()):
+            if not (path.endswith(".tsx") or path.endswith(".jsx")):
+                continue
+            if not img_tag_re.search(f.content):
+                continue
+
+            def _replace_img(m: re.Match) -> str:
+                attrs = m.group(1)
+                if not width_re.search(attrs):
+                    attrs += ' width={800}'
+                if not height_re.search(attrs):
+                    attrs += ' height={600}'
+                if not alt_re.search(attrs):
+                    attrs += ' alt=""'
+                return f"<Image{attrs} />"
+
+            new_content = img_tag_re.sub(_replace_img, f.content)
+
+            if new_content != f.content:
+                if 'from "next/image"' not in new_content and "from 'next/image'" not in new_content:
+                    directive_match = re.match(r'^(["\']use client["\'];?\s*\n)', new_content)
+                    import_line = 'import Image from "next/image";\n'
+                    if directive_match:
+                        insert_pos = directive_match.end()
+                        new_content = new_content[:insert_pos] + import_line + new_content[insert_pos:]
+                    else:
+                        new_content = import_line + new_content
+
+                file_map[path] = GeneratedFile(path=path, content=new_content)
+                logger.info("deterministic.executor.img_to_next_image file=%s", path)
+
+    @staticmethod
+    def _fix_component_prop_type_mismatches(file_map: dict[str, GeneratedFile]) -> None:
+        """Fix obvious prop type mismatches where strings are passed to components expecting objects.
+
+        When a component defines a typed interface for its items prop (e.g.
+        ``items: SomeItem[]`` where ``SomeItem`` has a ``text`` or ``label`` field),
+        and a page passes plain strings, this method wraps the strings in objects
+        matching the interface.
+        """
+        import re
+
+        interface_re = re.compile(
+            r"""(?:interface|type)\s+(\w+)\s*(?:=\s*)?\{([^}]+)\}""",
+            re.DOTALL,
+        )
+        array_prop_re = re.compile(
+            r"""(\w+)\s*:\s*(\w+)\[\]"""
+        )
+
+        comp_interfaces: dict[str, dict[str, list[str]]] = {}
+        for path, f in list(file_map.items()):
+            if not path.startswith("src/components/"):
+                continue
+            for im in interface_re.finditer(f.content):
+                iface_name = im.group(1)
+                fields = []
+                for field_match in re.finditer(r'(\w+)\s*[?]?\s*:', im.group(2)):
+                    fields.append(field_match.group(1))
+                if fields:
+                    comp_interfaces.setdefault(path, {})[iface_name] = fields
+
+            for ap in array_prop_re.finditer(f.content):
+                prop_name = ap.group(1)
+                type_name = ap.group(2)
+                for iface_path, ifaces in comp_interfaces.items():
+                    if type_name in ifaces:
+                        comp_interfaces[iface_path][f"__prop__{prop_name}"] = [type_name]
+
+        if not comp_interfaces:
+            return
+
+        all_ifaces: dict[str, list[str]] = {}
+        for path_ifaces in comp_interfaces.values():
+            for name, fields in path_ifaces.items():
+                if not name.startswith("__prop__"):
+                    all_ifaces[name] = fields
+
+        string_array_re = re.compile(
+            r"""(\w+)\s*=\s*\{\s*\[([^\]]+)\]\s*\}""",
+            re.DOTALL,
+        )
+        for path, f in list(file_map.items()):
+            if not (path.endswith("/page.tsx") or path.endswith("/page.jsx")):
+                continue
+
+            content = f.content
+            changed = False
+
+            for sam in string_array_re.finditer(content):
+                prop_name = sam.group(1)
+                array_body = sam.group(2).strip()
+                items = [s.strip().strip(",") for s in re.findall(r"""['"][^'"]+['"]""", array_body)]
+                if not items or len(items) < 2:
+                    continue
+                all_strings = all(
+                    s.startswith('"') or s.startswith("'") or s.startswith("`")
+                    for s in items
+                )
+                if not all_strings:
+                    continue
+
+                for iface_name, fields in all_ifaces.items():
+                    text_field = None
+                    for candidate in ("text", "label", "title", "content", "description", "name", "message"):
+                        if candidate in fields:
+                            text_field = candidate
+                            break
+                    if not text_field:
+                        continue
+
+                    type_in_file = re.search(
+                        rf"""\b{re.escape(iface_name)}\b""", content
+                    )
+                    if not type_in_file:
+                        continue
+
+                    new_items = []
+                    for s in items:
+                        new_items.append(f'{{ {text_field}: {s} }}')
+                    new_array = ", ".join(new_items)
+                    old_str = sam.group(0)
+                    new_str = f"{prop_name}={{[{new_array}]}}"
+                    content = content.replace(old_str, new_str, 1)
+                    changed = True
+                    logger.info(
+                        "deterministic.executor.prop_type_fix file=%s prop=%s iface=%s",
+                        path, prop_name, iface_name,
+                    )
+                    break
+
+            if changed:
+                file_map[path] = GeneratedFile(path=path, content=content)
+
+    @staticmethod
     def _ensure_page_metadata(file_map: dict[str, GeneratedFile]) -> None:
         """Add Metadata export to server-rendered pages that lack it."""
         import re
@@ -3245,6 +3561,15 @@ class DeterministicWebExecutor:
         # ── Rewrite internal <a href="/..."> to Next.js <Link> (ESLint no-html-link-for-pages)
         self._rewrite_internal_anchors_to_next_link(file_map)
 
+        # ── Replace raw <img> with Next.js <Image /> ──────────────────────
+        self._rewrite_img_to_next_image(file_map)
+
+        # ── Fix anonymous default exports (import/no-anonymous-default-export)
+        self._fix_anonymous_default_exports(file_map)
+
+        # ── Fix component prop type mismatches (string vs object arrays) ──
+        self._fix_component_prop_type_mismatches(file_map)
+
         # ── Auto-fix missing standard imports in all tsx/ts files ────────
         self._fix_missing_standard_imports(file_map)
 
@@ -3264,6 +3589,9 @@ class DeterministicWebExecutor:
         # Final import consolidation: deduplicate, merge same-source, remove orphans
         self._fix_duplicate_imports(file_map)
         self._fix_orphaned_import_fragments(file_map)
+
+        # Remove unused imports (must run after all other import passes)
+        self._remove_unused_imports(file_map)
 
         # Final safety net: ensure "use client" is always line 1 after all transforms
         self._normalize_directive_placement(file_map)
@@ -5276,6 +5604,10 @@ class DeterministicWebExecutor:
         self._fix_duplicate_imports(file_map)
         self._fix_orphaned_import_fragments(file_map)
         self._fix_export_import_mismatches(file_map)
+        self._rewrite_img_to_next_image(file_map)
+        self._fix_anonymous_default_exports(file_map)
+        self._fix_component_prop_type_mismatches(file_map)
+        self._remove_unused_imports(file_map)
 
         import re
         dup_default_re = re.compile(r"^export\s+default\s+", re.MULTILINE)

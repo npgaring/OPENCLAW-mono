@@ -1527,3 +1527,200 @@ def test_execute_review_patches_critical_issues(monkeypatch):
     assert result["review_report"]["files_patched"] == 1
     page = next(f for f in result["files"] if f.path == "src/app/page.tsx")
     assert '"use client"' in page.content
+
+
+# ── Unused import removal ──────────────────────────────────────────────────
+def test_remove_unused_imports_strips_completely_unused():
+    fm = {
+        "src/app/page.tsx": GeneratedFile(
+            path="src/app/page.tsx",
+            content=(
+                'import { PageHeader, HeroSection, Button } from "@/components";\n'
+                'import Link from "next/link";\n'
+                '\n'
+                'export default function Page() {\n'
+                '  return <HeroSection />;\n'
+                '}\n'
+            ),
+        ),
+    }
+    DeterministicWebExecutor._remove_unused_imports(fm)
+    content = fm["src/app/page.tsx"].content
+    assert "PageHeader" not in content
+    assert "Button" not in content
+    assert "Link" not in content
+    assert "HeroSection" in content
+
+
+def test_remove_unused_imports_trims_partial():
+    fm = {
+        "src/app/features/page.tsx": GeneratedFile(
+            path="src/app/features/page.tsx",
+            content=(
+                'import { PageHeader, FeatureCard } from "@/components";\n'
+                '\n'
+                'export default function Page() {\n'
+                '  return <FeatureCard title="A" />;\n'
+                '}\n'
+            ),
+        ),
+    }
+    DeterministicWebExecutor._remove_unused_imports(fm)
+    content = fm["src/app/features/page.tsx"].content
+    assert "PageHeader" not in content
+    assert "FeatureCard" in content
+    assert 'from "@/components"' in content
+
+
+def test_remove_unused_imports_keeps_side_effect_imports():
+    fm = {
+        "src/app/layout.tsx": GeneratedFile(
+            path="src/app/layout.tsx",
+            content=(
+                'import "./globals.css";\n'
+                'import { Inter } from "next/font/google";\n'
+                '\n'
+                'const inter = Inter({ subsets: ["latin"] });\n'
+                'export default function Layout({children}:{children:React.ReactNode}){\n'
+                '  return <html className={inter.className}><body>{children}</body></html>;\n'
+                '}\n'
+            ),
+        ),
+    }
+    DeterministicWebExecutor._remove_unused_imports(fm)
+    content = fm["src/app/layout.tsx"].content
+    assert '"./globals.css"' in content
+    assert "Inter" in content
+
+
+def test_remove_unused_imports_handles_multiline():
+    fm = {
+        "src/app/page.tsx": GeneratedFile(
+            path="src/app/page.tsx",
+            content=(
+                'import {\n'
+                '  Hero,\n'
+                '  Unused1,\n'
+                '  CTA,\n'
+                '  Unused2,\n'
+                '} from "@/components";\n'
+                '\n'
+                'export default function Page() {\n'
+                '  return <><Hero /><CTA /></>;\n'
+                '}\n'
+            ),
+        ),
+    }
+    DeterministicWebExecutor._remove_unused_imports(fm)
+    content = fm["src/app/page.tsx"].content
+    assert "Unused1" not in content
+    assert "Unused2" not in content
+    assert "Hero" in content
+    assert "CTA" in content
+
+
+# ── Anonymous default export fix ───────────────────────────────────────────
+def test_fix_anonymous_default_exports():
+    fm = {
+        "src/lib/cn.ts": GeneratedFile(
+            path="src/lib/cn.ts",
+            content=(
+                'import { clsx } from "clsx";\n'
+                'import { twMerge } from "tailwind-merge";\n'
+                '\n'
+                'export default {\n'
+                '  cn: (...args: any[]) => twMerge(clsx(args)),\n'
+                '};\n'
+            ),
+        ),
+    }
+    DeterministicWebExecutor._fix_anonymous_default_exports(fm)
+    content = fm["src/lib/cn.ts"].content
+    assert "export default {" not in content
+    assert "const cnConfig =" in content or "const cn_Config =" in content
+    assert "export default cnConfig" in content or "export default cn_Config" in content
+
+
+# ── <img> to <Image /> rewrite ─────────────────────────────────────────────
+def test_rewrite_img_to_next_image():
+    fm = {
+        "src/app/gallery/page.tsx": GeneratedFile(
+            path="src/app/gallery/page.tsx",
+            content=(
+                '"use client";\n'
+                'export default function Gallery() {\n'
+                '  return (\n'
+                '    <div>\n'
+                '      <img src="/photo.jpg" alt="Photo" className="rounded" />\n'
+                '    </div>\n'
+                '  );\n'
+                '}\n'
+            ),
+        ),
+    }
+    DeterministicWebExecutor._rewrite_img_to_next_image(fm)
+    content = fm["src/app/gallery/page.tsx"].content
+    assert "<img" not in content
+    assert "<Image" in content
+    assert 'from "next/image"' in content
+    assert 'width=' in content
+    assert 'height=' in content
+
+
+def test_rewrite_img_preserves_existing_dimensions():
+    fm = {
+        "src/components/Card.tsx": GeneratedFile(
+            path="src/components/Card.tsx",
+            content='export function Card() { return <img src="/x.png" alt="x" width={100} height={100} />; }\n',
+        ),
+    }
+    DeterministicWebExecutor._rewrite_img_to_next_image(fm)
+    content = fm["src/components/Card.tsx"].content
+    assert content.count("width=") == 1
+    assert content.count("height=") == 1
+
+
+# ── Component prop type mismatch fix ──────────────────────────────────────
+def test_fix_component_prop_type_mismatches_wraps_strings():
+    fm = {
+        "src/components/SocialProofStrip.tsx": GeneratedFile(
+            path="src/components/SocialProofStrip.tsx",
+            content=(
+                'interface SocialProofItem {\n'
+                '  text: string;\n'
+                '  icon?: string;\n'
+                '}\n'
+                '\n'
+                'interface Props {\n'
+                '  items: SocialProofItem[];\n'
+                '}\n'
+                '\n'
+                'export function SocialProofStrip({ items }: Props) {\n'
+                '  return <div>{items.map(i => <span key={i.text}>{i.text}</span>)}</div>;\n'
+                '}\n'
+            ),
+        ),
+        "src/app/careers/page.tsx": GeneratedFile(
+            path="src/app/careers/page.tsx",
+            content=(
+                'import { SocialProofStrip } from "@/components";\n'
+                'import type { SocialProofItem } from "@/components/SocialProofStrip";\n'
+                '\n'
+                'export default function CareersPage() {\n'
+                '  return (\n'
+                '    <SocialProofStrip\n'
+                '      items={[\n'
+                '        "Average candidate response within 5 business days",\n'
+                '        "Remote-friendly team with flexible scheduling",\n'
+                '        "Structured onboarding for every new hire",\n'
+                '      ]}\n'
+                '    />\n'
+                '  );\n'
+                '}\n'
+            ),
+        ),
+    }
+    DeterministicWebExecutor._fix_component_prop_type_mismatches(fm)
+    content = fm["src/app/careers/page.tsx"].content
+    assert "text:" in content
+    assert "{ text:" in content
