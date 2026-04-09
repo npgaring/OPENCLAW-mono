@@ -1377,6 +1377,121 @@ def test_execute_review_skips_without_api_key(monkeypatch):
     assert result["review_report"]["status"] == "skipped"
 
 
+def test_fix_duplicate_imports_multiline_not_corrupted():
+    """Multi-line imports from the same source must not leave orphaned fragments."""
+    fm = {
+        "src/app/page.tsx": GeneratedFile(
+            path="src/app/page.tsx",
+            content=(
+                'import {\n'
+                '  NavBar,\n'
+                '  Footer,\n'
+                '} from "@/components";\n'
+                'import {\n'
+                '  SocialProofBar,\n'
+                '  StatsStrip,\n'
+                '  TestimonialCard,\n'
+                '} from "@/components";\n'
+                '\nexport default function Page() { return null; }\n'
+            ),
+        ),
+    }
+    DeterministicWebExecutor._fix_duplicate_imports(fm)
+    content = fm["src/app/page.tsx"].content
+    assert "} from" in content
+    assert "Expression expected" not in content
+    for name in ("NavBar", "Footer", "SocialProofBar", "StatsStrip", "TestimonialCard"):
+        assert name in content, f"Expected {name} in merged import"
+
+
+def test_fix_duplicate_imports_identical_multiline_deduped():
+    """Identical multi-line import blocks should be reduced to one."""
+    block = 'import {\n  Hero,\n  CTA,\n} from "@/components";\n'
+    fm = {
+        "src/app/page.tsx": GeneratedFile(
+            path="src/app/page.tsx",
+            content=block + block + "\nexport default function Page() { return null; }\n",
+        ),
+    }
+    DeterministicWebExecutor._fix_duplicate_imports(fm)
+    content = fm["src/app/page.tsx"].content
+    assert content.count('from "@/components"') == 1
+
+
+def test_merge_same_source_imports_single_line():
+    fm = {
+        "src/app/page.tsx": GeneratedFile(
+            path="src/app/page.tsx",
+            content=(
+                'import { A, B } from "@/components";\n'
+                'import { C } from "@/components";\n'
+                '\nexport default function Page() { return null; }\n'
+            ),
+        ),
+    }
+    DeterministicWebExecutor._merge_same_source_imports(fm)
+    content = fm["src/app/page.tsx"].content
+    assert content.count('from "@/components"') == 1
+    for name in ("A", "B", "C"):
+        assert name in content
+
+
+def test_fix_orphaned_import_fragments_removes_broken_lines():
+    fm = {
+        "src/app/page.tsx": GeneratedFile(
+            path="src/app/page.tsx",
+            content=(
+                '  SocialProofBar,\n'
+                '  StatsStrip,\n'
+                '  TestimonialCard,\n'
+                '} from "@/components";\n'
+                '\nexport default function Page() { return null; }\n'
+            ),
+        ),
+    }
+    DeterministicWebExecutor._fix_orphaned_import_fragments(fm)
+    content = fm["src/app/page.tsx"].content
+    assert "SocialProofBar" not in content
+    assert "} from" not in content
+    assert "export default" in content
+
+
+def test_quality_gate_detects_orphaned_import_fragment():
+    fm = {
+        "src/app/page.tsx": GeneratedFile(
+            path="src/app/page.tsx",
+            content=(
+                'import { A } from "@/components";\n'
+                '  B,\n'
+                '  C,\n'
+                '} from "@/components";\n'
+                '\nexport default function Page() { return null; }\n'
+            ),
+        ),
+        "src/app/layout.tsx": GeneratedFile(
+            path="src/app/layout.tsx",
+            content="export default function Layout({children}:{children:React.ReactNode}){return <html><body>{children}</body></html>;}\n",
+        ),
+        "package.json": GeneratedFile(
+            path="package.json",
+            content='{"name":"test"}',
+        ),
+    }
+    violations = DeterministicWebExecutor._collect_deploy_quality_violations(fm)
+    assert any("orphaned_import_fragment" in v for v in violations)
+
+
+def test_classify_build_errors_recognizes_syntax_error():
+    logs = (
+        "Error:   x Expression expected\n"
+        "Caused by:\n"
+        "    Syntax Error\n"
+    )
+    classified = DeterministicWebExecutor._classify_build_errors(logs)
+    types = {e["type"] for e in classified}
+    assert "syntax_error" in types
+
+
 def test_execute_review_patches_critical_issues(monkeypatch):
     monkeypatch.setattr("app.services.deterministic_executor.settings.openai_api_key", "sk-test")
 

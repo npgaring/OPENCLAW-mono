@@ -1060,6 +1060,7 @@ class DeterministicWebExecutor:
         self._ensure_use_client_directive(file_map)
         self._normalize_directive_placement(file_map)
         self._fix_duplicate_imports(file_map)
+        self._fix_orphaned_import_fragments(file_map)
         self._validate_component_exports(file_map, warnings)
         self._fix_export_import_mismatches(file_map)
         self._validate_hook_imports(file_map, warnings)
@@ -2112,6 +2113,9 @@ class DeterministicWebExecutor:
         "(useState, useEffect, useRef, useCallback, useMemo, useReducer, useContext, "
         "useRouter, usePathname, useSearchParams) or browser event handlers (onClick, onChange, onSubmit, etc.).\n"
         "- NEVER place \"use client\" after import statements — this causes an immediate build failure.\n"
+        "- NEVER split imports from the same module into multiple import statements. "
+        "Combine all named imports from a module into a SINGLE import statement: "
+        "import { A, B, C } from \"@/components\"; — NOT two separate import lines from \"@/components\".\n"
         "- \"use client\" and metadata exports (export const metadata / generateMetadata) are MUTUALLY EXCLUSIVE. "
         "A file CANNOT have both. If a page needs interactivity AND metadata, extract the interactive parts "
         "into a separate client component under src/components/ and import it into the server page.\n"
@@ -2559,6 +2563,7 @@ class DeterministicWebExecutor:
 
         # Check 4: Fix duplicate imports
         self._fix_duplicate_imports(file_map)
+        self._fix_orphaned_import_fragments(file_map)
 
         # Check 5: Ensure page metadata exports
         self._ensure_page_metadata(file_map)
@@ -2762,24 +2767,148 @@ class DeterministicWebExecutor:
 
     @staticmethod
     def _fix_duplicate_imports(file_map: dict[str, GeneratedFile]) -> None:
-        """Remove duplicate import lines from all source files."""
+        """Remove duplicate import statements (handles both single-line and multi-line).
+
+        Multi-line imports like ``import {\\n  A,\\n  B,\\n} from "x";`` are
+        collected as a single logical block before deduplication so the opening
+        ``import {`` line is never stripped while leaving orphaned body lines.
+
+        After deduplication, imports from the same source module are merged into
+        a single statement to prevent fragmentation.
+        """
+        import re
+        for path, f in list(file_map.items()):
+            if not (path.endswith(".tsx") or path.endswith(".ts") or path.endswith(".jsx") or path.endswith(".js")):
+                continue
+
+            lines = f.content.split("\n")
+            import_blocks: list[tuple[int, int, str]] = []
+            i = 0
+            while i < len(lines):
+                stripped = lines[i].strip()
+                if stripped.startswith("import "):
+                    start = i
+                    if "from " in stripped and (stripped.endswith(";") or stripped.endswith("'") or stripped.endswith('"')):
+                        import_blocks.append((start, start, stripped))
+                    elif "{" in stripped and "}" not in stripped:
+                        j = i + 1
+                        while j < len(lines):
+                            if "}" in lines[j]:
+                                block_text = "\n".join(l.strip() for l in lines[start:j + 1])
+                                import_blocks.append((start, j, block_text))
+                                break
+                            j += 1
+                        else:
+                            import_blocks.append((start, start, stripped))
+                        i = j
+                    else:
+                        import_blocks.append((start, start, stripped))
+                i += 1
+
+            seen_blocks: set[str] = set()
+            lines_to_remove: set[int] = set()
+            for start, end, block_text in import_blocks:
+                normalized = " ".join(block_text.split())
+                if normalized in seen_blocks:
+                    for line_idx in range(start, end + 1):
+                        lines_to_remove.add(line_idx)
+                else:
+                    seen_blocks.add(normalized)
+
+            if lines_to_remove:
+                new_lines = [line for idx, line in enumerate(lines) if idx not in lines_to_remove]
+                file_map[path] = GeneratedFile(path=path, content="\n".join(new_lines))
+
+        DeterministicWebExecutor._merge_same_source_imports(file_map)
+
+    @staticmethod
+    def _merge_same_source_imports(file_map: dict[str, GeneratedFile]) -> None:
+        """Merge multiple named imports from the same module into a single statement."""
+        import re
+        named_import_re = re.compile(
+            r"""^import\s+\{([^}]+)\}\s+from\s+(['"])([^'"]+)\2\s*;?\s*$"""
+        )
         for path, f in list(file_map.items()):
             if not (path.endswith(".tsx") or path.endswith(".ts") or path.endswith(".jsx") or path.endswith(".js")):
                 continue
             lines = f.content.split("\n")
-            seen: set[str] = set()
-            deduped: list[str] = []
-            changed = False
-            for line in lines:
-                stripped = line.strip()
-                if stripped.startswith("import ") and stripped in seen:
-                    changed = True
+            source_map: dict[str, list[tuple[int, list[str]]]] = {}
+            for idx, line in enumerate(lines):
+                m = named_import_re.match(line.strip())
+                if m:
+                    names = [n.strip() for n in m.group(1).split(",") if n.strip()]
+                    source = m.group(3)
+                    source_map.setdefault(source, []).append((idx, names))
+
+            lines_to_remove: set[int] = set()
+            replacements: dict[int, str] = {}
+            for source, entries in source_map.items():
+                if len(entries) <= 1:
                     continue
-                if stripped.startswith("import "):
-                    seen.add(stripped)
-                deduped.append(line)
-            if changed:
-                file_map[path] = GeneratedFile(path=path, content="\n".join(deduped))
+                all_names: list[str] = []
+                seen_names: set[str] = set()
+                for _, names in entries:
+                    for name in names:
+                        if name not in seen_names:
+                            all_names.append(name)
+                            seen_names.add(name)
+                first_idx = entries[0][0]
+                merged = f'import {{ {", ".join(all_names)} }} from "{source}";'
+                replacements[first_idx] = merged
+                for entry_idx, _ in entries[1:]:
+                    lines_to_remove.add(entry_idx)
+
+            if lines_to_remove or replacements:
+                new_lines = []
+                for idx, line in enumerate(lines):
+                    if idx in lines_to_remove:
+                        continue
+                    if idx in replacements:
+                        new_lines.append(replacements[idx])
+                    else:
+                        new_lines.append(line)
+                file_map[path] = GeneratedFile(path=path, content="\n".join(new_lines))
+
+    @staticmethod
+    def _fix_orphaned_import_fragments(file_map: dict[str, GeneratedFile]) -> None:
+        """Remove orphaned import body/closing lines left by broken multi-line imports.
+
+        Detects lines like ``} from "..."`` or bare identifier lines (``Foo,``)
+        that are not inside a valid import block and removes them.
+        """
+        import re
+        orphan_closing_re = re.compile(r"""^\s*\}\s*from\s+['"][^'"]+['"]\s*;?\s*$""")
+        bare_identifier_re = re.compile(r"""^\s*\w+\s*,?\s*$""")
+
+        for path, f in list(file_map.items()):
+            if not (path.endswith(".tsx") or path.endswith(".jsx") or path.endswith(".ts")):
+                continue
+            lines = f.content.split("\n")
+            in_import_block = False
+            lines_to_remove: set[int] = set()
+            for idx, line in enumerate(lines):
+                stripped = line.strip()
+                if stripped.startswith("import ") and "{" in stripped and "}" not in stripped:
+                    in_import_block = True
+                    continue
+                if in_import_block:
+                    if "}" in stripped:
+                        in_import_block = False
+                    continue
+                if orphan_closing_re.match(stripped):
+                    lines_to_remove.add(idx)
+                    j = idx - 1
+                    while j >= 0 and bare_identifier_re.match(lines[j].strip()) and not lines[j].strip().startswith("import "):
+                        lines_to_remove.add(j)
+                        j -= 1
+
+            if lines_to_remove:
+                new_lines = [line for idx, line in enumerate(lines) if idx not in lines_to_remove]
+                file_map[path] = GeneratedFile(path=path, content="\n".join(new_lines))
+                logger.info(
+                    "deterministic.executor.scaffold.orphaned_import_fragments_removed file=%s lines=%d",
+                    path, len(lines_to_remove),
+                )
 
     @staticmethod
     def _ensure_page_metadata(file_map: dict[str, GeneratedFile]) -> None:
@@ -3131,6 +3260,10 @@ class DeterministicWebExecutor:
         # Second pass: stubs / import fixes may introduce new anchors or pages
         self._rewrite_internal_anchors_to_next_link(file_map)
         self._fix_missing_standard_imports(file_map)
+
+        # Final import consolidation: deduplicate, merge same-source, remove orphans
+        self._fix_duplicate_imports(file_map)
+        self._fix_orphaned_import_fragments(file_map)
 
         # Final safety net: ensure "use client" is always line 1 after all transforms
         self._normalize_directive_placement(file_map)
@@ -4109,6 +4242,22 @@ class DeterministicWebExecutor:
                 violations.append(f"directive_after_import:{path}")
             if directive_match and server_client_mix_re.search(f.content):
                 violations.append(f"server_client_mixing:{path}")
+
+            lines = f.content.split("\n")
+            orphan_close_re = re.compile(r"""^\s*\}\s*from\s+['"][^'"]+['"]\s*;?\s*$""")
+            in_import = False
+            for line in lines:
+                stripped = line.strip()
+                if stripped.startswith("import ") and "{" in stripped and "}" not in stripped:
+                    in_import = True
+                    continue
+                if in_import:
+                    if "}" in stripped:
+                        in_import = False
+                    continue
+                if orphan_close_re.match(stripped):
+                    violations.append(f"orphaned_import_fragment:{path}")
+                    break
         pkg = file_map.get("package.json")
         if not pkg:
             violations.append("missing_package_json")
@@ -5087,6 +5236,7 @@ class DeterministicWebExecutor:
         no_default_re = re.compile(r"does not contain a default export")
         type_re = re.compile(r"Type error:|TS\d{4}:")
         hook_re = re.compile(r"React Hook .* only works in a Client Component")
+        syntax_re = re.compile(r"Expression expected|Syntax Error|Unexpected token", re.IGNORECASE)
 
         for line in error_logs.splitlines():
             if directive_re.search(line):
@@ -5097,6 +5247,8 @@ class DeterministicWebExecutor:
                 errors.append({"type": "import_error", "detail": line.strip()})
             elif export_re.search(line) or no_default_re.search(line):
                 errors.append({"type": "export_error", "detail": line.strip()})
+            elif syntax_re.search(line):
+                errors.append({"type": "syntax_error", "detail": line.strip()})
             elif type_re.search(line):
                 errors.append({"type": "type_error", "detail": line.strip()})
         return errors
@@ -5122,6 +5274,7 @@ class DeterministicWebExecutor:
         self._fix_missing_standard_imports(file_map)
         self._normalize_directive_placement(file_map)
         self._fix_duplicate_imports(file_map)
+        self._fix_orphaned_import_fragments(file_map)
         self._fix_export_import_mismatches(file_map)
 
         import re
