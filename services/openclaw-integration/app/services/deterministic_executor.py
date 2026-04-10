@@ -227,6 +227,54 @@ APPROVED_PACKAGE_SUBPATHS: dict[str, set[str]] = {
 }
 
 
+KNOWN_IMAGE_CDN_HOSTNAMES: set[str] = {
+    "images.unsplash.com",
+    "plus.unsplash.com",
+    "via.placeholder.com",
+    "picsum.photos",
+    "cdn.pixabay.com",
+    "images.pexels.com",
+    "source.unsplash.com",
+    "loremflickr.com",
+    "placekitten.com",
+    "placehold.co",
+    "dummyimage.com",
+    "img.freepik.com",
+    "avatars.githubusercontent.com",
+    "lh3.googleusercontent.com",
+    "res.cloudinary.com",
+    "cdn.sanity.io",
+}
+
+_CN_UTILITY_BODY = (
+    'import { clsx, type ClassValue } from "clsx";\n'
+    'import { twMerge } from "tailwind-merge";\n\n'
+    "export function cn(...inputs: ClassValue[]) {\n"
+    "  return twMerge(clsx(inputs));\n"
+    "}\n\n"
+    "export default cn;\n"
+)
+
+_KNOWN_UTILITY_STUBS: dict[str, str] = {
+    "lib/cn": _CN_UTILITY_BODY,
+    "lib/utils": _CN_UTILITY_BODY,
+}
+
+# Import-graph repair must not append null stubs to these — use _finalize_lib_cn_utils instead.
+_CANONICAL_CN_UTIL_PATHS = frozenset({"src/lib/utils.ts", "src/lib/cn.ts"})
+# Never synthesize null exports for these names on canonical cn utility modules.
+_CN_UTIL_NO_SYNTH_NAMES = frozenset({"cn", "twMerge", "clsx"})
+_LOGOISH_ARRAY_PROP_NAMES = frozenset(
+    {"logos", "trustedLogos", "logoItems", "brandLogos"}
+)
+
+
+def _known_utility_stub(import_path: str) -> str | None:
+    """Return a known-good implementation for common utility modules, or None."""
+    normalized = import_path.replace("\\", "/").strip("/")
+    return _KNOWN_UTILITY_STUBS.get(normalized)
+
+
 def _strip_markdown_fences(content: str) -> str:
     """Remove wrapping markdown code fences that AI models sometimes emit."""
     stripped = content.strip()
@@ -1229,7 +1277,16 @@ class DeterministicWebExecutor:
         "4. TYPE ERRORS: No 'any' casts in component props. Event handler types must be correct.\n"
         "5. ACCESSIBILITY: Every <img>/<Image> must have alt text. "
         "Pages should have a logical heading hierarchy (h1 -> h2 -> h3).\n"
-        "6. SEO: Server-rendered pages (no 'use client') should export metadata or generateMetadata.\n\n"
+        "6. SEO: Server-rendered pages (no 'use client') should export metadata or generateMetadata.\n"
+        "7. PROP TYPE MISMATCHES: When a component defines items: SomeType[] or columns: SomeType[], "
+        "verify the page passes objects matching that type — NOT plain strings or flat arrays. "
+        "Check that field names match (e.g. imageSrc not image, description not caption).\n"
+        "8. SERVER/CLIENT BOUNDARY: A Server Component (no 'use client') must NEVER pass function values "
+        "(onClick, onClose, onChange, onSubmit, etc.) as props to a Client Component. "
+        "If a component is rendered with open={false} or similar static-only usage from a server page, "
+        "remove it entirely or move the parent to 'use client'.\n"
+        "9. UTILITY STUBS: If src/lib/cn.ts or src/lib/utils.ts exists, verify it exports a real cn function "
+        "using clsx + tailwind-merge, not export default {} or export const cn = null.\n\n"
         "OUTPUT FORMAT:\n"
         "First, output a JSON block with your review:\n"
         "```json\n"
@@ -2141,6 +2198,26 @@ class DeterministicWebExecutor:
         "Remove unused imports and unused variables so ESLint passes (no-unused-vars).\n"
         "- When a component accepts typed props (e.g. items: SomeItem[]), ALWAYS pass data matching that type. "
         "NEVER pass plain strings where an object type is expected — this causes TypeScript build failures.\n"
+        "- When defining array item types for component props (e.g. items: SomeItem[]), EXPORT the item type "
+        "alongside the component so pages can import it: export type SomeItem = { ... };\n"
+        "- For component props that may receive JSX elements (icons, descriptions, headers, footers, children), "
+        "type them as React.ReactNode, NOT string. Only use string for props that are guaranteed plain text.\n"
+        "- METADATA STRINGS: In export const metadata (and generateMetadata returns), title and description MUST be "
+        "single-line string literals or template literals. NEVER break a double-quoted (\") string across lines — "
+        "that breaks the TypeScript parser and the build.\n"
+        "- POLYMORPHIC BUTTON / LINK: If a component accepts an optional href string, render next/link Link when href "
+        "is a non-empty internal or external URL; otherwise render <button type=\"button\">. Do not spread Link-only "
+        "props onto <button> or vice versa — use a clear if/else branch.\n"
+        "- Keep component prop types SIMPLE and FLAT. Use a single interface with optional fields. "
+        "NEVER use discriminated unions or complex conditional types for component props — "
+        "these create fragile type narrowing that breaks easily.\n"
+        "- NEVER pass function props (onClick, onChange, onClose, onSubmit, etc.) from a Server Component "
+        "to a Client Component. If a Client Component needs an event handler, it must define the handler "
+        "internally, or the parent page must also be a Client Component with 'use client'.\n"
+        "- Always generate src/lib/utils.ts with a working cn function: "
+        "import { clsx, type ClassValue } from 'clsx'; import { twMerge } from 'tailwind-merge'; "
+        "export function cn(...inputs: ClassValue[]) { return twMerge(clsx(inputs)); } — "
+        "NEVER generate a stub like export default {} or export const cn = null.\n"
         "- Avoid default-exporting anonymous objects from lib files; use named exports or: const x = { ... }; export default x;\n"
         "- For MetadataRoute.Robots use lowercase keys: userAgent, allow, disallow, crawlDelay.\n"
         "- Use proper TypeScript types throughout.\n\n"
@@ -2322,6 +2399,8 @@ class DeterministicWebExecutor:
 
         if component_signatures:
             parts.append("\nAvailable shared components (import from @/components/):")
+            parts.append("CRITICAL: You MUST pass data that matches the exact prop types shown below. "
+                         "If a prop expects SomeType[], pass objects matching SomeType — NEVER plain strings.")
             for name, sig in component_signatures.items():
                 parts.append(f"  - {name}: {sig}")
 
@@ -2473,19 +2552,32 @@ class DeterministicWebExecutor:
 
     @staticmethod
     def _extract_component_signatures(files: list[GeneratedFile]) -> dict[str, str]:
-        """Extract component names and their prop signatures from generated files."""
+        """Extract component names, prop signatures, and full type definitions from generated files."""
         import re
         signatures: dict[str, str] = {}
         for f in files:
             if not f.path.startswith("src/components/") or not f.path.endswith(".tsx"):
                 continue
             name = f.path.rsplit("/", 1)[-1].replace(".tsx", "")
+
+            type_blocks: list[str] = []
+            for tm in re.finditer(
+                r"(?:export\s+)?(?:interface|type)\s+\w+\s*(?:=\s*)?\{[^}]+\}",
+                f.content, re.DOTALL,
+            ):
+                type_blocks.append(tm.group(0).strip())
+
             prop_match = re.search(r"export\s+function\s+\w+\s*\(([^)]*)\)", f.content)
             if prop_match:
                 props_str = prop_match.group(1).strip()
-                signatures[name] = f"<{name} {props_str} />" if props_str else f"<{name} />"
+                sig = f"<{name} {props_str} />" if props_str else f"<{name} />"
             else:
-                signatures[name] = f"<{name} />"
+                sig = f"<{name} />"
+
+            if type_blocks:
+                signatures[name] = sig + "\n    Types:\n    " + "\n    ".join(type_blocks)
+            else:
+                signatures[name] = sig
         return signatures
 
     # ------------------------------------------------------------------
@@ -2949,6 +3041,8 @@ class DeterministicWebExecutor:
             if not (path.endswith(".tsx") or path.endswith(".ts")
                     or path.endswith(".jsx") or path.endswith(".js")):
                 continue
+            if path in _CANONICAL_CN_UTIL_PATHS:
+                continue
 
             lines = f.content.split("\n")
 
@@ -3194,18 +3288,46 @@ class DeterministicWebExecutor:
                 if not all_strings:
                     continue
 
+                logoish = prop_name in _LOGOISH_ARRAY_PROP_NAMES
+
                 for iface_name, fields in all_ifaces.items():
                     text_field = None
-                    for candidate in ("text", "label", "title", "content", "description", "name", "message"):
-                        if candidate in fields:
-                            text_field = candidate
-                            break
+                    if logoish and "name" in fields and (
+                        iface_name == "LogoItem"
+                        or iface_name.endswith("LogoItem")
+                        or (
+                            iface_name.endswith("Item")
+                            and "logo" in iface_name.lower()
+                        )
+                    ):
+                        text_field = "name"
+                    if not text_field:
+                        for candidate in (
+                            "text",
+                            "label",
+                            "title",
+                            "content",
+                            "description",
+                            "name",
+                            "message",
+                        ):
+                            if candidate in fields:
+                                text_field = candidate
+                                break
                     if not text_field:
                         continue
 
-                    type_in_file = re.search(
-                        rf"""\b{re.escape(iface_name)}\b""", content
-                    )
+                    if logoish:
+                        type_in_file = re.search(
+                            rf"""\b{re.escape(iface_name)}\b""", content
+                        ) or re.search(
+                            r"\b(?:LogoStrip|LogoCloud|LogoBar|LogoGrid|LogoRow|LogoMarquee)\b",
+                            content,
+                        )
+                    else:
+                        type_in_file = re.search(
+                            rf"""\b{re.escape(iface_name)}\b""", content
+                        )
                     if not type_in_file:
                         continue
 
@@ -3418,12 +3540,29 @@ class DeterministicWebExecutor:
         eslint_lines = ""
         if settings.codegen_next_eslint_ignore_during_build:
             eslint_lines = "  eslint: { ignoreDuringBuilds: true },\n"
+
+        detected_hosts = self._detect_external_image_hosts(file_map)
+        images_lines = ""
+        if detected_hosts:
+            patterns = ",\n".join(
+                f'      {{ protocol: "https", hostname: "{h}" }}'
+                for h in sorted(detected_hosts)
+            )
+            images_lines = (
+                "  images: {\n"
+                "    remotePatterns: [\n"
+                f"{patterns},\n"
+                "    ],\n"
+                "  },\n"
+            )
+
         file_map["next.config.ts"] = GeneratedFile(
             path="next.config.ts",
             content=(
                 'import type { NextConfig } from "next";\n\n'
                 "const nextConfig: NextConfig = {\n"
                 f"{eslint_lines}"
+                f"{images_lines}"
                 "  reactStrictMode: true,\n"
                 "};\n\nexport default nextConfig;\n"
             ),
@@ -3463,6 +3602,8 @@ class DeterministicWebExecutor:
             "react-dom": "^19.0.0",
             "tailwindcss": "^4.2.2",
             "@tailwindcss/postcss": "^4.2.2",
+            "clsx": "^2.1.1",
+            "tailwind-merge": "^3.0.2",
         }
         REQUIRED_DEV_DEPS = {
             "typescript": "^5.8.3",
@@ -3546,6 +3687,25 @@ class DeterministicWebExecutor:
         for path in ("tailwind.config.ts", "tailwind.config.js", "tailwind.config.mjs"):
             file_map.pop(path, None)
 
+        # ── Ensure src/lib/utils.ts has a working cn function ─────────
+        utils_path = "src/lib/utils.ts"
+        existing_utils = file_map.get(utils_path)
+        is_broken_stub = (
+            existing_utils is not None
+            and (
+                existing_utils.content.strip() == "export default {};"
+                or "export const cn = null" in existing_utils.content
+                or (
+                    existing_utils.content.strip().startswith("// Auto-generated stub")
+                    and "function cn" not in existing_utils.content
+                )
+            )
+        )
+        if existing_utils is None or is_broken_stub:
+            file_map[utils_path] = GeneratedFile(path=utils_path, content=_CN_UTILITY_BODY)
+            if is_broken_stub:
+                logger.info("deterministic.executor.scaffold.utils_replaced path=%s", utils_path)
+
         # ── Ensure 'use client' on files using hooks/event handlers ──────
         self._ensure_use_client_directive(file_map)
 
@@ -3595,6 +3755,9 @@ class DeterministicWebExecutor:
 
         # Final safety net: ensure "use client" is always line 1 after all transforms
         self._normalize_directive_placement(file_map)
+
+        self._sanitize_metadata_string_literals(file_map)
+        self._finalize_lib_cn_utils(file_map)
 
         return list(file_map.values())
 
@@ -4062,6 +4225,124 @@ class DeterministicWebExecutor:
             )
 
     @staticmethod
+    def _lib_cn_utils_content_is_corrupted(content: str) -> bool:
+        """True if lib/utils or lib/cn content would break importers (null stubs, missing cn, etc.)."""
+        c = content
+        if "export const cn = null" in c:
+            return True
+        if "export const twMerge = null" in c or "export const clsx = null" in c:
+            return True
+        stripped = c.strip()
+        if stripped == "export default {};":
+            return True
+        if stripped.startswith("// Auto-generated safety-net stub"):
+            return True
+        if stripped.startswith("// Auto-generated stub") and "export function cn" not in c:
+            return True
+        if "export function cn" not in c:
+            return True
+        # Keep valid custom utils (e.g. twMerge(clsx(args))) as long as cn is not nulled.
+        return False
+
+    @staticmethod
+    def _finalize_lib_cn_utils(file_map: dict[str, GeneratedFile]) -> None:
+        """Last-line defense: reset canonical cn utility files after import-graph / import cleanup."""
+        for util_path in ("src/lib/utils.ts", "src/lib/cn.ts"):
+            f = file_map.get(util_path)
+            if f is None:
+                file_map[util_path] = GeneratedFile(path=util_path, content=_CN_UTILITY_BODY)
+                logger.info("deterministic.executor.scaffold.finalize_cn_created path=%s", util_path)
+                continue
+            if DeterministicWebExecutor._lib_cn_utils_content_is_corrupted(f.content):
+                file_map[util_path] = GeneratedFile(path=util_path, content=_CN_UTILITY_BODY)
+                logger.info("deterministic.executor.scaffold.finalize_cn_reset path=%s", util_path)
+
+    @staticmethod
+    def _escape_js_double_quoted_string(inner: str) -> str:
+        return inner.replace("\\", "\\\\").replace('"', '\\"').replace("\n", " ").replace("\r", "")
+
+    @staticmethod
+    def _sanitize_double_quoted_field_values(content: str, field_names: tuple[str, ...]) -> str:
+        """Collapse newlines inside double-quoted string literals for given object keys."""
+        import re
+
+        out = content
+        for field in field_names:
+            pattern = re.compile(rf"(\b{re.escape(field)}\s*:\s*)\"")
+            pos = 0
+            chunks: list[str] = []
+            for m in pattern.finditer(out):
+                chunks.append(out[pos : m.start()])
+                open_quote = m.end() - 1
+                i = open_quote + 1
+                parts: list[str] = []
+                closed = False
+                while i < len(out):
+                    ch = out[i]
+                    if ch == "\\" and i + 1 < len(out):
+                        parts.append(out[i : i + 2])
+                        i += 2
+                        continue
+                    if ch == '"':
+                        closed = True
+                        i += 1
+                        break
+                    if ch == "\n":
+                        parts.append(" ")
+                    elif ch != "\r":
+                        parts.append(ch)
+                    i += 1
+                if not closed:
+                    inner = "".join(parts)
+                    inner = re.sub(r"\s+", " ", inner).strip()
+                    escaped = DeterministicWebExecutor._escape_js_double_quoted_string(inner)
+                    chunks.append(m.group(1) + f'"{escaped}"')
+                    pos = i
+                    continue
+                inner = "".join(parts)
+                inner = re.sub(r"\s+", " ", inner).strip()
+                escaped = DeterministicWebExecutor._escape_js_double_quoted_string(inner)
+                chunks.append(m.group(1) + f'"{escaped}"')
+                pos = i
+            chunks.append(out[pos:])
+            out = "".join(chunks)
+        return out
+
+    @staticmethod
+    def _sanitize_metadata_string_literals(file_map: dict[str, GeneratedFile]) -> None:
+        """Normalize multiline/broken double-quoted title/description strings in metadata exports."""
+        for path, f in list(file_map.items()):
+            if not (path.endswith("/page.tsx") or path.endswith("/page.jsx") or path.endswith("/layout.tsx") or path.endswith("/layout.jsx")):
+                continue
+            if "export const metadata" not in f.content and "generateMetadata" not in f.content:
+                continue
+            new_content = f.content
+            new_content = DeterministicWebExecutor._sanitize_double_quoted_field_values(
+                new_content, ("title", "description")
+            )
+            og_match = re.search(r"\bopenGraph\s*:\s*\{", new_content)
+            if og_match:
+                depth = 0
+                start = og_match.end() - 1
+                j = start
+                while j < len(new_content):
+                    if new_content[j] == "{":
+                        depth += 1
+                    elif new_content[j] == "}":
+                        depth -= 1
+                        if depth == 0:
+                            block = new_content[start : j + 1]
+                            fixed = DeterministicWebExecutor._sanitize_double_quoted_field_values(
+                                block, ("title", "description")
+                            )
+                            new_content = new_content[:start] + fixed + new_content[j + 1 :]
+                            break
+                    j += 1
+            if new_content != f.content:
+                file_map[path] = GeneratedFile(path=path, content=new_content)
+                logger.info("deterministic.executor.scaffold.metadata_strings_sanitized file=%s", path)
+
+    @staticmethod
     def _fill_missing_component_imports(file_map: dict[str, GeneratedFile]) -> None:
         """Scan all .tsx/.ts files for @/ imports and create stubs for missing modules.
 
@@ -4123,7 +4404,9 @@ class DeterministicWebExecutor:
                     f"}}\n"
                 )
             else:
-                stub_content = f"// Auto-generated stub for {import_path}\nexport default {{}};\n"
+                stub_content = _known_utility_stub(import_path)
+                if not stub_content:
+                    stub_content = f"// Auto-generated stub for {import_path}\nexport {{}};\n"
             file_map[stub_path] = GeneratedFile(path=stub_path, content=stub_content)
             logger.info("deterministic.executor.scaffold.stub_created module=%s path=%s", import_path, stub_path)
 
@@ -4417,6 +4700,8 @@ class DeterministicWebExecutor:
 
                 missing_named = sorted(name for name in names if name not in export_info["named"])
                 for missing in missing_named:
+                    if resolved in _CANONICAL_CN_UTIL_PATHS and missing in _CN_UTIL_NO_SYNTH_NAMES:
+                        continue
                     if is_barrel:
                         dir_prefix = resolved.rsplit("/", 1)[0]
                         child_base = f"{dir_prefix}/{missing}"
@@ -4529,6 +4814,33 @@ class DeterministicWebExecutor:
                 file_map[p] = GeneratedFile(path=p, content=c2)
 
     @staticmethod
+    def _metadata_export_string_violations(path: str, content: str) -> list[str]:
+        """Detect multiline or unterminated double-quoted title/description in export const metadata."""
+        out: list[str] = []
+        if "export const metadata" not in content:
+            return out
+        idx = content.find("export const metadata")
+        region = content[idx : idx + 12000]
+        for key in ("title", "description"):
+            key_re = re.compile(rf"\b{re.escape(key)}\s*:\s*\"")
+            for m in key_re.finditer(region):
+                i = m.end()
+                while i < len(region):
+                    ch = region[i]
+                    if ch == "\\" and i + 1 < len(region):
+                        i += 2
+                        continue
+                    if ch == '"':
+                        inner = region[m.end() : i]
+                        if "\n" in inner or "\r" in inner:
+                            out.append(f"metadata_unterminated_string:{path}")
+                        break
+                    i += 1
+                else:
+                    out.append(f"metadata_unterminated_string:{path}")
+        return out
+
+    @staticmethod
     def _collect_deploy_quality_violations(file_map: dict[str, GeneratedFile]) -> list[str]:
         """Static checks that correlate with Vercel next build / ESLint (no npm required)."""
         import re
@@ -4586,6 +4898,52 @@ class DeterministicWebExecutor:
                 if orphan_close_re.match(stripped):
                     violations.append(f"orphaned_import_fragment:{path}")
                     break
+            # Check for raw <img> tags that should be <Image />
+            if re.search(r"<img\b", f.content):
+                violations.append(f"raw_img_tag:{path}")
+
+            # Check server components passing function props to client components
+            is_server = not directive_match
+            if is_server and re.search(r"\bon[A-Z]\w*\s*=\s*\{", f.content):
+                violations.append(f"server_function_prop:{path}")
+
+            if path.endswith(("/page.tsx", "/page.jsx", "/layout.tsx", "/layout.jsx")):
+                violations.extend(
+                    DeterministicWebExecutor._metadata_export_string_violations(path, f.content)
+                )
+
+        # Check for broken utility stubs
+        for util_path in ("src/lib/cn.ts", "src/lib/utils.ts"):
+            util_file = file_map.get(util_path)
+            if util_file:
+                c = util_file.content
+                c_stripped = c.strip()
+                if (
+                    c_stripped == "export default {};"
+                    or "export const cn = null" in c
+                    or "export const twMerge = null" in c
+                    or "export const clsx = null" in c
+                    or (
+                        c_stripped.startswith("// Auto-generated stub")
+                        and "function cn" not in c
+                    )
+                ):
+                    violations.append(f"broken_utility_stub:{util_path}")
+
+        # Check for external image hosts without remotePatterns in next.config
+        next_config = file_map.get("next.config.ts") or file_map.get("next.config.js")
+        has_remote_patterns = next_config and "remotePatterns" in next_config.content if next_config else False
+        if not has_remote_patterns:
+            for path, f in file_map.items():
+                if not (path.endswith(".tsx") or path.endswith(".jsx")):
+                    continue
+                for cdn in KNOWN_IMAGE_CDN_HOSTNAMES:
+                    if cdn in f.content:
+                        violations.append(f"external_image_no_config:{cdn}")
+                        break
+                if any(v.startswith("external_image_no_config:") for v in violations):
+                    break
+
         pkg = file_map.get("package.json")
         if not pkg:
             violations.append("missing_package_json")
@@ -4597,6 +4955,25 @@ class DeterministicWebExecutor:
             except (json.JSONDecodeError, TypeError):
                 violations.append("invalid_package_json_parse")
         return violations
+
+    @staticmethod
+    def _detect_external_image_hosts(file_map: dict[str, GeneratedFile]) -> set[str]:
+        """Scan generated files for external image hostnames used in src/Image attributes."""
+        import re
+        url_re = re.compile(
+            r"""(?:src\s*=\s*["']|src\s*=\s*\{\s*["'])https?://([^/"':?\s]+)"""
+        )
+        found: set[str] = set()
+        for path, f in file_map.items():
+            if not (path.endswith(".tsx") or path.endswith(".jsx")):
+                continue
+            for m in url_re.finditer(f.content):
+                hostname = m.group(1).lower()
+                if hostname in KNOWN_IMAGE_CDN_HOSTNAMES:
+                    found.add(hostname)
+                elif any(hostname.endswith(f".{cdn}") for cdn in KNOWN_IMAGE_CDN_HOSTNAMES):
+                    found.add(hostname)
+        return found
 
     @staticmethod
     def _rewrite_internal_anchors_to_next_link(file_map: dict[str, GeneratedFile]) -> None:

@@ -28,6 +28,8 @@ class ScaffoldSkill(Skill):
                 "next": "^15.0.0",
                 "react": "^19.0.0",
                 "react-dom": "^19.0.0",
+                "clsx": "^2.1.0",
+                "tailwind-merge": "^2.6.0",
             },
             "devDependencies": {
                 "@types/node": "^22.0.0",

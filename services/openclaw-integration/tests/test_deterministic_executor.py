@@ -10,6 +10,7 @@ from app.services.deterministic_executor import (
     DeterministicExecutionError,
     DeterministicWebExecutor,
     GeneratedFile,
+    KNOWN_IMAGE_CDN_HOSTNAMES,
     LocalPreflightResult,
     REASON_CODEGEN_CONFLICT_DETECTED,
     REASON_GITHUB_AUTH_FAILED,
@@ -21,6 +22,8 @@ from app.services.deterministic_executor import (
     TemplateReference,
     VercelDeploymentResult,
     VercelProjectResult,
+    _CN_UTILITY_BODY,
+    _known_utility_stub,
 )
 
 
@@ -1681,6 +1684,137 @@ def test_rewrite_img_preserves_existing_dimensions():
 
 
 # ── Component prop type mismatch fix ──────────────────────────────────────
+def test_finalize_lib_cn_utils_resets_conflicting_cn_null_stub():
+    """Null cn export appended alongside a real cn() is replaced with the known-good utility body."""
+    bad = (
+        _CN_UTILITY_BODY.rstrip()
+        + "\nexport const cn = null;\n"
+    )
+    fm = {
+        "src/lib/utils.ts": GeneratedFile(path="src/lib/utils.ts", content=bad),
+    }
+    DeterministicWebExecutor._finalize_lib_cn_utils(fm)
+    assert "export const cn = null" not in fm["src/lib/utils.ts"].content
+    assert "return twMerge(clsx(inputs))" in fm["src/lib/utils.ts"].content
+
+
+def test_verify_import_graph_does_not_append_cn_null_to_utils(monkeypatch):
+    monkeypatch.setattr("app.services.deterministic_executor.settings.codegen_strict_import_graph_enabled", True)
+    # Parser-friendly cn; strict repair used to append `export const cn = null` if `cn` was missing from named set.
+    utils_body = (
+        'import { clsx, type ClassValue } from "clsx";\n'
+        'import { twMerge } from "tailwind-merge";\n'
+        "export function cn(...inputs: ClassValue[]) {\n"
+        "  return twMerge(clsx(inputs));\n"
+        "}\n"
+    )
+    fm = {
+        "src/app/page.tsx": GeneratedFile(
+            path="src/app/page.tsx",
+            content='import { cn } from "@/lib/utils";\nexport default function P(){return <div className={cn("a")} />;}\n',
+        ),
+        "src/lib/utils.ts": GeneratedFile(path="src/lib/utils.ts", content=utils_body),
+        "package.json": GeneratedFile(path="package.json", content='{"name":"t"}'),
+    }
+    DeterministicWebExecutor._verify_import_graph(fm, strict_bindings=True)
+    assert "export const cn = null" not in fm["src/lib/utils.ts"].content
+
+
+def test_sanitize_metadata_string_literals_collapses_multiline_title():
+    page = (
+        'import type { Metadata } from "next";\n'
+        "export const metadata: Metadata = {\n"
+        '  title: "Line one\n'
+        '  line two",\n'
+        '  description: "Short",\n'
+        "};\n"
+        "export default function Page(){return null;}\n"
+    )
+    fm = {"src/app/about/page.tsx": GeneratedFile(path="src/app/about/page.tsx", content=page)}
+    DeterministicWebExecutor._sanitize_metadata_string_literals(fm)
+    out = fm["src/app/about/page.tsx"].content
+    assert "\n" not in out.split('title: "')[1].split('",')[0]
+    assert "Line one line two" in out or "Line one" in out
+
+
+def test_fix_component_prop_type_mismatches_wraps_logos_as_logoitem_name():
+    fm = {
+        "src/components/LogoStrip.tsx": GeneratedFile(
+            path="src/components/LogoStrip.tsx",
+            content=(
+                "export interface LogoItem {\n"
+                "  name: string;\n"
+                "}\n"
+                "interface Props {\n"
+                "  logos: LogoItem[];\n"
+                "}\n"
+                "export function LogoStrip({ logos }: Props) {\n"
+                "  return <div>{logos.map((l) => l.name)}</div>;\n"
+                "}\n"
+            ),
+        ),
+        "src/app/partners/page.tsx": GeneratedFile(
+            path="src/app/partners/page.tsx",
+            content=(
+                'import { LogoStrip } from "@/components/LogoStrip";\n'
+                "export default function PartnersPage() {\n"
+                "  return <LogoStrip logos={[\"Acme\", \"Globex\", \"Initech\"]} />;\n"
+                "}\n"
+            ),
+        ),
+    }
+    DeterministicWebExecutor._fix_component_prop_type_mismatches(fm)
+    content = fm["src/app/partners/page.tsx"].content
+    assert "name:" in content
+    assert "{ name:" in content
+
+
+def test_deploy_quality_catches_cn_null_even_with_function_cn():
+    fm = {
+        "src/app/layout.tsx": GeneratedFile(
+            path="src/app/layout.tsx",
+            content="export default function L({children}:{children:React.ReactNode}){return <html><body>{children}</body></html>;}",
+        ),
+        "src/app/page.tsx": GeneratedFile(path="src/app/page.tsx", content="export default function Page(){return null;}"),
+        "package.json": GeneratedFile(path="package.json", content='{"name":"test"}'),
+        "src/lib/utils.ts": GeneratedFile(
+            path="src/lib/utils.ts",
+            content=(
+                'import { clsx, type ClassValue } from "clsx";\n'
+                "import { twMerge } from 'tailwind-merge';\n"
+                "export function cn(...inputs: ClassValue[]) { return twMerge(clsx(inputs)); }\n"
+                "export const cn = null;\n"
+            ),
+        ),
+    }
+    violations = DeterministicWebExecutor._collect_deploy_quality_violations(fm)
+    assert any("broken_utility_stub" in v for v in violations)
+
+
+def test_deploy_quality_metadata_unterminated_string():
+    fm = {
+        "src/app/layout.tsx": GeneratedFile(
+            path="src/app/layout.tsx",
+            content="export default function L({children}:{children:React.ReactNode}){return <html><body>{children}</body></html>;}",
+        ),
+        "src/app/page.tsx": GeneratedFile(path="src/app/page.tsx", content="export default function Page(){return null;}"),
+        "package.json": GeneratedFile(path="package.json", content='{"name":"test"}'),
+        "src/app/blog/page.tsx": GeneratedFile(
+            path="src/app/blog/page.tsx",
+            content=(
+                'import type { Metadata } from "next";\n'
+                "export const metadata: Metadata = {\n"
+                '  title: "broken\n'
+                "  description: \"x\",\n"
+                "};\n"
+                "export default function Blog(){return null;}\n"
+            ),
+        ),
+    }
+    violations = DeterministicWebExecutor._collect_deploy_quality_violations(fm)
+    assert any("metadata_unterminated_string" in v for v in violations)
+
+
 def test_fix_component_prop_type_mismatches_wraps_strings():
     fm = {
         "src/components/SocialProofStrip.tsx": GeneratedFile(
@@ -1724,3 +1858,291 @@ def test_fix_component_prop_type_mismatches_wraps_strings():
     content = fm["src/app/careers/page.tsx"].content
     assert "text:" in content
     assert "{ text:" in content
+
+
+# ── Known utility stub generation ──────────────────────────────────────────
+def test_known_utility_stub_returns_cn_for_lib_cn():
+    stub = _known_utility_stub("lib/cn")
+    assert stub is not None
+    assert "function cn" in stub
+    assert "clsx" in stub
+    assert "twMerge" in stub
+
+
+def test_known_utility_stub_returns_cn_for_lib_utils():
+    stub = _known_utility_stub("lib/utils")
+    assert stub is not None
+    assert "function cn" in stub
+
+
+def test_known_utility_stub_returns_none_for_unknown():
+    stub = _known_utility_stub("lib/something-else")
+    assert stub is None
+
+
+def test_fill_missing_component_imports_creates_cn_stub():
+    fm = {
+        "src/app/page.tsx": GeneratedFile(
+            path="src/app/page.tsx",
+            content='import { cn } from "@/lib/utils";\nexport default function P() { return <div className={cn("a","b")} />; }\n',
+        ),
+    }
+    DeterministicWebExecutor._fill_missing_component_imports(fm)
+    assert "src/lib/utils.ts" in fm
+    content = fm["src/lib/utils.ts"].content
+    assert "function cn" in content
+    assert "clsx" in content
+    assert "export default {}" not in content
+
+
+def test_fill_missing_component_imports_generic_lib_stub_no_anon_export():
+    fm = {
+        "src/app/page.tsx": GeneratedFile(
+            path="src/app/page.tsx",
+            content='import { helper } from "@/lib/helpers";\nexport default function P() { return <div>{helper()}</div>; }\n',
+        ),
+    }
+    DeterministicWebExecutor._fill_missing_component_imports(fm)
+    assert "src/lib/helpers.ts" in fm
+    content = fm["src/lib/helpers.ts"].content
+    assert "export default {};" not in content
+    assert "export {};" in content or "export {}" in content
+
+
+# ── Extract component signatures includes types ───────────────────────────
+def test_extract_component_signatures_includes_type_definitions():
+    files = [
+        GeneratedFile(
+            path="src/components/SocialProofStrip.tsx",
+            content=(
+                "export interface SocialProofItem {\n"
+                "  label: string;\n"
+                "  value: string;\n"
+                "  icon?: string;\n"
+                "}\n\n"
+                "interface Props {\n"
+                "  items: SocialProofItem[];\n"
+                "}\n\n"
+                "export function SocialProofStrip({ items }: Props) {\n"
+                "  return <div>{items.map(i => <span key={i.label}>{i.value}</span>)}</div>;\n"
+                "}\n"
+            ),
+        ),
+    ]
+    sigs = DeterministicWebExecutor._extract_component_signatures(files)
+    assert "SocialProofStrip" in sigs
+    sig = sigs["SocialProofStrip"]
+    assert "Types:" in sig
+    assert "SocialProofItem" in sig
+    assert "label: string" in sig
+
+
+# ── Deploy quality violations: broken utility stub ─────────────────────────
+def test_deploy_quality_catches_broken_utility_stub():
+    fm = {
+        "src/app/layout.tsx": GeneratedFile(path="src/app/layout.tsx", content="export default function Layout({children}:{children:React.ReactNode}){return <html><body>{children}</body></html>;}"),
+        "src/app/page.tsx": GeneratedFile(path="src/app/page.tsx", content="export default function Page(){return null;}"),
+        "package.json": GeneratedFile(path="package.json", content='{"name":"test"}'),
+        "src/lib/utils.ts": GeneratedFile(path="src/lib/utils.ts", content="export default {};"),
+    }
+    violations = DeterministicWebExecutor._collect_deploy_quality_violations(fm)
+    assert any("broken_utility_stub" in v for v in violations)
+
+
+def test_deploy_quality_no_violation_for_valid_utils():
+    fm = {
+        "src/app/layout.tsx": GeneratedFile(path="src/app/layout.tsx", content="export default function Layout({children}:{children:React.ReactNode}){return <html><body>{children}</body></html>;}"),
+        "src/app/page.tsx": GeneratedFile(path="src/app/page.tsx", content="export default function Page(){return null;}"),
+        "package.json": GeneratedFile(path="package.json", content='{"name":"test"}'),
+        "src/lib/utils.ts": GeneratedFile(path="src/lib/utils.ts", content=_CN_UTILITY_BODY),
+    }
+    violations = DeterministicWebExecutor._collect_deploy_quality_violations(fm)
+    assert not any("broken_utility_stub" in v for v in violations)
+
+
+# ── Deploy quality violations: server function prop ────────────────────────
+def test_deploy_quality_catches_server_function_prop():
+    fm = {
+        "src/app/layout.tsx": GeneratedFile(path="src/app/layout.tsx", content="export default function Layout({children}:{children:React.ReactNode}){return <html><body>{children}</body></html>;}"),
+        "src/app/page.tsx": GeneratedFile(path="src/app/page.tsx", content="export default function Page(){return null;}"),
+        "package.json": GeneratedFile(path="package.json", content='{"name":"test"}'),
+        "src/app/gallery/page.tsx": GeneratedFile(
+            path="src/app/gallery/page.tsx",
+            content=(
+                'import { ModalLightbox } from "@/components/ModalLightbox";\n'
+                "export default function Gallery() {\n"
+                "  return <ModalLightbox onClose={() => {}} open={false} />;\n"
+                "}\n"
+            ),
+        ),
+    }
+    violations = DeterministicWebExecutor._collect_deploy_quality_violations(fm)
+    assert any("server_function_prop" in v for v in violations)
+
+
+def test_deploy_quality_no_server_function_prop_in_client_component():
+    fm = {
+        "src/app/layout.tsx": GeneratedFile(path="src/app/layout.tsx", content="export default function Layout({children}:{children:React.ReactNode}){return <html><body>{children}</body></html>;}"),
+        "src/app/page.tsx": GeneratedFile(path="src/app/page.tsx", content="export default function Page(){return null;}"),
+        "package.json": GeneratedFile(path="package.json", content='{"name":"test"}'),
+        "src/app/gallery/page.tsx": GeneratedFile(
+            path="src/app/gallery/page.tsx",
+            content=(
+                '"use client";\n'
+                'import { ModalLightbox } from "@/components/ModalLightbox";\n'
+                "export default function Gallery() {\n"
+                "  return <ModalLightbox onClose={() => {}} open={false} />;\n"
+                "}\n"
+            ),
+        ),
+    }
+    violations = DeterministicWebExecutor._collect_deploy_quality_violations(fm)
+    assert not any("server_function_prop" in v for v in violations)
+
+
+# ── Deploy quality violations: raw img tag ─────────────────────────────────
+def test_deploy_quality_catches_raw_img_tag():
+    fm = {
+        "src/app/layout.tsx": GeneratedFile(path="src/app/layout.tsx", content="export default function Layout({children}:{children:React.ReactNode}){return <html><body>{children}</body></html>;}"),
+        "src/app/page.tsx": GeneratedFile(path="src/app/page.tsx", content="export default function Page(){return null;}"),
+        "package.json": GeneratedFile(path="package.json", content='{"name":"test"}'),
+        "src/app/gallery/page.tsx": GeneratedFile(
+            path="src/app/gallery/page.tsx",
+            content='export default function Gallery() { return <img src="/photo.jpg" alt="test" />; }\n',
+        ),
+    }
+    violations = DeterministicWebExecutor._collect_deploy_quality_violations(fm)
+    assert any("raw_img_tag" in v for v in violations)
+
+
+# ── Deploy quality violations: external image without remotePatterns ───────
+def test_deploy_quality_catches_external_image_no_config():
+    fm = {
+        "src/app/layout.tsx": GeneratedFile(path="src/app/layout.tsx", content="export default function Layout({children}:{children:React.ReactNode}){return <html><body>{children}</body></html>;}"),
+        "src/app/page.tsx": GeneratedFile(path="src/app/page.tsx", content="export default function Page(){return null;}"),
+        "package.json": GeneratedFile(path="package.json", content='{"name":"test"}'),
+        "next.config.ts": GeneratedFile(path="next.config.ts", content='import type { NextConfig } from "next";\nconst nextConfig: NextConfig = { reactStrictMode: true };\nexport default nextConfig;\n'),
+        "src/app/gallery/page.tsx": GeneratedFile(
+            path="src/app/gallery/page.tsx",
+            content=(
+                'import Image from "next/image";\n'
+                'export default function Gallery() {\n'
+                '  return <Image src="https://images.unsplash.com/photo-123" alt="test" width={800} height={600} />;\n'
+                '}\n'
+            ),
+        ),
+    }
+    violations = DeterministicWebExecutor._collect_deploy_quality_violations(fm)
+    assert any("external_image_no_config" in v for v in violations)
+
+
+def test_deploy_quality_no_external_image_violation_with_remote_patterns():
+    fm = {
+        "src/app/layout.tsx": GeneratedFile(path="src/app/layout.tsx", content="export default function Layout({children}:{children:React.ReactNode}){return <html><body>{children}</body></html>;}"),
+        "src/app/page.tsx": GeneratedFile(path="src/app/page.tsx", content="export default function Page(){return null;}"),
+        "package.json": GeneratedFile(path="package.json", content='{"name":"test"}'),
+        "next.config.ts": GeneratedFile(path="next.config.ts", content='const nextConfig = { images: { remotePatterns: [{ hostname: "images.unsplash.com" }] } };\nexport default nextConfig;\n'),
+        "src/app/gallery/page.tsx": GeneratedFile(
+            path="src/app/gallery/page.tsx",
+            content=(
+                'import Image from "next/image";\n'
+                'export default function Gallery() {\n'
+                '  return <Image src="https://images.unsplash.com/photo-123" alt="test" width={800} height={600} />;\n'
+                '}\n'
+            ),
+        ),
+    }
+    violations = DeterministicWebExecutor._collect_deploy_quality_violations(fm)
+    assert not any("external_image_no_config" in v for v in violations)
+
+
+# ── Detect external image hosts ────────────────────────────────────────────
+def test_detect_external_image_hosts_finds_unsplash():
+    fm = {
+        "src/app/page.tsx": GeneratedFile(
+            path="src/app/page.tsx",
+            content='<Image src="https://images.unsplash.com/photo-123" alt="" width={800} height={600} />\n',
+        ),
+    }
+    hosts = DeterministicWebExecutor._detect_external_image_hosts(fm)
+    assert "images.unsplash.com" in hosts
+
+
+def test_detect_external_image_hosts_ignores_internal():
+    fm = {
+        "src/app/page.tsx": GeneratedFile(
+            path="src/app/page.tsx",
+            content='<Image src="/images/hero.jpg" alt="" width={800} height={600} />\n',
+        ),
+    }
+    hosts = DeterministicWebExecutor._detect_external_image_hosts(fm)
+    assert len(hosts) == 0
+
+
+# ── Scaffold integrity: utils.ts safety net ────────────────────────────────
+def test_ensure_scaffold_integrity_creates_utils_ts():
+    """When src/lib/utils.ts is missing, _ensure_scaffold_integrity creates it."""
+    executor = DeterministicWebExecutor.__new__(DeterministicWebExecutor)
+    files = [
+        GeneratedFile(path="src/app/layout.tsx", content="export default function L({children}:{children:React.ReactNode}){return <html><body>{children}</body></html>;}"),
+        GeneratedFile(path="src/app/page.tsx", content="export default function P(){return null;}"),
+        GeneratedFile(path="package.json", content='{"name":"test","dependencies":{},"devDependencies":{},"scripts":{}}'),
+    ]
+    result = executor._ensure_scaffold_integrity(files)
+    utils = next((f for f in result if f.path == "src/lib/utils.ts"), None)
+    assert utils is not None
+    assert "function cn" in utils.content
+    assert "clsx" in utils.content
+
+
+def test_ensure_scaffold_integrity_replaces_broken_utils_stub():
+    """When src/lib/utils.ts is a broken stub, _ensure_scaffold_integrity replaces it."""
+    executor = DeterministicWebExecutor.__new__(DeterministicWebExecutor)
+    files = [
+        GeneratedFile(path="src/app/layout.tsx", content="export default function L({children}:{children:React.ReactNode}){return <html><body>{children}</body></html>;}"),
+        GeneratedFile(path="src/app/page.tsx", content="export default function P(){return null;}"),
+        GeneratedFile(path="package.json", content='{"name":"test","dependencies":{},"devDependencies":{},"scripts":{}}'),
+        GeneratedFile(path="src/lib/utils.ts", content="// Auto-generated stub for lib/utils\nexport default {};"),
+    ]
+    result = executor._ensure_scaffold_integrity(files)
+    utils = next((f for f in result if f.path == "src/lib/utils.ts"), None)
+    assert utils is not None
+    assert "function cn" in utils.content
+    assert "export default {}" not in utils.content
+
+
+def test_ensure_scaffold_integrity_preserves_valid_utils():
+    """When src/lib/utils.ts already has a real cn, _ensure_scaffold_integrity leaves it."""
+    executor = DeterministicWebExecutor.__new__(DeterministicWebExecutor)
+    custom_utils = (
+        'import { clsx } from "clsx";\n'
+        'import { twMerge } from "tailwind-merge";\n'
+        'export function cn(...args: any[]) { return twMerge(clsx(args)); }\n'
+        'export function formatDate(d: Date) { return d.toISOString(); }\n'
+    )
+    files = [
+        GeneratedFile(path="src/app/layout.tsx", content="export default function L({children}:{children:React.ReactNode}){return <html><body>{children}</body></html>;}"),
+        GeneratedFile(path="src/app/page.tsx", content="export default function P(){return null;}"),
+        GeneratedFile(path="package.json", content='{"name":"test","dependencies":{},"devDependencies":{},"scripts":{}}'),
+        GeneratedFile(path="src/lib/utils.ts", content=custom_utils),
+    ]
+    result = executor._ensure_scaffold_integrity(files)
+    utils = next((f for f in result if f.path == "src/lib/utils.ts"), None)
+    assert utils is not None
+    assert "formatDate" in utils.content
+
+
+# ── Scaffold integrity: remote patterns injection ──────────────────────────
+def test_ensure_scaffold_integrity_injects_remote_patterns():
+    """When files reference external image hosts, next.config.ts gets remotePatterns."""
+    executor = DeterministicWebExecutor.__new__(DeterministicWebExecutor)
+    files = [
+        GeneratedFile(path="src/app/layout.tsx", content="export default function L({children}:{children:React.ReactNode}){return <html><body>{children}</body></html>;}"),
+        GeneratedFile(path="src/app/page.tsx", content='import Image from "next/image";\nexport default function P(){return <Image src="https://images.unsplash.com/photo-123" alt="" width={800} height={600} />;}'),
+        GeneratedFile(path="package.json", content='{"name":"test","dependencies":{},"devDependencies":{},"scripts":{}}'),
+    ]
+    result = executor._ensure_scaffold_integrity(files)
+    config = next((f for f in result if f.path == "next.config.ts"), None)
+    assert config is not None
+    assert "remotePatterns" in config.content
+    assert "images.unsplash.com" in config.content
